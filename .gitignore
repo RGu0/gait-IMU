@@ -1,0 +1,16 @@
+# environments — recreated per worktree, never shared or cloud-synced
+.venv/
+node_modules/
+
+# build and cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+
+# governance context link (device-local)
+.project-context
+
+# OS noise
+.DS_Store

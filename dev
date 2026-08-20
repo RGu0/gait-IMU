@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Project command entrypoint. All governed commands (setup/test/lint/build)
+# run through here; see .ai-project/project.yaml.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+cmd="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
+
+case "$cmd" in
+  setup)
+    uv sync --locked
+    pnpm install --frozen-lockfile
+    ;;
+  test)
+    uv run --locked python -m pytest "$@"
+    pnpm run test
+    ;;
+  lint)
+    uv run --locked python -m ruff check . "$@"
+    pnpm run lint
+    ;;
+  build)
+    uv build "$@"
+    pnpm run build
+    ;;
+  *)
+    echo "usage: ./dev {setup|test|lint|build}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,4 @@
+# Workspace packages (apps/ and packages/ are created when the first one lands).
+packages:
+  - "apps/*"
+  - "packages/*"
