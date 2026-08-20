@@ -4,28 +4,60 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Node 侧与 Python 侧对称。
+#
+# `uv run --locked` 自己按 .python-version 解析解释器，不看调用方的 PATH，
+# 所以 Python 侧无论从哪个 shell 调用跑的都是同一个版本。裸 `pnpm` 没有这个
+# 性质 —— 它用 PATH 上第一个 node。本机另装的 Node 会把 .node-version 顶掉，
+# 而失败出现在 preflight 里，读起来像项目坏了，其实是 shell 环境不对。
+#
+# fnm exec 是 Node 侧的等价物。判定写得比"有 fnm 就用 fnm"更严：只有当 fnm
+# 解析出的版本确实等于 .node-version 时才走它。fnm 装了但没装这个版本、或解析
+# 出别的版本，都回退到 PATH —— 此时版本正确性由 preflight 单独守门，所以回退
+# 路径是被守住的，而不是无人负责的。不引入 fnm 硬依赖。
+node_via_fnm=no
+if command -v fnm >/dev/null 2>&1; then
+  if [ "$(fnm exec -- node --version 2>/dev/null)" = "v$(cat .node-version)" ]; then
+    node_via_fnm=yes
+  fi
+fi
+
+# 用函数而不是 ${runner[@]}：macOS 自带 bash 3.2，空数组在 set -u 下展开即报错。
+run_node() {
+  if [ "$node_via_fnm" = yes ]; then
+    fnm exec -- "$@"
+  else
+    "$@"
+  fi
+}
+
 cmd="${1:-}"
 if [ $# -gt 0 ]; then shift; fi
 
 case "$cmd" in
   setup)
     uv sync --locked
-    pnpm install --frozen-lockfile
+    run_node pnpm install --frozen-lockfile
     ;;
   test)
     uv run --locked python -m pytest "$@"
-    pnpm run test
+    run_node pnpm run test
     ;;
   lint)
     uv run --locked python -m ruff check . "$@"
-    pnpm run lint
+    run_node pnpm run lint
     ;;
   build)
     uv build "$@"
-    pnpm run build
+    run_node pnpm run build
+    ;;
+  node)
+    # 逃生舱：在本入口解析出的 Node 环境里跑任意命令，供排查用。
+    # 例：./dev node node --version / ./dev node pnpm why foo
+    run_node "$@"
     ;;
   *)
-    echo "usage: ./dev {setup|test|lint|build}" >&2
+    echo "usage: ./dev {setup|test|lint|build|node <cmd>...}" >&2
     exit 2
     ;;
 esac
