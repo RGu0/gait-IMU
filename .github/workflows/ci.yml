@@ -1,0 +1,80 @@
+name: CI
+
+# 每个 PR 与 main 上的每次推送都必须有自己的结论。完成门禁读的是 PR head
+# 上的 check，所以 pull_request 触发是必需的，不是可选的。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  # 同一分支上后推的 commit 取消前一次运行；main 不取消 —— main 的每个
+  # commit 都要留下自己的结论，被取消的运行不是结论。
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Node 版本取自 .node-version，不写死在这里 —— 写死会让仓库出现
+      # 第二个版本事实，两处迟早对不上。
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # 不传 version：pnpm/action-setup 读 package.json 的 packageManager，
+      # 同样避免第二个版本事实。
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          cache: true
+
+      # 不传 python-version：uv 自己读 .python-version 并按需下载解释器，
+      # 与本机 ./dev 的行为完全一致。
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - run: ./dev setup
+
+      # 这一步能抓什么、抓不到什么，值得说清楚，否则它会被当成比实际更强
+      # 的保证：
+      #
+      #   抓得到 —— 工具没有遵守 pin。setup-node 未能读取 node-version-file
+      #   而回退到 runner 默认 Node、action-setup 忽略 packageManager、
+      #   uv 因 requires-python 解析出与 .python-version 不同的解释器。
+      #   这些都会静默发生，日志里看不出来。
+      #
+      #   抓不到 —— pin 本身写错了。expected 与 actual 读自同一个文件，
+      #   两边必然一起变，所以这是同义反复的一半。想让它非同义反复，就得
+      #   在这里再写一份版本号，而那会让仓库出现第二个版本事实 —— 代价比
+      #   收益大。这一步守的是"工具是否听话"，不是"pin 是否正确"。
+      - name: 断言工具确实采用了仓库 pin 的版本
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          expected_node="v$(cat .node-version)"
+          actual_node="$(node --version)"
+          [ "$actual_node" = "$expected_node" ] \
+            || fail "node $actual_node 与 .node-version 要求的 $expected_node 不符"
+
+          expected_pnpm="$(node -p "require('./package.json').packageManager.split('@')[1]")"
+          actual_pnpm="$(pnpm --version)"
+          [ "$actual_pnpm" = "$expected_pnpm" ] \
+            || fail "pnpm $actual_pnpm 与 packageManager 要求的 $expected_pnpm 不符"
+
+          expected_python="$(cat .python-version)"
+          actual_python="$(uv run --locked python -c \
+            'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          [ "$actual_python" = "$expected_python" ] \
+            || fail "python $actual_python 与 .python-version 要求的 $expected_python 不符"
+
+          echo "node $actual_node / pnpm $actual_pnpm / python $actual_python"
+
+      - run: ./dev lint
+
+      - run: ./dev test
