@@ -37,9 +37,12 @@ establishes the structure the check will read.
 
 __version__ = "0.1.0"
 
-#: Layer packages, lowest dependency first. This tuple is the single
-#: declaration of what the package is made of: the layout test reads it, and
-#: the layering guard will read it rather than re-listing directories.
+#: Every layer package, in the order the contract presents them (§1). This is
+#: an inventory, not a dependency order: the dependencies form a DAG with two
+#: roots — ``core`` depends on nothing but numpy/scipy, ``config`` on nothing
+#: at all — and a flat tuple cannot express that. The graph is drawn in the
+#: module docstring above; ``layering-guard`` encodes it. The layout test
+#: reads this tuple as a set, which is all it is.
 LAYERS: tuple[str, ...] = (
     "device",
     "io",

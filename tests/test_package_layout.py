@@ -7,8 +7,10 @@ could be added silently and the layering guard, which reads the same tuple,
 would never look at it.
 """
 
+import ast
 import importlib
 import pkgutil
+from pathlib import Path
 
 import gait
 
@@ -32,10 +34,29 @@ def test_declared_layers_match_the_packages_on_disk():
     assert found == set(gait.LAYERS)
 
 
-def test_config_is_importable_and_depends_on_nothing():
+def test_config_is_importable():
     config = importlib.import_module("gait.config")
     assert config.__doc__
-    source = (gait.__path__[0] + "/config.py")
-    with open(source, encoding="utf-8") as handle:
-        body = handle.read()
-    assert "import gait" not in body, "config.py must not depend on any layer"
+
+
+def test_config_depends_on_no_layer():
+    """``config.py`` is readable by every layer, so it may depend on none.
+
+    Parsed rather than string-matched. A substring test for ``"import gait"``
+    passes for ``from gait import core`` — which is precisely the dependency
+    being forbidden — so it would report a clean config file while the rule
+    was being broken.
+    """
+    source = Path(gait.__file__).with_name("config.py")
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            # A relative import can only land inside gait, whatever it names.
+            imported.add("gait" if node.level else (node.module or ""))
+
+    offenders = sorted(
+        name for name in imported if name == "gait" or name.startswith("gait.")
+    )
+    assert not offenders, f"config.py must not depend on any layer: {offenders}"
