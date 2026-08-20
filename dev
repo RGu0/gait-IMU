@@ -45,6 +45,8 @@ case "$cmd" in
     ;;
   lint)
     uv run --locked python -m ruff check . "$@"
+    # 分层红线。ruff 管不了这条：它是项目自己的依赖方向约束，不是通用 lint 规则。
+    uv run --locked python tools/check_layering.py
     run_node pnpm run lint
     ;;
   build)

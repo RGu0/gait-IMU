@@ -20,3 +20,8 @@ packages = ["src/gait"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tools/ 不是包，也不该是 —— 它是仓库自己的检查脚本，不随 wheel 发布。
+# 让 pytest 把它加进 sys.path，好过在测试文件里手改 sys.path：后者会把
+# import 挤到文件中部，引出一串 noqa，而那些 noqa 在 ruff 默认规则集下
+# 又是“无用的 noqa”。
+pythonpath = ["tools"]
