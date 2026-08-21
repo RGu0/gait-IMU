@@ -12,6 +12,7 @@ import pytest
 
 from gait.contracts import (
     CONTRACT_VERSION,
+    FIELD_UNITS,
     MANDATORY_METADATA,
     ContractError,
     FootSeries,
@@ -292,9 +293,13 @@ def test_mandatory_metadata_matches_prd_list():
 
 
 def test_session_meta_records_the_contract_version():
-    """三个月后判断某份历史报告用的是哪版结构，靠的就是这个字段。"""
+    """三个月后判断某份历史报告用的是哪版结构，靠的就是这个字段。
+
+    这里不写字面版本号：字面量只由 `test_contract_version_records_the_unit_change`
+    一处持有，好让"升版本"始终是一个需要改那一处、因而必须想一想的动作。散在多处
+    的话，升版本就退化成批量替换。
+    """
     assert make_session_meta().contract_version == CONTRACT_VERSION
-    assert CONTRACT_VERSION == "1.0"
 
 
 def test_session_meta_has_no_subject_id_field():
@@ -319,3 +324,84 @@ def test_quality_fits_in_uint8():
     """quality 数组的 dtype 是 uint8，标志位不得溢出。"""
     every = Quality.SATURATED | Quality.INTERPOLATED | Quality.GAP_EDGE
     assert 0 <= int(every) <= np.iinfo(np.uint8).max
+
+
+# --- 单位（R2：SI） ---------------------------------------------------------
+
+
+def test_angular_velocity_is_si():
+    """R2 的核心：角速度是 rad/s，不是 deg/s。
+
+    与 wt901 的 `ImuSample.gyro` 对齐，也是 ESKF/INS 本来就工作的单位。少一次
+    转换就少一处忘记转换的机会 —— 而转换错了不报错，只出错数。
+    """
+    assert FIELD_UNITS["FootSeries.gyr"] == "rad/s"
+
+
+def test_gyro_bias_follows_the_gyro():
+    """`bg` 是陀螺零偏，它的单位必须跟着陀螺走。
+
+    单独列一条，是因为改单位时最容易漏掉的就是这种"跟随字段"：`gyr` 显眼，
+    `bg` 不显眼，而两者不一致会让零偏补偿静默地错 57.3 倍。
+    """
+    assert FIELD_UNITS["NavResult.bg"] == FIELD_UNITS["FootSeries.gyr"] == "rad/s"
+
+
+def test_strike_angle_is_the_only_degree_field():
+    """混用单位是真实风险，所以把"只有这一处"钉死。
+
+    `strike_angle` 保持 deg 是有意的：它是面向报告读者的指标，不是算法中间量。
+    但一个例外容易变成两个、三个 —— 任何人再往表里加 deg，这条会失败并逼他解释。
+    """
+    in_degrees = sorted(name for name, unit in FIELD_UNITS.items() if unit == "deg")
+    assert in_degrees == ["GaitCycle.strike_angle"]
+
+
+#: 没有物理量纲的字段，逐个写明理由。放在测试里而不是 contracts.py 里，是因为
+#: 它是校验用的簿记，不是公开契约的一部分。
+NOT_DIMENSIONAL = {
+    # 未换算的 int16 码值，没有物理单位
+    "RawFrame.acc_raw", "RawFrame.gyr_raw", "RawFrame.ang_raw",
+    "RawFrame.t_host",  # 主机接收时刻，秒，但它不是物理量而是时钟读数
+    "RawFrame.saturated",
+    "FootSeries.label", "FootSeries.quality", "FootSeries.segments",
+    "NavResult.zupt", "NavResult.stances", "NavResult.degraded",
+    "GaitCycle.foot", "GaitCycle.idx", "GaitCycle.valid", "GaitCycle.confidence",
+}
+
+
+def test_every_dimensional_field_is_in_the_unit_table():
+    """反方向：结构上新增一个带量纲的字段而忘了登记单位，必须失败。
+
+    只查"表里的名字都存在"是不够的 —— 那种单向检查会让新字段静默地没有单位，
+    而没有单位的数值在跨模块传递时就是一个待发生的错误。
+    """
+    import dataclasses
+
+    missing = []
+    for structure in (RawFrame, FootSeries, NavResult, GaitCycle):
+        for f in dataclasses.fields(structure):
+            key = f"{structure.__name__}.{f.name}"
+            if key in NOT_DIMENSIONAL or key in FIELD_UNITS:
+                continue
+            missing.append(key)
+    assert missing == [], f"这些字段既未登记单位、也未声明无量纲：{missing}"
+
+
+def test_unit_table_names_only_real_fields():
+    """正方向：表里不得出现结构上不存在的字段。"""
+    import dataclasses
+
+    known = {
+        f"{s.__name__}.{f.name}"
+        for s in (RawFrame, FootSeries, NavResult, GaitCycle)
+        for f in dataclasses.fields(s)
+    }
+    stale = sorted(set(FIELD_UNITS) - known)
+    assert stale == [], f"单位表引用了不存在的字段：{stale}"
+
+
+def test_contract_version_records_the_unit_change():
+    """单位变更改的是数值的含义而非结构，没有版本号就没人能把两代会话分开。"""
+    assert CONTRACT_VERSION == "1.1"
+    assert make_session_meta().contract_version == "1.1"

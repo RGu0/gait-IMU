@@ -34,15 +34,53 @@ from typing import Any, Final, Literal
 
 import numpy as np
 
-#: 契约版本。§3 开头写明："任何一个变更都要同步改版本号"。跟随契约文档 v1.0。
+#: 契约版本。§3 开头写明："任何一个变更都要同步改版本号"。
 #: 它会进入 SessionMeta，因而进入每一份历史会话 —— 三个月后判断某份报告用的是
 #: 哪版结构，靠的就是这个数。
-CONTRACT_VERSION: Final[str] = "1.0"
+#:
+#: 1.1（R2）：角速度由 deg/s 改为 rad/s。**这次必须升版本**，因为改的是数值的
+#: 含义而不是结构：一份 1.0 的历史会话与一份 1.1 的会话，同一个 gyr 数组相差
+#: 57.3 倍，而两者的字段名、形状、dtype 完全一样。没有这个版本号，就没有任何
+#: 东西能把它们分开。
+CONTRACT_VERSION: Final[str] = "1.1"
 
 FootLabel = Literal["L", "R"]
 Confidence = Literal["normal", "degraded", "invalid"]
 
 _CONFIDENCE_VALUES: Final[frozenset[str]] = frozenset({"normal", "degraded", "invalid"})
+
+#: 每个带物理量纲的字段的单位。R2 把角速度统一到 SI 之后，这张表就是"单位"这件
+#: 事的唯一声明 —— 写在注释里的单位无法被断言，也就必然漂移。
+#:
+#: 全表 SI，**只有 `GaitCycle.strike_angle` 是 deg**，因为它是面向报告读者的指标
+#: 而非算法中间量。混用单位是个真实的风险，所以有一条测试专门断言"deg 只出现这
+#: 一次" —— 任何人再往表里加 deg，那条测试会失败并逼他解释。
+#:
+#: `RawFrame` 的三个字段不在表内：它们是未换算的 int16 码值，没有物理单位。
+FIELD_UNITS: Final[dict[str, str]] = {
+    "FootSeries.t": "s",
+    "FootSeries.acc": "m/s^2",
+    "FootSeries.gyr": "rad/s",
+    "FootSeries.fs": "Hz",
+    "NavResult.t": "s",
+    "NavResult.q": "1",  # 四元数无量纲
+    "NavResult.v": "m/s",
+    "NavResult.p": "m",
+    "NavResult.bg": "rad/s",  # 陀螺零偏，随陀螺一起改
+    "NavResult.ba": "m/s^2",
+    "NavResult.score": "1",
+    "GaitCycle.t_ic": "s",
+    "GaitCycle.t_to": "s",
+    "GaitCycle.t_ic_next": "s",
+    "GaitCycle.stride_length": "m",
+    "GaitCycle.stride_time": "s",
+    "GaitCycle.gait_speed": "m/s",
+    "GaitCycle.stance_time": "s",
+    "GaitCycle.swing_time": "s",
+    "GaitCycle.stance_ratio": "%",
+    "GaitCycle.toe_clearance": "m",
+    "GaitCycle.strike_angle": "deg",
+}
 
 #: SessionMeta 中 PRD v1.2 §6.1 明确要求"强制包含"的字段。列在这里而不是散在
 #: 校验代码里，是为了让"强制"这件事有一处可读的声明。
@@ -162,9 +200,9 @@ class FootSeries:
     """
 
     label: FootLabel
-    t: np.ndarray  # (n,) 统一时基下的时刻
+    t: np.ndarray  # (n,) s，统一时基下的时刻
     acc: np.ndarray  # (n,3) m/s²，已标定补偿 + 已重排到足部系
-    gyr: np.ndarray  # (n,3) deg/s
+    gyr: np.ndarray  # (n,3) rad/s（R2：SI，见 FIELD_UNITS）
     quality: np.ndarray  # (n,) uint8 位掩码，见 Quality
     segments: list[tuple[int, int]]  # 连续有效段，空洞在此切分
     fs: float
@@ -192,12 +230,12 @@ class NavResult:
     要靠它，所以和状态量一样是契约的一部分。
     """
 
-    t: np.ndarray  # (n,)
+    t: np.ndarray  # (n,) s
     q: np.ndarray  # (n,4) 姿态四元数 足部系→导航系
     v: np.ndarray  # (n,3) m/s 导航系
     p: np.ndarray  # (n,3) m 导航系
-    bg: np.ndarray  # (n,3) 陀螺零偏估计
-    ba: np.ndarray  # (n,3) 加计零偏估计
+    bg: np.ndarray  # (n,3) rad/s 陀螺零偏估计（随陀螺一起改为 SI）
+    ba: np.ndarray  # (n,3) m/s² 加计零偏估计
     zupt: np.ndarray  # (n,) bool
     stances: list[tuple[int, int]]  # 支撑相区间
     degraded: np.ndarray  # (n,) bool 使用了软零速
