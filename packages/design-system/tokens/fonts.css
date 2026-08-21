@@ -1,0 +1,7 @@
+/* Steady Health — Webfonts
+   SUBSTITUTIONS (no original font binaries were provided):
+   · Source Han Sans SC → Noto Sans SC (the open-source release of the same
+     Adobe/Google typeface family; visually identical).
+   · Inter → Inter (unchanged).
+   Served from Google Fonts. Swap for licensed local binaries in production. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap");

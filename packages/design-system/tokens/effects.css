@@ -1,0 +1,24 @@
+/* Steady Health — Shadows, overlays, motion, focus
+   Shadows are extremely light; hierarchy comes from whitespace + borders. */
+:root {
+  /* ── Shadows ──────────────────────────────────────── */
+  --shadow-card: 0 1px 3px rgb(15 23 42 / 0.06);
+  --shadow-dialog: 0 8px 24px rgb(15 23 42 / 0.12);
+
+  /* ── Dialog / Toast ───────────────────────────────── */
+  --overlay: rgba(15, 23, 42, 0.4);
+  --dialog-max-width: 480px;
+  --toast-duration: 4000ms; /* @kind other */
+  --toast-offset: 24px;
+  --btn-spinner-size: 20px;
+
+  /* ── Motion — 150–200ms ease-out, state & page only ── */
+  --motion-fast: 150ms ease-out; /* @kind other */
+  --motion-base: 200ms ease-out; /* @kind other */
+  --loading-delay: 300ms; /* @kind other */        /* below this, show no loading */
+  --loading-named-after: 2000ms; /* @kind other */ /* above this, must name the task */
+
+  /* ── Focus ────────────────────────────────────────── */
+  --focus-ring: 2px solid #2569BC; /* @kind other */
+  --focus-offset: 2px;
+}

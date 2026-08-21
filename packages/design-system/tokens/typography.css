@@ -1,0 +1,18 @@
+/* Steady Health — Typography
+   UI: Noto Sans SC (Source Han Sans SC). Numerals: Inter w/ tabular-nums.
+   Screen minimum 14px; 12px only in printed report footer. */
+:root {
+  --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-num: "Inter", var(--font-ui); /* numerals; enable tabular-nums */
+  --font-print: "Noto Sans SC", "Source Han Sans SC", sans-serif;
+
+  /* shorthand font tokens (weight size/line-height family) */
+  --text-display: 600 32px/40px var(--font-ui);
+  --text-h1: 600 28px/36px var(--font-ui);
+  --text-h2: 600 24px/32px var(--font-ui);
+  --text-h3: 600 20px/28px var(--font-ui);
+  --text-body-lg: 400 18px/28px var(--font-ui);
+  --text-body: 400 16px/24px var(--font-ui);
+  --text-secondary-size: 400 14px/22px var(--font-ui);
+  --text-countdown: 700 96px/1 var(--font-num);
+}

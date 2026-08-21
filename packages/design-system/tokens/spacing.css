@@ -1,0 +1,26 @@
+/* Steady Health — Spacing, sizing, radii (8px system) */
+:root {
+  /* ── Spacing (8px system) ─────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ── Sizing ───────────────────────────────────────── */
+  --size-btn-primary: 56px;    /* first-screen CTA up to 64px, min 48px */
+  --size-btn-secondary: 48px;
+  --size-input: 48px;
+  --size-touch-min: 44px;
+  --size-table-row: 56px;
+  --content-max-reading: 1120px;
+  --content-max-wizard: 720px;
+
+  /* ── Radii ────────────────────────────────────────── */
+  --radius-control: 8px;  /* inputs, buttons */
+  --radius-card: 12px;    /* cards */
+  --radius-pill: 999px;   /* status pills */
+}

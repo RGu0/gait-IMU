@@ -1,0 +1,20 @@
+{
+  "name": "@gait/design-system",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Steady Health design system — mirrored from Claude Design as a build input.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./styles.css": "./styles.css",
+    "./tokens/*.css": "./tokens/*.css",
+    "./components/*": "./components/*"
+  },
+  "files": [
+    "index.js",
+    "styles.css",
+    "tokens",
+    "components"
+  ]
+}

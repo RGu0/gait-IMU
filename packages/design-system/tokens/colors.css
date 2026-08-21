@@ -1,0 +1,56 @@
+/* Steady Health — Colors
+   Pulse Blue brand + Slate neutrals + semantic + heatmap viz scale */
+:root {
+  /* ── Brand: Pulse Blue (medical tech blue) ───────── */
+  --brand-primary: #2569BC;        /* text/buttons, 5.5:1 on white */
+  --brand-primary-hover: #1D549A;
+  --brand-bright: #3B8BEF;         /* large graphics only, never body text */
+  --brand-primary-subtle: #EFF5FC;
+  --brand-primary-border: #B7D3F2;
+  --accent-cyan: #17A2C4;          /* data accent; also the right-foot identity, see --side-right */
+
+  /* ── Brand alpha layers (hover / selected / drag) ── */
+  --brand-alpha-1: rgba(37, 105, 188, 0.06);
+  --brand-alpha-2: rgba(37, 105, 188, 0.10);
+  --brand-alpha-3: rgba(37, 105, 188, 0.14);
+
+  /* ── Side identity (dual-ankle IMU) ──────────────── */
+  /* Left/right is carried by THREE channels AT ONCE: the character 左/右, the
+     shape (left = rounded square, right = circle) and these two colors.
+     NEVER distinguish the two feet by color alone — a color-blind operator, a
+     grayscale A4 print and a thumbnail must all still read correctly. Charts
+     add a fourth channel: left solid, right dashed. */
+  --side-left: #2569BC;            /* = --brand-primary */
+  --side-right: #17A2C4;           /* = --accent-cyan, use widened to this role */
+
+  /* ── Neutrals (Slate) ────────────────────────────── */
+  --bg-page: #F8FAFC;
+  --bg-surface: #FFFFFF;
+  --bg-sunken: #F1F5F9;
+  --border-default: #E2E8F0;
+  --border-strong: #CBD5E1;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-disabled: #94A3B8;
+  --text-on-brand: #FFFFFF;
+
+  /* ── Semantic: ready / done (success) ────────────── */
+  --success-fg: #187A4D;
+  --success-bg: #EBF7F0;
+  --success-border: #BFE5D0;
+
+  /* ── Semantic: attention, can continue (warning) ─── */
+  --warning-fg: #96600D;
+  --warning-bg: #FDF6E6;
+  --warning-border: #F2DFAE;
+
+  /* ── Semantic: block / fail / danger ─────────────── */
+  --danger-fg: #C23B3B;
+  --danger-bg: #FCEFEF;
+  --danger-border: #F0C6C6;
+
+  /* ── Semantic: processing / info (brand family) ──── */
+  --info-fg: #2569BC;
+  --info-bg: #EFF5FC;
+  --info-border: #B7D3F2;
+}
