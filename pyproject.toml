@@ -3,7 +3,11 @@ name = "gait-imu"
 version = "0.1.0"
 description = "IMU-based gait analysis"
 requires-python = ">=3.12"
-dependencies = []
+# numpy 是首个运行时依赖。契约 §3 的 FootSeries / NavResult 以 np.ndarray
+# 为字段类型，绕不开；ESKF、INS、步态分析后续也全部建立在它之上。
+dependencies = [
+    "numpy>=2.1",
+]
 
 [dependency-groups]
 dev = [
