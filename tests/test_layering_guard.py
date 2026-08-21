@@ -81,11 +81,70 @@ def test_nested_modules_are_scanned(tmp_path):
     assert "deep.py" in reported[0]
 
 
+THIRD_PARTY_VIOLATIONS = [
+    pytest.param("import bleak\n", "bleak", id="import bleak"),
+    pytest.param("import wt901\n", "wt901", id="import wt901"),
+    pytest.param("from wt901 import ImuSample\n", "wt901", id="from wt901 import x"),
+    pytest.param(
+        "from wt901.models import ImuSample\n",
+        "wt901",
+        id="from wt901.models import x（只有首段能匹配）",
+    ),
+    pytest.param("import bleak.backends\n", "bleak", id="import bleak.子模块"),
+]
+
+
+@pytest.mark.parametrize(("source", "offender"), THIRD_PARTY_VIOLATIONS)
+def test_forbidden_third_party_packages_are_caught(tmp_path, source, offender):
+    """契约 §2 点名的 bleak，以及它的来源 wt901。
+
+    `from wt901.models import X` 是这里最容易漏的一种：它的前两段是
+    `wt901.models`，只比对前两段会整个放过去。
+    """
+    package = build_package(tmp_path, source)
+    reported = check_layering.scan(
+        package, "core", {"gait.io", "bleak", "wt901"}
+    )
+    assert reported, f"未能抓到第三方违规：{source!r}"
+    assert offender in reported[0]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("import numpy as np\n", id="numpy 是允许的"),
+        pytest.param("from scipy import signal\n", id="scipy 是允许的"),
+        pytest.param("import wt901x\n", id="名字相近但不是它"),
+    ],
+)
+def test_allowed_third_party_is_not_flagged(tmp_path, source):
+    """禁止的是具体的包，不是按前缀一刀切。"""
+    package = build_package(tmp_path, source)
+    assert check_layering.scan(package, "core", {"bleak", "wt901"}) == []
+
+
+def test_one_violation_is_reported_once(tmp_path):
+    """`from wt901 import X` 同时产出 wt901 与 wt901.X，两者都命中同一条禁令。
+
+    报两遍不会让检查更严，只会让它看起来坏了 —— 而一个看起来坏了的守卫，下一个
+    人的第一反应是关掉它。
+    """
+    package = build_package(tmp_path, "from wt901 import ImuSample\n")
+    reported = check_layering.scan(package, "core", {"wt901"})
+    assert len(reported) == 1
+
+
 def test_forbidden_list_comes_from_the_package_declaration():
     """禁止清单必须来自 gait 自身的声明，而不是检查脚本里另抄一份。"""
     assert check_layering.declared_forbidden() == {
         f"gait.{name}" for name in gait.CORE_FORBIDDEN_IMPORTS
-    }
+    } | set(gait.CORE_FORBIDDEN_PACKAGES)
+
+
+def test_third_party_red_line_names_bleak():
+    """契约 §2 原文点名 bleak；wt901 是把它拖进来的那条路径。"""
+    assert "bleak" in gait.CORE_FORBIDDEN_PACKAGES
+    assert "wt901" in gait.CORE_FORBIDDEN_PACKAGES
 
 
 def test_drifted_declaration_fails_instead_of_passing_quietly(monkeypatch):

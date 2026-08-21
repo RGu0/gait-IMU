@@ -59,6 +59,15 @@ LAYERS: tuple[str, ...] = (
     "cli",
 )
 
-#: Packages that may not appear in a ``core/`` import statement. Stated here
-#: so the rule has one home; ``layering-guard`` turns it into a check.
+#: 本包内不得出现在 ``core/`` import 语句中的层。声明在这里，规则只有一处家。
 CORE_FORBIDDEN_IMPORTS: tuple[str, ...] = ("io", "device", "sync")
+
+#: 不得出现在 ``core/`` import 语句中的第三方包。
+#:
+#: 契约 §2 的原文就点名了 ``bleak``："任何时候发现 core 里出现了 open() 或
+#: bleak，说明分层被破坏了"。在 wt901 进入依赖树之前这只是假想防御 —— 一个
+#: 装不上的包本来就 import 不了。现在它真实存在，这条才成为能被违反的规则。
+#:
+#: ``wt901`` 与 ``bleak`` 分列而不是只写 ``wt901``：前者是我们选的适配对象，
+#: 后者是它的传递依赖，两条路径都能把 BLE 拖进纯函数库。
+CORE_FORBIDDEN_PACKAGES: tuple[str, ...] = ("bleak", "wt901")
