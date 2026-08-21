@@ -7,7 +7,26 @@ requires-python = ">=3.12"
 # 为字段类型，绕不开；ESKF、INS、步态分析后续也全部建立在它之上。
 dependencies = [
     "numpy>=2.1",
+    # 硬件接口层不在本仓库重复实现：0x55 帧解析、FF AA 指令封装、寄存器表、
+    # BLE 扫描/连接/重连、多设备合流、电量遥测与回放传输都由 wt901 提供，
+    # 它的范围外声明（不做姿态融合/步态分析/持久化/时钟同步算法）与本仓库互补。
+    #
+    # 来源见下方 [tool.uv.sources]。这里只写普通包名，不写 direct reference：
+    # direct reference 会被烘进构建出的 wheel 元数据，拿到 wheel 的人就得到一个
+    # 改不掉的 git URL，很多索引还直接拒收。[tool.uv.sources] 是解析期的来源
+    # 声明，不进 wheel。
+    "wt901",
 ]
+
+[tool.uv.sources]
+# wt901 未发布到 PyPI、无 tag、无 release，因此按 commit 钉住。
+#
+# 钉 commit 而不是分支：分支引用会让"同一份 uv.lock"在不同时刻装出不同的代码，
+# 而锁文件的全部意义就是排除这种可能。换版本 = 改这里的 rev + 重新 uv lock，
+# 是一次显式的、会进 diff 的动作。
+#
+# 12b0f002 = "RAY-189 [dual-device-200hz] 双设备 200 Hz 实测并定论"。
+wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "12b0f002d6b89c97896c823b4b07b3de09dd3fd3" }
 
 [dependency-groups]
 dev = [

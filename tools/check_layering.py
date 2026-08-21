@@ -64,24 +64,46 @@ def scan(package_root: Path, layer: str, forbidden: set[str]) -> list[str]:
     `forbidden` 是绝对点分名的集合，例如 {"gait.io", "gait.device"}。
     """
     reported: list[str] = []
+    # 同一行的同一个违规只报一次。`from wt901 import ImuSample` 会同时产出
+    # "wt901" 与 "wt901.ImuSample"，两者都命中单段的 "wt901" —— 报两遍不会让
+    # 检查更严，只会让它看起来坏了。
+    seen: set[tuple[str, int, str]] = set()
     for path in sorted((package_root / layer).rglob("*.py")):
         parts = path.relative_to(package_root.parent).parts[:-1]
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for lineno, name in _imported_modules(tree, parts):
-            top = ".".join(name.split(".")[:2])
-            if top in forbidden:
-                reported.append(f"{path}:{lineno}: {package_root.name}.{layer} 不得 import {top}")
+            segments = name.split(".")
+            # 同时比对首段与前两段。本包内的层要两段（gait.io），第三方包只有
+            # 一段（bleak）；而 `from wt901.models import X` 的前两段是
+            # wt901.models，只看前两段会整个漏掉它。
+            candidates = {segments[0], ".".join(segments[:2])}
+            hits = candidates & forbidden
+            if hits:
+                # 取最长的那个匹配：报 gait.io 比报 gait 有用。
+                offender = max(hits, key=len)
+                key = (str(path), lineno, offender)
+                if key in seen:
+                    continue
+                seen.add(key)
+                reported.append(
+                    f"{path}:{lineno}: {package_root.name}.{layer} 不得 import {offender}"
+                )
     return reported
 
 
 def declared_forbidden() -> set[str]:
-    """禁止清单，来自包自身的声明，并校验它没有和 LAYERS 漂移。"""
+    """禁止清单，来自包自身的两处声明，并校验层清单没有和 LAYERS 漂移。
+
+    两个来源分列是因为它们的失效方式不同：本包内的层写错会与 ``LAYERS`` 漂移，
+    可以被校验出来；第三方包名写错只会让检查静默失效，没有可比对的第二处真相。
+    """
     unknown = set(gait.CORE_FORBIDDEN_IMPORTS) - set(gait.LAYERS)
     if unknown:
         # 禁止清单里出现了不存在的层，说明两个声明已经漂移。此时"没有违规"
         # 是无意义的结论，必须当成失败而不是通过。
         raise ValueError(f"CORE_FORBIDDEN_IMPORTS 含有不在 LAYERS 中的层: {sorted(unknown)}")
-    return {f"gait.{name}" for name in gait.CORE_FORBIDDEN_IMPORTS}
+    layers = {f"gait.{name}" for name in gait.CORE_FORBIDDEN_IMPORTS}
+    return layers | set(gait.CORE_FORBIDDEN_PACKAGES)
 
 
 def main() -> int:
