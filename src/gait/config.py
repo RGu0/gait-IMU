@@ -36,6 +36,8 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.5（RAY-210 `integrity-gaps`）：`AlgoConfig` 增加空洞判据与到达率分级阈值。
+#:
 #: 1.4（RAY-209 `host-timebase`）：`AlgoConfig` 增加主机侧时基的四个参数。
 #:
 #: 1.3（RAY-205 `dualfoot-constraint`）：`AlgoConfig` 增加最大足间距、双支撑期与
@@ -50,7 +52,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.4"
+CONFIG_VERSION: Final[str] = "1.5"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -283,6 +285,23 @@ class AlgoConfig:
     #: 整段噪声大得多，所以它是一个**保守**的读数：分窗都稳，整段必然更稳。
     sync_stability_window_samples: int = 4000
 
+    # ── 数据完整性（RAY-210）。PRD §6.1 ────────────────────────────────────
+
+    #: 空洞判据：估计丢失超过这么多样本就切分数据段。**PRD §6.1 写死的是 3。**
+    #:
+    #: 它同时是"绝不插值续算"那条规则的门槛。之所以定得这么低：惯导积分对虚假数据
+    #: 极度敏感，而丢 3 个样本（15 ms @200 Hz）已经足够让一步的速度积分跑偏，且
+    #: 不会有任何东西报错。
+    integrity_gap_samples: int = 3
+    #: 到达率的分级阈值。低于 `warn` 标 degraded，低于 `unusable` 标 unusable。
+    #:
+    #: **这两个数 PRD 没有给。** PRD §6.1 只说"分级告警"，§7 给的 70% 是会话级有效
+    #: 时长的判据、不是到达率的。这里的取值是暂定的工程判断：98% 意味着每秒丢不到
+    #: 4 个样本（一个包的量级），90% 意味着每秒丢 20 个（一整步的支撑相都可能受损）。
+    #: 真实取值待 RAY-200（V2 双设备 30 分钟压测）给出实际的丢包分布。
+    integrity_rate_warn: float = 0.98
+    integrity_rate_unusable: float = 0.90
+
     version: str = CONFIG_VERSION
 
     def __post_init__(self) -> None:
@@ -324,8 +343,21 @@ class AlgoConfig:
             "dualfoot_double_support_max_s",
             "dualfoot_flight_max_s",
             "sync_packet_gap_fraction",
+            "integrity_rate_warn",
+            "integrity_rate_unusable",
         ):
             _positive(getattr(self, name), name)
+        if self.integrity_gap_samples < 1:
+            raise ConfigError(
+                f"integrity_gap_samples 至少为 1，收到 {self.integrity_gap_samples}。"
+                "取 0 表示任何一个采样周期的空白都算空洞，而 BLE 抖动本来就有那个量级。"
+            )
+        if not self.integrity_rate_unusable < self.integrity_rate_warn <= 1.0:
+            raise ConfigError(
+                f"到达率阈值必须满足 unusable < warn ≤ 1，收到 "
+                f"{self.integrity_rate_unusable} 与 {self.integrity_rate_warn}。"
+                "反过来会让 degraded 永远比 unusable 更严，分级失去意义。"
+            )
         for name in ("sync_minfilter_window_samples", "sync_stability_window_samples"):
             if getattr(self, name) < 2:
                 raise ConfigError(
