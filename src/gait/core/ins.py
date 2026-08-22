@@ -158,8 +158,10 @@ def propagate(
     """
     if not dt > 0:
         raise InsError(f"dt 必须为正，收到 {dt}")
-    specific_force = np.asarray(acc, dtype=np.float64)
-    omega = np.asarray(gyr, dtype=np.float64)
+    # 形状在这里就报，而不是等 quaternion.rotate 去报。那边只知道自己收到了一个
+    # 名叫 `v` 的东西，报出来的名字对调用方毫无指向性。
+    specific_force = _as_measurement(acc, "acc")
+    omega = _as_measurement(gyr, "gyr")
 
     rotation_vector = omega * dt
     q_next = quat.normalize(quat.multiply(state.q, quat.from_rotation_vector(rotation_vector)))
@@ -267,6 +269,14 @@ def mechanize(
     p[1:] = p[0] + np.cumsum(delta_p, axis=0)
 
     return q, v, p
+
+
+def _as_measurement(value: np.ndarray, name: str) -> np.ndarray:
+    """单个采样的三轴测量值。"""
+    array = np.asarray(value, dtype=np.float64)
+    if array.shape != (3,):
+        raise InsError(f"{name} 应为 (3,)，收到 shape={array.shape}")
+    return array
 
 
 def _as_initial(value: np.ndarray | None, name: str) -> np.ndarray:

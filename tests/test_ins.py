@@ -228,6 +228,22 @@ class TestSampleAlignment:
         for before, after in zip(baseline, perturbed, strict=True):
             assert np.array_equal(before, after)
 
+    def test_a_single_sample_yields_only_the_initial_state(self):
+        """一个采样构不成任何积分区间，但也不是错误 —— 空洞切分会切出这种段。
+
+        契约要求各数组与时间轴等长，所以这里必须返回长度 1 而不是长度 0 或报错。
+        """
+        q, v, p = ins.mechanize(
+            np.array([[0.0, 0.0, ins.GRAVITY_STANDARD]]),
+            np.zeros((1, 3)),
+            DT,
+            q0=quat.identity(),
+            v0=np.array([0.5, 0.0, 0.0]),
+        )
+        assert q.shape == (1, 4)
+        assert np.allclose(v[0], [0.5, 0.0, 0.0])
+        assert np.allclose(p[0], 0.0)
+
     def test_propagate_and_mechanize_agree(self):
         """逐步接口与整段接口必须给出同一个答案 —— ESKF 用前者，回归测试用后者。"""
         rng = np.random.default_rng(7)
@@ -309,3 +325,9 @@ class TestRejections:
         state = ins.InsState(q=quat.identity(), v=np.zeros(3), p=np.zeros(3))
         with pytest.raises(ins.InsError):
             ins.propagate(state, np.zeros(3), np.zeros(3), 0.0, ins.gravity_vector())
+
+    def test_propagate_names_the_offending_argument(self):
+        """错的是 `acc`，报出来就得说 `acc` —— 让 quaternion 层去报会说成 `v`。"""
+        state = ins.InsState(q=quat.identity(), v=np.zeros(3), p=np.zeros(3))
+        with pytest.raises(ins.InsError, match="acc"):
+            ins.propagate(state, np.zeros(2), np.zeros(3), DT, ins.gravity_vector())
