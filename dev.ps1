@@ -12,6 +12,17 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
+# 本仓库的工具链输出中文（检查脚本的提示、pytest 的用例名、错误信息），而 Windows 上
+# Python 的 stdout 在管道下用遗留代码页（实测 cp1252），打印中文直接 UnicodeEncodeError。
+#
+# 这不是显示问题，是崩溃：RAY-258 首次在 windows-latest 上运行 dev.ps1 时，分层红线检查
+# 炸在它自己的**成功**消息上 —— 也就是说仓库干净时也会失败。该检查自 RAY-192 合并起在
+# Windows 上就完全不可用，只是没有 Windows CI 所以无人知道。
+#
+# 在入口设 PYTHONUTF8 而不是把消息改成英文：根因是平台默认编码，不是消息的语言；改语言
+# 只挡得住我们自己的脚本，挡不住 pytest 与 ruff 的输出。
+$env:PYTHONUTF8 = "1"
+
 function Invoke-Step {
     param([string]$Exe, [string[]]$StepArgs)
     & $Exe @StepArgs

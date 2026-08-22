@@ -31,6 +31,13 @@ from pathlib import Path
 
 import gait
 
+# 入口（dev / dev.ps1）已设 PYTHONUTF8，但直接 `python tools/check_layering.py` 调试时
+# 不经入口。本脚本的输出是中文，因此自己也保证一次 —— 两处覆盖的场景不同，不是冗余：
+# 入口管的是 pytest、ruff 这些我们不控制的工具，这里管的是本脚本自己。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = REPO_ROOT / "src" / "gait"
 GUARDED_LAYER = "core"
