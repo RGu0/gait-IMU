@@ -13,14 +13,16 @@ R2 决定设备侧采用外部库 `wt901`：输出速率、带宽、寄存器表
 `RegisterAccess` 表达，`SessionMeta.config_snapshot` 直接取自其 `applied_writes`。
 在这里再写一份寄存器映射，就是把设备知识散回业务仓库 —— 引入那个库的初衷正是不这么做。
 
-## 数值默认值是结构占位，不是标定结果
+## 数值默认值是暂定值，不是标定结果
 
-`AlgoConfig` 的阈值与窗口长度**尚未标定**。它们的真实取值属于 RAY-203（自适应零速检测
-与低速/病理预设）与 RAY-204（ESKF）。此处给出的是能让结构成立、让预设机制可测的占位值，
-每一个都在注释里标了归属。
+`AlgoConfig` 的阈值与窗口长度**未经真机标定**。RAY-203 之后它们不再是纯占位：每个数
+都有一条物理依据（BS-BT91 的噪声量级、整体设计 §5.5 给出的窗口区间、走路支撑相时长），
+并在 RAY-206 的合成数据上验证过检出率与误检率。但合成数据的支撑相是**精确静止**的，
+真实足部不是 —— 所以这些数只说明"这一组取值在干净数据上工作"，不说明"这是这台设备的
+最优阈值"。真实取值待 RAY-207（Allan 方差与六面法标定）与 RAY-230（真机 V1）。
 
-因此本模块的测试不断言具体数字，而断言**关系**：低速预设的窗口必须更长、阈值必须更松、
-ZARU 必须强制开启（PRD §7 的原话）。关系在标定之后依然成立，数字不会。
+因此本模块的测试仍然不断言具体数字，而断言**关系**：低速预设的窗口必须更长、阈值必须
+更松、ZARU 必须强制开启（PRD §7 的原话）。关系在标定之后依然成立，数字不会。
 """
 
 from __future__ import annotations
@@ -33,7 +35,13 @@ from typing import Any, Final, Literal
 #:
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
-CONFIG_VERSION: Final[str] = "1.0"
+#:
+#: 1.1（RAY-203 `zupt-detector`）：`AlgoConfig` 增加 C2/C4 方差判据、GLRT 判据及其
+#: 噪声模型、检测用低通截止、最短支撑相长度与软零速降级参数。**新增字段也要升版本**：
+#: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
+#: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
+#: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
+CONFIG_VERSION: Final[str] = "1.1"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -138,6 +146,32 @@ class AlgoConfig:
     zupt_acc_threshold: float = 0.35
     #: 角速度幅值判据阈值，rad/s（R2：全链路 SI）。占位，待 RAY-203 标定。
     zupt_gyr_threshold: float = 0.30
+    #: C2：窗口内加速度的方差判据，(m/s²)²。整体设计 §5.5.2 的 γ2 —— "无冲击、无振动"。
+    #: 与 C1 分工不同：C1 看均值偏离重力多少，C2 看窗口内抖不抖。一个匀速平移的足部
+    #: 能骗过 C1（比力仍等于重力）但骗不过 C2。
+    zupt_acc_variance_threshold: float = 0.15
+    #: C4：窗口内角速度的方差判据，(rad/s)²。γ4。
+    zupt_gyr_variance_threshold: float = 0.02
+    #: C5：GLRT 统计量的判据。γ5，无量纲 —— 它已经被下面两个噪声标准差归一化过。
+    #: 粗筛（C1–C4）通过之后才算它，省算力也更稳（整体设计 §5.5.2 的联合规则）。
+    zupt_glrt_threshold: float = 10.0
+    #: GLRT 里的传感器噪声标准差，m/s² 与 rad/s。**它们是归一化系数，不是判据**：
+    #: 改它们等于改 γ5 的刻度。取值应来自 Allan 方差（RAY-207），当前按 BS-BT91
+    #: 规格量级给，并留了约一个数量级的余量。
+    zupt_sigma_acc: float = 0.05
+    zupt_sigma_gyr: float = 0.01
+    #: **只用于检测**的加速度低通截止，Hz。整体设计 §5.2 第 3 条：送入 INS 积分的
+    #: 加速度必须是未额外滤波的原始值，滤波只加在零速检测器的输入端。这个字段的名字
+    #: 里带 `detection_` 就是为了让"用错地方"在阅读时就显眼。
+    detection_lowpass_hz: float = 8.0
+    #: 短于这个长度的候选支撑相直接丢弃，样本数。走路支撑相约 600–800 ms
+    #: （整体设计 §5.5.3），50 ms 的碎片只可能是噪声或摆动相里的瞬时巧合。
+    min_stance_samples: int = 10
+    #: 相邻两次硬零速之间超过这个间隔就启用软零速降级，样本数。走路 stride 约
+    #: 1.1 s，跑步更短；取 1.5 s @200 Hz 作为"这一步没检到"的判据。
+    soft_zupt_gap_samples: int = 300
+    #: 软零速一次标记多少个样本。取奇数以便围绕最小统计量对称展开。
+    soft_zupt_span_samples: int = 5
     #: 强制零角速度更新。低速/病理步态下支撑相角速度不一定过阈，PRD §7 要求该预设
     #: 强制 ZARU。
     force_zaru: bool = False
@@ -146,12 +180,25 @@ class AlgoConfig:
     def __post_init__(self) -> None:
         if self.preset not in ("default", "low_speed"):
             raise ConfigError(f"preset 应为 'default' 或 'low_speed'，收到 {self.preset!r}")
-        if self.zupt_window_samples <= 0:
+        for name in ("zupt_window_samples", "min_stance_samples", "soft_zupt_gap_samples"):
+            if getattr(self, name) <= 0:
+                raise ConfigError(f"{name} 必须为正，收到 {getattr(self, name)}")
+        if self.soft_zupt_span_samples <= 0 or self.soft_zupt_span_samples % 2 == 0:
             raise ConfigError(
-                f"zupt_window_samples 必须为正，收到 {self.zupt_window_samples}"
+                f"soft_zupt_span_samples 必须是正奇数，收到 {self.soft_zupt_span_samples}。"
+                "软零速围绕统计量最小的那个样本对称展开，偶数长度没有中心。"
             )
-        _positive(self.zupt_acc_threshold, "zupt_acc_threshold")
-        _positive(self.zupt_gyr_threshold, "zupt_gyr_threshold")
+        for name in (
+            "zupt_acc_threshold",
+            "zupt_gyr_threshold",
+            "zupt_acc_variance_threshold",
+            "zupt_gyr_variance_threshold",
+            "zupt_glrt_threshold",
+            "zupt_sigma_acc",
+            "zupt_sigma_gyr",
+            "detection_lowpass_hz",
+        ):
+            _positive(getattr(self, name), name)
 
     @classmethod
     def low_speed(cls) -> AlgoConfig:
@@ -161,8 +208,12 @@ class AlgoConfig:
         所以这个预设的存在不是为了让检测"看起来更好"，而是为了让本来就该被采到的
         步态不被默认阈值判成噪声。
 
-        倍数同样是占位（待 RAY-203），但方向不是：更长、更松、强制 ZARU 是 PRD 的
-        原话，测试断言的正是这三个方向。
+        倍数仍是量级判断而非标定结果（真实取值待 RAY-230 真机数据），但方向不是：
+        更长、更松、强制 ZARU 是 PRD 的原话，测试断言的正是这三个方向。
+
+        RAY-203 之后，"更松"覆盖到全部五个判据而不只是 C1/C3。只放宽两个判据的话，
+        没被放宽的 C2/C4/GLRT 会成为新的瓶颈 —— 预设看起来切换了，检测率却不动，
+        而这种"改了没用"最难排查。
         """
         base = cls()
         return replace(
@@ -171,6 +222,11 @@ class AlgoConfig:
             zupt_window_samples=base.zupt_window_samples * 2,
             zupt_acc_threshold=base.zupt_acc_threshold * 2,
             zupt_gyr_threshold=base.zupt_gyr_threshold * 2,
+            zupt_acc_variance_threshold=base.zupt_acc_variance_threshold * 2,
+            zupt_gyr_variance_threshold=base.zupt_gyr_variance_threshold * 2,
+            zupt_glrt_threshold=base.zupt_glrt_threshold * 2,
+            # 支撑相更长，碎片判据也可以更严；但这里保持不变，因为"最短支撑相"是
+            # 生理事实而不是检测灵敏度 —— 把它一起放宽会让低速预设更容易接受碎片。
             force_zaru=True,
         )
 
