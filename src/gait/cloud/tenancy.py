@@ -35,7 +35,7 @@ MAC 有很多写法：`AA:BB:CC:DD:EE:FF`、`aa-bb-cc-dd-ee-ff`、`aabbccddeeff`
 ## 三、秘密不落文件
 
 参考 FeetForcePlate `client/cloud/access_store.py`：状态进文件，**凭据进操作系统的
-密钥库**，文件本身 `chmod 0o600`。
+密钥库**。
 
 理由不是"文件不安全"这种笼统说法，而是具体的：会话包会被打包上传（`cloud/package.py`
 把会话目录整个打进去），配置目录会被备份、会被同步、会在排障时被整个拷走。一个躺在
@@ -43,6 +43,20 @@ MAC 有很多写法：`AA:BB:CC:DD:EE:FF`、`aa-bb-cc-dd-ee-ff`、`aabbccddeeff`
 
 本模块因此把秘密交给 `SecretStore`，并**在写文件之前扫一遍**：文件里出现凭据就拒绝
 落盘。这与 `io/session.py` 对身份明文那道检查是同一种设计 —— 让常见的错误当场失败。
+
+### 文件权限只在 POSIX 上有效，而目标平台是 Windows
+
+写文件时会 `chmod 0o600`，但**那在 Windows 上是空操作** —— Python 在 Windows 上的
+`os.chmod` 只认只读位，POSIX 权限位根本不生效。windows CI 直接抓到了这件事：期望
+`0o600`，实际 `0o666`。
+
+所以承诺要说准：**承重的是"文件里没有秘密"，不是文件权限。** 权限是 POSIX 上顺手加的
+一层纵深防御；Windows 上的实际保护来自把配置放在按用户隔离的目录（`%LOCALAPPDATA%`
+默认就带这样的 ACL），而那是安装程序的职责，不是本模块的。
+
+真要在 Windows 上做文件级 ACL，得引入 pywin32 之类的依赖，而**当前文件里没有值得那么
+做的东西** —— 它全是租户号、终端号、设备地址这类标识。哪天要往里放敏感内容，先回来
+读这一段。
 
 ## 四、操作员不能改绑定
 
@@ -414,6 +428,8 @@ class AccessStore:
             )
         temporary = self.provisioning_path.with_suffix(".tmp")
         temporary.write_text(text + "\n", encoding="utf-8")
+        # 仅 POSIX 有效：Windows 上 os.chmod 只认只读位，这一行是空操作。承重的是
+        # 上面那道"文件里不许有秘密"的检查，不是权限位。见模块文档 §3。
         try:
             os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:  # pragma: no cover - 部分文件系统不支持

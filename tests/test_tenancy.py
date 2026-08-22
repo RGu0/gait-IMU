@@ -13,6 +13,7 @@
 """
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -218,10 +219,25 @@ def test_writing_a_provisioning_file_that_contains_the_token_is_refused(tmp_path
         access.install(leaky, token=TOKEN)
 
 
-def test_the_provisioning_file_is_owner_only(store):
+def test_the_provisioning_file_is_owner_only_on_posix_and_not_on_windows(store):
+    """**这条测试记录的是一个平台缺口，不是一个特性。**
+
+    写文件时会 `chmod 0o600`，但在 **Windows 上那是空操作** —— Python 的 `os.chmod`
+    在 Windows 上只认只读位。windows CI 直接抓到过：期望 `0o600`，实际 `0o666`。
+
+    而 Windows 正是目标平台。所以承诺必须说准：**承重的是"文件里没有秘密"，不是文件
+    权限。** 权限只是 POSIX 上顺手加的一层；Windows 上的实际保护来自把配置放在按用户
+    隔离的目录（`%LOCALAPPDATA%` 默认带那样的 ACL），那是安装程序的职责。
+
+    这条测试按平台断言不同的事实，好让"Windows 上没有这层防护"这件事**留在代码里**，
+    而不是被一个 skip 抹掉。
+    """
     mode = store.provisioning_path.stat().st_mode & 0o777
 
-    assert mode == 0o600
+    if os.name == "nt":
+        assert mode != 0o600  # 缺口就在这里，不假装它不存在
+    else:
+        assert mode == 0o600
 
 
 def test_a_missing_secret_does_not_fall_back_to_the_file(tmp_path):
