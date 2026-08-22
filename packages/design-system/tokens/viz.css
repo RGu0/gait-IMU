@@ -1,0 +1,38 @@
+/* Steady Health — Data visualization tokens
+   Light data canvas + heatmap scale. Heatmap colors are PHYSICALLY ISOLATED:
+   never use --viz-heat-* for interface decoration. */
+:root {
+  /* ── Data canvas (light, matches global theme) ───── */
+  --viz-canvas: #F6FAFD;
+  --viz-canvas-border: #DCE7F2;
+  --viz-grid: rgba(37, 105, 188, 0.08);
+  --viz-axis-label: #64748B;
+
+  /* ── Pressure heatmap scale (low → high) ─────────── */
+  /* PLANTAR-PRESSURE ONLY. Disabled outright in the gait UI kit — that product
+     has no pressure dimension, so reusing this scale would read as a pressure
+     map. See the gait canvas section below. */
+  --viz-heat-1: #2D4FA8; /* low  · cobalt */
+  --viz-heat-2: #1F9FCE; /* cyan */
+  --viz-heat-3: #63C685; /* mint green */
+  --viz-heat-4: #F0C24A; /* amber */
+  --viz-heat-5: #E25539; /* high · coral red */
+  --viz-heat-glow: 0 0 20px rgba(226, 85, 57, 0.30); /* soft outer glow, high-pressure */
+  --viz-heat-fade: 0.7;  /* @kind other */ /* low-pressure fades into light canvas */
+  --viz-point-glow-alpha: 0.30; /* @kind other */ /* data point glow: 0 0 12px same color */
+  --viz-footprint: #17A2C4; /* stance-guide footprint, single color */
+
+  /* ── Gait data canvas (dual-ankle IMU) ───────────── */
+  /* Where this product concentrates its expressiveness, in place of the heat
+     scale. Series are told apart by STROKE STYLE as well as color so the A4
+     report survives grayscale printing. */
+  --viz-gait-left: #2569BC;                 /* solid stroke */
+  --viz-gait-right: #17A2C4;                /* dashed stroke, 6 4 */
+  --viz-gait-turn: rgba(15, 23, 42, 0.10);  /* 45° hatch over turn segments */
+  --viz-gait-dim: 0.45;  /* @kind other */  /* low-quality segment opacity */
+  --viz-gait-dash: 6 4;  /* @kind other */  /* right-series dash pattern */
+
+  /* ── Chart transparency (charts only; UI stays solid) */
+  --chart-area-fade-from: 0.24; /* @kind other */ /* area fill gradient start opacity → 0 */
+  --chart-series-overlay: 0.14; /* @kind other */ /* per-layer overlay opacity 12–16% */
+}
