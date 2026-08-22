@@ -3,11 +3,10 @@ import { createRoot } from "react-dom/client";
 import "@gait/design-system/styles.css";
 import "./app.css";
 import { TerminalApp } from "./TerminalApp.jsx";
-
-const noopAdapter = { snapshot: () => ({}) };
+import { mockTerminalAdapter } from "./mockTerminalAdapter.js";
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <TerminalApp adapter={noopAdapter} />
+    <TerminalApp adapter={mockTerminalAdapter} />
   </React.StrictMode>,
 );
