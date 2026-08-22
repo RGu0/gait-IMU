@@ -64,6 +64,7 @@ switch ($Command) {
         Invoke-Step "uv" (@("run", "--locked", "python", "-m", "ruff", "check", ".") + $Rest)
         # 分层红线，与 ./dev 对应。
         Invoke-Step "uv" @("run", "--locked", "python", "tools/check_layering.py")
+        Invoke-Step "uv" @("run", "--locked", "python", "tools/check_quality_single_source.py")
         Invoke-Node "pnpm" @("run", "lint")
     }
     "build" {
