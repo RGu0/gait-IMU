@@ -1,9 +1,89 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { TerminalApp } from "./TerminalApp.jsx";
 
+const readySnapshot = {
+  operator: { organization: "community-kangjian" },
+  deviceSummary: {
+    ready: true,
+    issues: [],
+    leftBattery: 82,
+    rightBattery: 76,
+  },
+  uploadSummary: {
+    pending: 2,
+    uploaded: 12,
+  },
+  recentRecords: [
+    { subjectLabel: "**1234", status: "已完成" },
+    { subjectLabel: "**2345", status: "已完成" },
+    { subjectLabel: "**3456", status: "待上传" },
+    { subjectLabel: "**4567", status: "已完成" },
+    { subjectLabel: "**5678", status: "已完成" },
+  ],
+};
+
+const readyAdapter = {
+  snapshot: async () => readySnapshot,
+  login: async () => readySnapshot,
+  recheckDevices: async () => readySnapshot,
+};
+
+it("goes from institutional login to the ready hub", async () => {
+  render(<TerminalApp adapter={readyAdapter} />);
+  fireEvent.change(screen.getByLabelText("机构账号"), {
+    target: { value: "community-kangjian" },
+  });
+  fireEvent.change(screen.getByLabelText("登录密码"), {
+    target: { value: "secret" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  expect(
+    await screen.findByRole("button", { name: "开始新的检测" }),
+  ).toBeVisible();
+});
+
+it("keeps the operator out of a License or registration flow", () => {
+  render(<TerminalApp adapter={readyAdapter} />);
+  expect(screen.queryByText(/License|注册|激活/i)).not.toBeInTheDocument();
+});
+
+it("keeps the operator at login when authentication fails", async () => {
+  const failingAdapter = {
+    ...readyAdapter,
+    login: async () => {
+      throw new Error("账号或密码不正确");
+    },
+  };
+  render(<TerminalApp adapter={failingAdapter} />);
+  fireEvent.change(screen.getByLabelText("机构账号"), {
+    target: { value: "community-kangjian" },
+  });
+  fireEvent.change(screen.getByLabelText("登录密码"), {
+    target: { value: "incorrect" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("账号或密码不正确");
+  expect(screen.getByRole("button", { name: "登录" })).toBeVisible();
+});
+
+it("shows exactly five recent records in the ready hub", async () => {
+  render(<TerminalApp adapter={readyAdapter} />);
+  fireEvent.change(screen.getByLabelText("机构账号"), {
+    target: { value: "community-kangjian" },
+  });
+  fireEvent.change(screen.getByLabelText("登录密码"), {
+    target: { value: "secret" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  const table = await screen.findByRole("table");
+  expect(table.querySelectorAll("tbody tr")).toHaveLength(5);
+});
+
 it("opens at the institutional login", () => {
-  render(<TerminalApp adapter={{ snapshot: () => ({}) }} />);
+  render(<TerminalApp adapter={readyAdapter} />);
   expect(
     screen.getByRole("heading", { name: "步态健康筛查与分析平台" }),
   ).toBeVisible();
+  expect(screen.getByLabelText("机构账号")).toBeVisible();
+  expect(screen.getByLabelText("登录密码")).toBeVisible();
 });
