@@ -42,7 +42,11 @@ importers:
         specifier: latest
         version: 4.1.11(jsdom@30.0.1)(vite@8.2.2)
 
-  packages/design-system: {}
+  packages/design-system:
+    dependencies:
+      react:
+        specifier: ^19.2.8
+        version: 19.2.8
 
 packages:
 

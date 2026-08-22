@@ -4,6 +4,9 @@
   "private": true,
   "description": "Steady Health design system — mirrored from Claude Design as a build input.",
   "type": "module",
+  "peerDependencies": {
+    "react": "^19.2.8"
+  },
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
