@@ -78,3 +78,53 @@ jobs:
       - run: ./dev lint
 
       - run: ./dev test
+
+  # Windows 侧的受管入口是 dev.ps1（.ai-project/project.yaml 的 commands.windows）。
+  # 它此前经三个 scope 改动却一次都没被执行过 —— 本机是 macOS 且无 pwsh，CI 只有
+  # ubuntu。让它在 P5 采集端动工时才第一次运行，是把风险堆到最不合适的时点。
+  #
+  # 独立 job 而非在 check 上开矩阵：两边的入口、shell、断言脚本都不同，塞进矩阵会
+  # 让"ubuntu 侧行为不变"这条难以一眼确认。
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          cache: true
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - run: pwsh -File dev.ps1 setup
+
+      - name: 断言工具确实采用了仓库 pin 的版本
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expectedNode = "v" + (Get-Content .node-version -Raw).Trim()
+          $actualNode = (node --version).Trim()
+          if ($actualNode -ne $expectedNode) {
+              throw "node $actualNode 与 .node-version 要求的 $expectedNode 不符"
+          }
+          $expectedPnpm = (node -p "require('./package.json').packageManager.split('@')[1]").Trim()
+          $actualPnpm = (pnpm --version).Trim()
+          if ($actualPnpm -ne $expectedPnpm) {
+              throw "pnpm $actualPnpm 与 packageManager 要求的 $expectedPnpm 不符"
+          }
+          $expectedPython = (Get-Content .python-version -Raw).Trim()
+          $actualPython = (uv run --locked python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+          if ($actualPython -ne $expectedPython) {
+              throw "python $actualPython 与 .python-version 要求的 $expectedPython 不符"
+          }
+          "node $actualNode / pnpm $actualPnpm / python $actualPython"
+
+      - run: pwsh -File dev.ps1 lint
+
+      - run: pwsh -File dev.ps1 test
+
+      - run: pwsh -File dev.ps1 build
