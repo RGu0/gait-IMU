@@ -1,4 +1,4 @@
-import { BatteryPair, Button, DataTable, SideBadge, StatusPill } from "@gait/design-system";
+import { Banner, BatteryPair, Button, DataTable, SideBadge, StatusPill } from "@gait/design-system";
 import { AppBar } from "./AppBar.jsx";
 
 function recordStatus(status) {
@@ -9,9 +9,10 @@ function recordStatus(status) {
   });
 }
 
-export function HubScreen({ snapshot, onStartNewAssessment }) {
+export function HubScreen({ snapshot, onRecheck, onStartNewAssessment }) {
   const { deviceSummary, uploadSummary, recentRecords } = snapshot;
   const hasBattery = Number.isFinite(deviceSummary.leftBattery) && Number.isFinite(deviceSummary.rightBattery);
+  const needsAttention = !deviceSummary.ready;
 
   return (
     <div className="hub-page">
@@ -22,8 +23,14 @@ export function HubScreen({ snapshot, onStartNewAssessment }) {
             <h1 id="hub-title">工作台</h1>
             <p>确认终端状态后，开始新的步态检测。</p>
           </div>
-          <StatusPill tone="success" icon="check">设备已就绪</StatusPill>
+          <StatusPill tone={needsAttention ? "warning" : "success"} icon={needsAttention ? "warning" : "check"}>
+            {needsAttention ? "设备需要检查" : "设备已就绪"}
+          </StatusPill>
         </section>
+
+        {needsAttention ? deviceSummary.issues.map((issue) => (
+          <Banner key={issue} tone="warning" title="设备需要检查">{issue}</Banner>
+        )) : null}
 
         <section className="hub-summary" aria-label="终端状态概览">
           <article className="hub-card">
@@ -59,7 +66,11 @@ export function HubScreen({ snapshot, onStartNewAssessment }) {
         </section>
 
         <div className="hub-action">
-          <Button size="lg" onClick={onStartNewAssessment}>开始新的检测</Button>
+          {needsAttention ? (
+            <Button size="lg" onClick={onRecheck}>重新检查设备</Button>
+          ) : (
+            <Button size="lg" onClick={onStartNewAssessment}>开始新的检测</Button>
+          )}
         </div>
       </main>
     </div>

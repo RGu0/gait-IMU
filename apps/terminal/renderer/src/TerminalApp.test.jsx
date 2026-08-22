@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { HubScreen } from "./HubScreen.jsx";
 import { TerminalApp } from "./TerminalApp.jsx";
 
 const readySnapshot = {
@@ -86,4 +87,35 @@ it("opens at the institutional login", () => {
   ).toBeVisible();
   expect(screen.getByLabelText("机构账号")).toBeVisible();
   expect(screen.getByLabelText("登录密码")).toBeVisible();
+});
+
+it.each([
+  ["a disconnected module", "右侧模块未连接（E-BLE-1001）"],
+  ["a low battery", "右侧模块电量不足（E-BLE-1002）"],
+  ["missing factory calibration", "右侧模块缺少出厂校准（E-BLE-1003）"],
+])("replaces the start action for %s", (_condition, issue) => {
+  const onRecheck = vi.fn();
+  render(
+    <HubScreen
+      snapshot={{
+        ...readySnapshot,
+        deviceSummary: { ...readySnapshot.deviceSummary, ready: false, issues: [issue] },
+      }}
+      onRecheck={onRecheck}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "重新检查设备" }));
+  expect(screen.getByRole("button", { name: "重新检查设备" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "开始新的检测" })).not.toBeInTheDocument();
+  expect(screen.getByText(issue)).toBeVisible();
+  expect(onRecheck).toHaveBeenCalledOnce();
+});
+
+it("keeps the start action when upload backlog is the only warning", () => {
+  render(<HubScreen snapshot={readySnapshot} onRecheck={vi.fn()} />);
+
+  expect(screen.getByRole("button", { name: "开始新的检测" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "重新检查设备" })).not.toBeInTheDocument();
+  expect(screen.getByText("待上传 2 条")).toBeVisible();
 });
