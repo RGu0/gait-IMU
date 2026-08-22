@@ -5,6 +5,7 @@
 不漏。所以每条都在临时目录里造出真实的违规文件，让检查去扫。
 """
 
+import os
 from pathlib import Path
 
 import check_layering
@@ -159,3 +160,34 @@ def test_the_real_core_is_currently_clean():
     assert check_layering.scan(
         check_layering.PACKAGE_ROOT, "core", check_layering.declared_forbidden()
     ) == []
+
+
+def test_output_survives_a_legacy_codepage(tmp_path):
+    """在遗留代码页下不得崩溃。
+
+    RAY-258 首次在 windows-latest 上运行 `dev.ps1` 时，这个脚本炸在它自己的**成功**
+    消息上：Windows 的 Python stdout 在管道下用 cp1252，而消息是中文。也就是说仓库
+    干净时也会失败 —— 该检查自 RAY-192 合并起在 Windows 上就完全不可用，只是没有
+    Windows CI 所以无人知道。
+
+    这条测试用 cp1252 复现当时的环境。它守的不是"支持中文"，而是**输出编码不该由
+    调用环境决定**：一个在某些平台上必然崩溃的检查，等于在那些平台上不存在。
+    """
+    import subprocess
+    import sys
+
+    environment = {
+        **os.environ,
+        "PYTHONIOENCODING": "cp1252",
+        "PYTHONUTF8": "0",
+    }
+    result = subprocess.run(
+        [sys.executable, str(Path(check_layering.__file__))],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        cwd=Path(check_layering.REPO_ROOT),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "UnicodeEncodeError" not in result.stderr

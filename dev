@@ -4,6 +4,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 与 dev.ps1 对称。POSIX 上通常已是 UTF-8 locale，设它不改变任何行为 —— 但让两个入口
+# 有同一个显式前提，比让它们各自依赖平台默认好：后者正是 Windows 侧崩溃的成因。
+export PYTHONUTF8=1
+
 # Node 侧与 Python 侧对称。
 #
 # `uv run --locked` 自己按 .python-version 解析解释器，不看调用方的 PATH，
