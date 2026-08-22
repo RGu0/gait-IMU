@@ -36,6 +36,9 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.3（RAY-205 `dualfoot-constraint`）：`AlgoConfig` 增加最大足间距、双支撑期与
+#: 腾空期的异常判据、左右识别所用的步数。
+#:
 #: 1.2（RAY-204 `eskf-15-state`）：`AlgoConfig` 增加 ESKF 的过程噪声、观测噪声与初始
 #: 协方差。它们必须进 `algo_params` —— PRD §6.1 要求「任一历史会话可凭元数据精确复现
 #: 算法输入」，而一个 Q 或 R 记不下来的滤波器，历史结果就复现不出来。
@@ -45,7 +48,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.2"
+CONFIG_VERSION: Final[str] = "1.3"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -227,6 +230,21 @@ class AlgoConfig:
     #: 一开始就认为它不确定 —— 给小了，ZUPT 会花很久才敢去修它。
     eskf_initial_accel_bias_sigma: float = 0.392
 
+    # ── 双足联合约束（RAY-205）。整体设计 §5.7 ─────────────────────────────
+
+    #: 人的双脚水平距离上限，m。§5.7 给的区间是 1.2–1.8（随速度变化）。
+    #: 取 1.5：合成行走（步长 1.30 m）实测真实峰值 1.31 m，留约 15% 余量。
+    #: **它是一个不等式约束的边界，不是一个测量值** —— 给小了会把正常的大步伐当成
+    #: 航向漂移去"修正"，那比不修更糟。
+    dualfoot_max_distance_m: float = 1.5
+    #: 双足同时零速持续超过这个时长即可疑，s。双支撑期本身正常（走路占 10~25%），
+    #: 异常的是它持续太久 —— 那意味着受试者站住了，或者检测器把摆动相判成了支撑相。
+    dualfoot_double_support_max_s: float = 1.0
+    #: 双足同时非零速持续超过这个时长即可疑，s。走路不该有腾空期；跑步有，但很短。
+    dualfoot_flight_max_s: float = 0.4
+    #: 左右识别用前多少个支撑相。§5.7 第 3 条说"前 10 步"。
+    dualfoot_identification_strides: int = 10
+
     version: str = CONFIG_VERSION
 
     def __post_init__(self) -> None:
@@ -264,8 +282,16 @@ class AlgoConfig:
             "eskf_initial_position_sigma",
             "eskf_initial_gyro_bias_sigma",
             "eskf_initial_accel_bias_sigma",
+            "dualfoot_max_distance_m",
+            "dualfoot_double_support_max_s",
+            "dualfoot_flight_max_s",
         ):
             _positive(getattr(self, name), name)
+        if self.dualfoot_identification_strides < 2:
+            raise ConfigError(
+                f"dualfoot_identification_strides 至少为 2，收到 "
+                f"{self.dualfoot_identification_strides}。一步定不出行进方向。"
+            )
         if self.eskf_degraded_r_scale < 1.0:
             raise ConfigError(
                 f"eskf_degraded_r_scale 必须 ≥ 1，收到 {self.eskf_degraded_r_scale}。"
