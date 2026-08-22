@@ -36,6 +36,8 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.6（RAY-211 `sync-selfcheck`）：`AlgoConfig` 增加同步自检的三个判据参数。
+#:
 #: 1.5（RAY-210 `integrity-gaps`）：`AlgoConfig` 增加空洞判据与到达率分级阈值。
 #:
 #: 1.4（RAY-209 `host-timebase`）：`AlgoConfig` 增加主机侧时基的四个参数。
@@ -52,7 +54,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.5"
+CONFIG_VERSION: Final[str] = "1.6"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -302,6 +304,34 @@ class AlgoConfig:
     integrity_rate_warn: float = 0.98
     integrity_rate_unusable: float = 0.90
 
+    # ── 同步质量自检（RAY-211）。PRD §8、§13 ───────────────────────────────
+
+    #: 左右 stride 周期差超过这个比例就标注节律不对称。取值来自 PRD §8 的
+    #: 「左右步周期差 < 10%」。
+    #:
+    #: **它当不了同步判据。** 实测这个量对 offset 完全免疫：offset 从 0 加到 200 ms，
+    #: 它恒为 3.24%、一动不动。它抓的是拖步、疼痛回避这类节律不对称，那是另一回事。
+    selfcheck_stride_period_tolerance: float = 0.10
+    #: 前后半程两次 offset 估计之差超过这个值（s）就判为「相位在漂」，不给估计。
+    #:
+    #: 可估性由它把关，不由 stride 周期差把关。实测右足 stride 只长 2% 时周期差才
+    #: 2.23%（稳稳在 10% 之内），却能编出 110 ms 的假 offset —— 百分比闸门拦不住。
+    #: 一致性判据则干净：真恒定的一律读 0.0 ms，相位在漂的最小读 35 ms。
+    selfcheck_offset_consistency_s: float = 0.020
+    #: 估计出的跨足偏差超过这个值（s）就标注「同步可疑」。**标注不拦截**（PRD §8）。
+    #:
+    #: 取 50 ms 的理由：PRD §8 容许 ±10~30 ms 的跨足不确定度，所以阈值必须高于它，
+    #: 否则每一次采集都会被标。上界则由估计量自己的本底决定 —— 实测严重不对称步态
+    #: （支撑相占比 0.72 对 0.60）产生的假 offset 只有 5.5 ms，离 50 ms 很远。
+    selfcheck_offset_warn_s: float = 0.050
+    #: 少于这么多个双支撑相位就不给估计。均值的方差在样本太少时压不住。
+    selfcheck_min_phases: int = 6
+    #: 支撑相比典型值长这么多倍即判为起步前的静止前导，予以剔除。
+    #:
+    #: 前导会被 ZUPT 检成一个很长的支撑相。它不是一步 —— 留着它会把整个左右配对
+    #: 错开一位，配对双支撑差随即失去意义。
+    selfcheck_still_lead_factor: float = 2.5
+
     version: str = CONFIG_VERSION
 
     def __post_init__(self) -> None:
@@ -345,8 +375,23 @@ class AlgoConfig:
             "sync_packet_gap_fraction",
             "integrity_rate_warn",
             "integrity_rate_unusable",
+            "selfcheck_stride_period_tolerance",
+            "selfcheck_offset_consistency_s",
+            "selfcheck_offset_warn_s",
+            "selfcheck_still_lead_factor",
         ):
             _positive(getattr(self, name), name)
+        if self.selfcheck_min_phases < 2:
+            raise ConfigError(
+                f"selfcheck_min_phases 至少为 2，收到 {self.selfcheck_min_phases}。"
+                "配对差需要两类相位各有样本，少于 2 个连一类都凑不齐。"
+            )
+        if self.selfcheck_still_lead_factor <= 1.0:
+            raise ConfigError(
+                f"selfcheck_still_lead_factor 必须大于 1，收到 "
+                f"{self.selfcheck_still_lead_factor}。"
+                "取 1 或更小会把典型长度的支撑相当成静止前导剔掉。"
+            )
         if self.integrity_gap_samples < 1:
             raise ConfigError(
                 f"integrity_gap_samples 至少为 1，收到 {self.integrity_gap_samples}。"
