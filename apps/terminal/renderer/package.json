@@ -1,0 +1,26 @@
+{
+  "name": "@gait/terminal-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest",
+    "lint": "eslint . --no-config-lookup"
+  },
+  "dependencies": {
+    "@gait/design-system": "workspace:*",
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/react": "latest",
+    "eslint": "latest",
+    "vite": "latest",
+    "vitest": "latest",
+    "jsdom": "latest"
+  }
+}
