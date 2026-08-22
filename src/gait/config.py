@@ -36,6 +36,8 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.4（RAY-209 `host-timebase`）：`AlgoConfig` 增加主机侧时基的四个参数。
+#:
 #: 1.3（RAY-205 `dualfoot-constraint`）：`AlgoConfig` 增加最大足间距、双支撑期与
 #: 腾空期的异常判据、左右识别所用的步数。
 #:
@@ -48,7 +50,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.3"
+CONFIG_VERSION: Final[str] = "1.4"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -141,9 +143,16 @@ class ProtocolConfig:
 class AlgoConfig:
     """算法参数。
 
-    **下列数值均为结构占位，尚未标定** —— 真实取值属于 RAY-203（零速检测与低速预设）
-    与 RAY-204（ESKF）。它们存在的意义是让配置结构、预设切换与快照往返可以被测试；
-    测试断言的是预设之间的**关系**，不是具体数字。
+    **下列数值未经真机标定，但也不再是纯占位。** RAY-203（零速检测）、RAY-204（ESKF）、
+    RAY-205（双足约束）、RAY-209（时基）各自交付时，每个数都拿到了一条物理依据，并在
+    RAY-206 的合成数据上验证过端到端行为。
+
+    差别在于**合成数据的支撑相是精确静止的，真实足部不是**。所以这些数说明的是"这一组
+    取值在干净数据上工作"，不说明"这是这台设备的最优阈值"。真实取值待 RAY-207（Allan
+    方差与六面法标定）与 RAY-230（真机 V1）。
+
+    测试因此仍然不断言具体数字，而断言**关系**（低速预设更长更松、软零速比硬零速更不
+    可信、等等）。关系在标定之后依然成立，数字不会。
     """
 
     preset: AlgoPreset = "default"
@@ -217,9 +226,17 @@ class AlgoConfig:
     #: 初始协方差的标准差。
     #:
     #: 倾角取 1°：RAY-202 的对准在合成数据上做到 < 0.5°，留一倍余量。
-    #: 航向取 30°：6 轴下它**不可观测**，给一个诚实的大值而不是假装知道。ZUPT 在支撑
-    #: 相只约束倾角（那里比力≈重力，与航向解耦），所以这个数不会被观测拉小 —— 那正是
-    #: RAY-205 双足距离约束存在的理由。
+    #:
+    #: 航向取 30°：6 轴下它是**弱可观测**的 —— 这一句在 RAY-204 交付时按实测改过。
+    #: 教科书的说法是"ZUPT 在支撑相只约束倾角，航向不动"，那句话的前提是"比力≈重力"，
+    #: 而那只在支撑相成立。摆动相里比力方向变化很大，航向因此被间接约束了一点：
+    #: 导航系 1σ 从 30° 掉到 5 s 时的 4.5°，**然后卡在 2.3° 不动**（30 s → 60 s 只
+    #: 收敛 13%，同期倾角收敛 43%）。
+    #:
+    #: 所以给 30° 不是"假装它完全没有观测"，而是"承认先验很差、让观测自己去修"。
+    #: RAY-205 的双足距离约束仍然是必需项，理由是"弱可观测、远远不够"（2° 的航向不
+    #: 确定度在 4 米往返里就是几厘米的横向误差，且随距离线性放大）——
+    #: 而不是"完全不可观测"。低速步态下它更差：RAY-261 实测 15.9°。
     eskf_initial_tilt_sigma: float = 0.0175
     eskf_initial_yaw_sigma: float = 0.524
     eskf_initial_velocity_sigma: float = 0.01
@@ -244,6 +261,27 @@ class AlgoConfig:
     dualfoot_flight_max_s: float = 0.4
     #: 左右识别用前多少个支撑相。§5.7 第 3 条说"前 10 步"。
     dualfoot_identification_strides: int = 10
+
+    # ── 主机侧时基（RAY-209）。PRD §8 ──────────────────────────────────────
+
+    #: 最小值滤波的窗口长度，样本数。每个窗口贡献一个锚点。
+    #:
+    #: 200 Hz 下 100 样本 = 0.5 s，即每半秒取一个"到达最早"的样本。窗口越长，落进
+    #: 窗口的样本越多、取到的最小值越接近真正的下包络；但锚点也越少，回归的自由度
+    #: 越低。0.5 s 让 180 s 的会话有 360 个锚点，足够而不奢侈。
+    sync_minfilter_window_samples: int = 100
+    #: 相邻样本的到达时刻差超过采样周期的这个比例，就算新的一包。
+    #:
+    #: 同一次 BLE 通知里的样本，`wt901` 逐帧取 `time.monotonic()`，只差几微秒；
+    #: 不同通知之间至少隔一个连接间隔。0.5 个采样周期把这两者分得很开。
+    #: 用采样周期的比例而不是绝对时间：100 Hz 与 200 Hz 下"几微秒"是同一件事，
+    #: "一个采样周期"不是。
+    sync_packet_gap_fraction: float = 0.5
+    #: 采样率稳定性检查的分窗长度，样本数。200 Hz 下 4000 样本 = 20 s。
+    #:
+    #: 它不参与时基构建（时基用整段拟合），只回答"这次的估计有多可信"。分窗估计比
+    #: 整段噪声大得多，所以它是一个**保守**的读数：分窗都稳，整段必然更稳。
+    sync_stability_window_samples: int = 4000
 
     version: str = CONFIG_VERSION
 
@@ -285,8 +323,15 @@ class AlgoConfig:
             "dualfoot_max_distance_m",
             "dualfoot_double_support_max_s",
             "dualfoot_flight_max_s",
+            "sync_packet_gap_fraction",
         ):
             _positive(getattr(self, name), name)
+        for name in ("sync_minfilter_window_samples", "sync_stability_window_samples"):
+            if getattr(self, name) < 2:
+                raise ConfigError(
+                    f"{name} 至少为 2，收到 {getattr(self, name)}。"
+                    "一个样本的窗口给不出锚点，回归也就没有约束。"
+                )
         if self.dualfoot_identification_strides < 2:
             raise ConfigError(
                 f"dualfoot_identification_strides 至少为 2，收到 "
