@@ -36,12 +36,16 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.2（RAY-204 `eskf-15-state`）：`AlgoConfig` 增加 ESKF 的过程噪声、观测噪声与初始
+#: 协方差。它们必须进 `algo_params` —— PRD §6.1 要求「任一历史会话可凭元数据精确复现
+#: 算法输入」，而一个 Q 或 R 记不下来的滤波器，历史结果就复现不出来。
+#:
 #: 1.1（RAY-203 `zupt-detector`）：`AlgoConfig` 增加 C2/C4 方差判据、GLRT 判据及其
 #: 噪声模型、检测用低通截止、最短支撑相长度与软零速降级参数。**新增字段也要升版本**：
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.1"
+CONFIG_VERSION: Final[str] = "1.2"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -175,6 +179,54 @@ class AlgoConfig:
     #: 强制零角速度更新。低速/病理步态下支撑相角速度不一定过阈，PRD §7 要求该预设
     #: 强制 ZARU。
     force_zaru: bool = False
+
+    # ── ESKF（RAY-204）。整体设计 §5.6 ──────────────────────────────────────
+    #
+    # 过程噪声 Q 的四个参数**应当来自 Allan 方差**（§5.6.3 的原话是「不拍脑袋」）。
+    # 当前取值按 BS-BT91 规格量级给，与 `validate.synthetic.NoiseModel.bs_bt91()`
+    # 同一口径，**待 RAY-207 的实测标定替换**。写成配置字段而不是模块常量，正是为了
+    # 让那次替换是一次显式的、会进快照的动作。
+
+    #: 角度随机游走 ARW，rad/s/√Hz。
+    eskf_gyro_noise_density: float = 3.0e-4
+    #: 速度随机游走 VRW，m/s²/√Hz。
+    eskf_accel_noise_density: float = 1.5e-3
+    #: 零偏不稳定性，rad/s 与 m/s²。零偏建模为一阶马尔可夫过程。
+    eskf_gyro_bias_instability: float = 1.0e-4
+    eskf_accel_bias_instability: float = 1.0e-3
+    #: 零偏的相关时间，s。由 Allan 曲线的零偏不稳定性拐点给出（§5.6.3）。
+    eskf_gyro_bias_tau_s: float = 300.0
+    eskf_accel_bias_tau_s: float = 300.0
+
+    #: ZUPT 观测噪声，m/s。§5.6.2 给的区间是 0.01–0.05。
+    eskf_zupt_sigma: float = 0.02
+    #: ZARU 观测噪声，rad/s。§5.6.2 给的是 0.5–2 dps，即 0.0087–0.035 rad/s。
+    eskf_zaru_sigma: float = 0.02
+    #: 高度约束观测噪声，m。§5.6.2：0.02。
+    eskf_height_sigma: float = 0.02
+    #: **上下楼/坡道必须关闭。** §5.6.2 明写此限。默认开是因为 T-01 是平地行走
+    #: （PRD §7），但这个默认值在任何非平地场景下都是错的，而错的方式是安静地把
+    #: 真实的高度变化压掉 —— 不报错，只是让楼梯看起来像平地。
+    eskf_enable_height_constraint: bool = True
+    #: 软零速的观测噪声放大倍数。§5.5.3：10–50 倍。
+    eskf_degraded_r_scale: float = 20.0
+
+    #: 初始协方差的标准差。
+    #:
+    #: 倾角取 1°：RAY-202 的对准在合成数据上做到 < 0.5°，留一倍余量。
+    #: 航向取 30°：6 轴下它**不可观测**，给一个诚实的大值而不是假装知道。ZUPT 在支撑
+    #: 相只约束倾角（那里比力≈重力，与航向解耦），所以这个数不会被观测拉小 —— 那正是
+    #: RAY-205 双足距离约束存在的理由。
+    eskf_initial_tilt_sigma: float = 0.0175
+    eskf_initial_yaw_sigma: float = 0.524
+    eskf_initial_velocity_sigma: float = 0.01
+    eskf_initial_position_sigma: float = 0.001
+    eskf_initial_gyro_bias_sigma: float = 0.01
+    #: **40 mg。** §5.6.2 与《BS-BT91 硬件适配》发现 1 都点名加计零偏是本模块的首要
+    #: 误差源（±20~40 mg，可致 1.75%~3.5% 步长偏差）。初始方差按规格上限给，让滤波器
+    #: 一开始就认为它不确定 —— 给小了，ZUPT 会花很久才敢去修它。
+    eskf_initial_accel_bias_sigma: float = 0.392
+
     version: str = CONFIG_VERSION
 
     def __post_init__(self) -> None:
@@ -197,8 +249,28 @@ class AlgoConfig:
             "zupt_sigma_acc",
             "zupt_sigma_gyr",
             "detection_lowpass_hz",
+            "eskf_gyro_noise_density",
+            "eskf_accel_noise_density",
+            "eskf_gyro_bias_instability",
+            "eskf_accel_bias_instability",
+            "eskf_gyro_bias_tau_s",
+            "eskf_accel_bias_tau_s",
+            "eskf_zupt_sigma",
+            "eskf_zaru_sigma",
+            "eskf_height_sigma",
+            "eskf_initial_tilt_sigma",
+            "eskf_initial_yaw_sigma",
+            "eskf_initial_velocity_sigma",
+            "eskf_initial_position_sigma",
+            "eskf_initial_gyro_bias_sigma",
+            "eskf_initial_accel_bias_sigma",
         ):
             _positive(getattr(self, name), name)
+        if self.eskf_degraded_r_scale < 1.0:
+            raise ConfigError(
+                f"eskf_degraded_r_scale 必须 ≥ 1，收到 {self.eskf_degraded_r_scale}。"
+                "小于 1 表示软零速比硬零速**更**可信，那与降级的含义正好相反。"
+            )
 
     @classmethod
     def low_speed(cls) -> AlgoConfig:
