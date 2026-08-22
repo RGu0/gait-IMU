@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest",
-    "lint": "eslint . --no-config-lookup"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@gait/design-system": "workspace:*",

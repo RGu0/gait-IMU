@@ -26,8 +26,19 @@ export function TerminalApp({ adapter }) {
     setCredentials((current) => ({ ...current, [name]: value }));
   }
 
+  async function handleRecheck() {
+    await adapter.recheckDevices();
+    setSnapshot(await adapter.snapshot());
+  }
+
   if (snapshot) {
-    return <HubScreen snapshot={snapshot} onStartNewAssessment={() => {}} />;
+    return (
+      <HubScreen
+        snapshot={snapshot}
+        onRecheck={handleRecheck}
+        onStartNewAssessment={() => {}}
+      />
+    );
   }
 
   return (

@@ -29,6 +29,15 @@ const readyAdapter = {
   recheckDevices: async () => readySnapshot,
 };
 
+const needsAttentionSnapshot = {
+  ...readySnapshot,
+  deviceSummary: {
+    ...readySnapshot.deviceSummary,
+    ready: false,
+    issues: ["右侧模块未连接（E-BLE-1001）"],
+  },
+};
+
 it("goes from institutional login to the ready hub", async () => {
   render(<TerminalApp adapter={readyAdapter} />);
   fireEvent.change(screen.getByLabelText("机构账号"), {
@@ -41,6 +50,34 @@ it("goes from institutional login to the ready hub", async () => {
   expect(
     await screen.findByRole("button", { name: "开始新的检测" }),
   ).toBeVisible();
+});
+
+it("rechecks attention-required devices and refreshes the ready hub", async () => {
+  const snapshot = vi.fn()
+    .mockResolvedValueOnce(needsAttentionSnapshot)
+    .mockResolvedValueOnce(readySnapshot);
+  const recheckDevices = vi.fn().mockResolvedValue(undefined);
+  const adapter = {
+    login: vi.fn().mockResolvedValue(needsAttentionSnapshot),
+    recheckDevices,
+    snapshot,
+  };
+
+  render(<TerminalApp adapter={adapter} />);
+  fireEvent.change(screen.getByLabelText("机构账号"), {
+    target: { value: "community-kangjian" },
+  });
+  fireEvent.change(screen.getByLabelText("登录密码"), {
+    target: { value: "secret" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  await screen.findByRole("button", { name: "重新检查设备" });
+
+  fireEvent.click(screen.getByRole("button", { name: "重新检查设备" }));
+
+  expect(await screen.findByRole("button", { name: "开始新的检测" })).toBeVisible();
+  expect(recheckDevices).toHaveBeenCalledOnce();
+  expect(snapshot).toHaveBeenCalledTimes(2);
 });
 
 it("keeps the operator out of a License or registration flow", () => {

@@ -55,6 +55,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: 质量逻辑。sidecar（Python）不在此列，它**就是**唯一实现点。
 RENDERER_ROOTS: tuple[str, ...] = ("apps", "packages")
 SOURCE_SUFFIXES: tuple[str, ...] = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+# Build outputs cannot be reviewed as authored renderer code and may minify unrelated
+# dependency comparisons into the same line as grade literals.
+EXCLUDED_DIRECTORIES: frozenset[str] = frozenset({"dist", "node_modules"})
 
 #: 阈值常量的名字与取值。名字来自 `gait.quality`，不在这里抄第二份定义。
 _FORBIDDEN_NAMES: tuple[str, ...] = ("MIN_STEPS_FOR_NORMAL",)
@@ -75,7 +78,7 @@ def _sources(root: Path) -> list[Path]:
         for path in sorted(directory.rglob("*")):
             if path.suffix not in SOURCE_SUFFIXES:
                 continue
-            if "node_modules" in path.parts or path.name.endswith(".d.ts"):
+            if EXCLUDED_DIRECTORIES.intersection(path.parts) or path.name.endswith(".d.ts"):
                 continue
             found.append(path)
     return found

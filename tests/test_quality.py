@@ -440,3 +440,19 @@ def test_the_check_skips_type_declarations(tmp_path):
 
     _, scanned = scan(tmp_path)
     assert scanned == 0
+
+
+def test_the_check_skips_generated_renderer_assets(tmp_path):
+    root = make_fake_repo(tmp_path, "export const Badge = ({ grade }) => grade;\n")
+    generated = root / "apps" / "terminal" / "renderer" / "dist" / "assets"
+    generated.mkdir(parents=True)
+    (generated / "index.js").write_text(
+        "const grade = nSteps < 16 ? 'low' : 'normal';\n", encoding="utf-8"
+    )
+
+    from tools.check_quality_single_source import scan
+
+    offences, scanned = scan(root)
+
+    assert offences == []
+    assert scanned == 1
