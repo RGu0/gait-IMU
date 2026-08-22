@@ -188,6 +188,7 @@ def test_output_survives_a_legacy_codepage(tmp_path):
         encoding="utf-8",
         env=environment,
         cwd=Path(check_layering.REPO_ROOT),
+        check=False,  # 退出码由下面的断言判断，不由 subprocess 抛异常
     )
     assert result.returncode == 0, result.stderr
     assert "UnicodeEncodeError" not in result.stderr
