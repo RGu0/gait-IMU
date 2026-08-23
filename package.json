@@ -4,8 +4,8 @@
   "private": true,
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "test": "echo \"no node tests yet\" && exit 0",
-    "lint": "echo \"no node lint yet\" && exit 0",
-    "build": "echo \"no node build yet\" && exit 0"
+    "test": "pnpm --filter @gait/terminal-renderer test",
+    "lint": "pnpm --filter @gait/terminal-renderer lint",
+    "build": "pnpm --filter @gait/terminal-renderer build"
   }
 }
