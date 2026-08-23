@@ -86,6 +86,26 @@ function copiedSnapshot() {
 
 let quickCreateCounter = 0;
 
+/**
+ * The pre-check fails on its first run and passes afterwards.
+ *
+ * Deliberate: the blocked state is the one people forget to look at, and a mock
+ * that always passes means nobody ever sees it outside a test. Failing first
+ * also makes 「重新检查」 do something visible, which is the only way to tell a
+ * working retry from a button that merely re-renders.
+ */
+let preflightRuns = 0;
+
+const PREFLIGHT_ITEMS = [
+  { id: "link-left", label: "左模块连接", passHint: "已连接" },
+  { id: "link-right", label: "右模块连接", passHint: "已连接" },
+  { id: "factory-cal", label: "出厂标定参数", passHint: "已匹配" },
+  { id: "disk", label: "磁盘空间", passHint: "充足" },
+  { id: "battery", label: "左右模块电量", passHint: "左 82% · 右 76%" },
+  { id: "arrival", label: "链路到达率", passHint: "观察 5 秒通过" },
+  { id: "baseline", label: "静置基线", passHint: "两个模块均静置" },
+];
+
 export const mockTerminalAdapter = Object.freeze({
   async snapshot() {
     return copiedSnapshot();
@@ -128,5 +148,21 @@ export const mockTerminalAdapter = Object.freeze({
       lastProtocolSeconds: null,
       consentValid: false,
     };
+  },
+
+  async runPreflight() {
+    preflightRuns += 1;
+    const firstRun = preflightRuns === 1;
+    return PREFLIGHT_ITEMS.map((item) => {
+      if (firstRun && item.id === "battery") {
+        return {
+          ...item,
+          status: "fail",
+          // Actionable only: what to do, not what went wrong internally.
+          hint: "左模块电量不足 22%（E-BLE-1005）。请更换或充电后重新检查。",
+        };
+      }
+      return { ...item, status: "pass", hint: item.passHint };
+    });
   },
 });

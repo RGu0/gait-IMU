@@ -345,6 +345,47 @@ body {
 
 .consent-gate { margin: 0; color: var(--text-secondary); font: var(--text-secondary-size); }
 
+/* ── P-05 safety confirmation + device pre-check ──────────────────── */
+
+.safety-section,
+.preflight-section {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.safety-section h2,
+.preflight-section h2 {
+  margin: 0;
+  font: var(--text-h3);
+}
+
+/* Same affordance as a consent line on purpose: both are "a person confirmed
+   this", and they should not look like different kinds of promise. */
+.safety-item {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  cursor: pointer;
+}
+
+.safety-item input {
+  width: 22px;
+  height: 22px;
+  margin: 1px 0 0;
+  flex: none;
+  accent-color: var(--brand-primary);
+}
+
+.preflight-running {
+  margin: 0;
+  color: var(--text-secondary);
+  font: var(--text-secondary-size);
+}
+
 @media (max-width: 900px) {
   .candidate-grid,
   .profile-measures {

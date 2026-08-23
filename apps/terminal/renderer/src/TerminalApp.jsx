@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ConsentScreen } from "./ConsentScreen.jsx";
 import { HubScreen } from "./HubScreen.jsx";
 import { LoginScreen } from "./LoginScreen.jsx";
+import { PreflightScreen } from "./PreflightScreen.jsx";
 import { ProfileScreen } from "./ProfileScreen.jsx";
 import { SubjectScreen } from "./SubjectScreen.jsx";
 
@@ -16,6 +17,7 @@ const STAGE = {
   subject: "subject",
   profile: "profile",
   consent: "consent",
+  preflight: "preflight",
 };
 
 export function TerminalApp({ adapter }) {
@@ -92,12 +94,23 @@ export function TerminalApp({ adapter }) {
     return (
       <ConsentScreen
         subjectLabel={subject?.maskedId}
-        onAgree={() => setStage(STAGE.hub)}
+        onAgree={() => setStage(STAGE.preflight)}
         onDecline={() => {
           setSubject(null);
           setProfile(null);
           setStage(STAGE.hub);
         }}
+      />
+    );
+  }
+
+  if (stage === STAGE.preflight) {
+    return (
+      <PreflightScreen
+        runChecks={() => adapter.runPreflight()}
+        // P-06 (wear guidance) is RAY-222 and is held pending RAY-260, so the
+        // ready state parks at the hub rather than pretending to go further.
+        onReady={() => setStage(STAGE.hub)}
       />
     );
   }
