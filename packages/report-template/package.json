@@ -1,0 +1,28 @@
+{
+  "name": "@gait/report-template",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The one report template. Rendered on screen for preview and by printToPDF for export — never two implementations.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "vitest": "latest"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./report.css": "./report.css"
+  },
+  "files": [
+    "index.js",
+    "report.css",
+    "ReportDocument.jsx"
+  ]
+}

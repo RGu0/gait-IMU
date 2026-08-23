@@ -1,0 +1,146 @@
+/* The one report stylesheet (R-4). Loaded by the on-screen preview and by the
+   printToPDF export alike — what you see is what prints (PRD §6.1).
+
+   A4 portrait, 18 mm margins. Sizes are in mm so the printed page is the source
+   of truth and the screen is the approximation, not the other way round. */
+
+@page {
+  size: A4 portrait;
+  margin: 18mm;
+}
+
+.rp-page {
+  /* 210mm − 2×18mm */
+  width: 174mm;
+  box-sizing: border-box;
+  margin: 0 auto;
+  color: #0F172A;
+  font-family: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.6;
+}
+
+/* ── ① cover ─────────────────────────────────────────── */
+
+.rp-cover { border-bottom: 0.6mm solid #2569BC; padding-bottom: 5mm; margin-bottom: 6mm; }
+.rp-cover__org { font-size: 9pt; color: #475569; }
+.rp-cover__title { margin: 2mm 0 4mm; font-size: 20pt; font-weight: 600; }
+
+.rp-cover__meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5mm 8mm; margin: 0; }
+.rp-cover__meta > div { display: flex; gap: 3mm; }
+.rp-cover__meta dt { color: #475569; min-width: 24mm; }
+.rp-cover__meta dd { margin: 0; font-weight: 500; }
+
+.rp-cover__edition {
+  display: inline-block;
+  margin-top: 4mm;
+  padding: 0.8mm 3mm;
+  border: 0.3mm solid #B7D3F2;
+  border-radius: 2mm;
+  background: #EFF5FC;
+  color: #2569BC;
+  font-size: 9pt;
+}
+
+/* Placed immediately after ① by markup order, never floated elsewhere. */
+.rp-annotation {
+  margin: 0 0 6mm;
+  padding: 3mm 4mm;
+  border-left: 1mm solid #F2DFAE;
+  background: #FDF6E6;
+  color: #96600D;
+}
+
+/* ── sections ────────────────────────────────────────── */
+
+.rp-section { margin-bottom: 7mm; break-inside: avoid; }
+.rp-section h2 { margin: 0 0 3mm; font-size: 12pt; font-weight: 600; }
+
+.rp-summary { margin: 0 0 2mm; }
+.rp-advice { margin: 0; color: #475569; }
+
+/* ── ③ metrics ───────────────────────────────────────── */
+
+.rp-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; }
+
+.rp-metric {
+  padding: 3mm;
+  border: 0.3mm solid #E2E8F0;
+  border-radius: 2mm;
+}
+
+.rp-metric--low { border-left: 1mm solid #F2DFAE; }
+.rp-metric--uncomputable { border-left: 1mm solid #CBD5E1; }
+
+.rp-metric__title { margin: 0 0 1mm; font-size: 9pt; color: #475569; }
+.rp-metric__value { margin: 0; font-size: 16pt; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rp-metric__value--low { color: #475569; }
+.rp-metric__unit { margin-left: 1mm; font-size: 9pt; font-weight: 400; color: #475569; }
+
+.rp-metric__none { margin: 0; font-size: 11pt; color: #64748B; }
+.rp-metric__reason { display: block; font-size: 8.5pt; }
+.rp-metric__note { margin: 1mm 0 0; font-size: 8.5pt; color: #475569; }
+
+/* ── ④ left/right ────────────────────────────────────── */
+
+.rp-compare { display: grid; grid-template-columns: 26mm 1fr 12mm; gap: 3mm; align-items: center; margin-bottom: 2.5mm; }
+.rp-compare__name, .rp-compare__unit { font-size: 9pt; color: #475569; }
+.rp-compare__bars { display: grid; gap: 1.5mm; }
+
+.rp-sidebar { display: flex; align-items: center; gap: 2mm; }
+
+/* Left = rounded square, right = circle. Shape survives a grayscale print;
+   colour does not (C-9). */
+.rp-sidemark {
+  width: 4.5mm; height: 4.5mm;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 7.5pt;
+  flex: none;
+}
+.rp-sidemark--left { background: #2569BC; border-radius: 1.2mm; }
+.rp-sidemark--right { background: #17A2C4; border-radius: 50%; }
+
+.rp-sidebar__track { flex: 1; height: 3mm; background: #F1F5F9; border-radius: 1.5mm; overflow: hidden; }
+.rp-sidebar__fill { display: block; height: 100%; }
+.rp-sidebar__fill--left { background: #2569BC; }
+
+/* Hatched, not merely another hue — see above. */
+.rp-sidebar__fill--right {
+  background: repeating-linear-gradient(45deg, #17A2C4 0 1mm, #FFFFFF 1mm 1.8mm);
+}
+
+.rp-sidebar__value { width: 12mm; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── ⑤ parameters ────────────────────────────────────── */
+
+.rp-table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+.rp-table th, .rp-table td { padding: 2mm 2mm; border-bottom: 0.2mm solid #E2E8F0; text-align: left; }
+.rp-table th { color: #475569; font-weight: 500; }
+.rp-num { font-variant-numeric: tabular-nums; }
+
+.rp-tag { padding: 0.5mm 2mm; border-radius: 3mm; font-size: 8.5pt; border: 0.2mm solid; }
+.rp-tag--normal { color: #187A4D; border-color: #BFE5D0; background: #EBF7F0; }
+.rp-tag--low { color: #96600D; border-color: #F2DFAE; background: #FDF6E6; }
+.rp-tag--uncomputable { color: #64748B; border-color: #CBD5E1; background: #F1F5F9; }
+
+/* ── ⑥ chart ─────────────────────────────────────────── */
+
+.rp-chart { width: 100%; height: 22mm; }
+.rp-chart__legend { margin: 1.5mm 0 0; font-size: 8.5pt; color: #475569; }
+
+/* ── ⑦ conditions ────────────────────────────────────── */
+
+.rp-conditions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5mm 8mm; margin: 0; }
+.rp-conditions > div { display: flex; gap: 3mm; }
+.rp-conditions dt { color: #475569; min-width: 24mm; }
+.rp-conditions dd { margin: 0; }
+
+/* ── ⑧ footer — the only place 12px-equivalent type is allowed ─ */
+
+.rp-footer {
+  margin-top: 8mm;
+  padding-top: 3mm;
+  border-top: 0.2mm solid #E2E8F0;
+  font-size: 8pt;
+  color: #64748B;
+}

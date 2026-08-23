@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { ConsentScreen } from "./ConsentScreen.jsx";
+import { DeviceSupportScreen } from "./DeviceSupportScreen.jsx";
+import { RecordsScreen } from "./RecordsScreen.jsx";
+import { ReportPreviewScreen } from "./ReportPreviewScreen.jsx";
 import { HubScreen } from "./HubScreen.jsx";
 import { LoginScreen } from "./LoginScreen.jsx";
 import { PreflightScreen } from "./PreflightScreen.jsx";
@@ -22,6 +25,16 @@ const STAGE = {
   preflight: "preflight",
   running: "running",
   result: "result",
+  records: "records",
+  reportPreview: "reportPreview",
+  deviceSupport: "deviceSupport",
+};
+
+/** Nav labels are the AppBar's contract; the mapping lives in one place. */
+const NAV_STAGE = {
+  工作台: STAGE.hub,
+  检测记录: STAGE.records,
+  设备与支持: STAGE.deviceSupport,
 };
 
 export function TerminalApp({ adapter }) {
@@ -34,6 +47,17 @@ export function TerminalApp({ adapter }) {
   const [error, setError] = useState("");
   const [live, setLive] = useState(null);
   const [result, setResult] = useState(null);
+  const [records, setRecords] = useState([]);
+  const [report, setReport] = useState(null);
+  const [deviceInfo, setDeviceInfo] = useState(null);
+
+  async function navigate(label) {
+    const next = NAV_STAGE[label];
+    if (!next) return;
+    if (next === STAGE.records) setRecords(await adapter.listRecords());
+    if (next === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
+    setStage(next);
+  }
 
   // The live sidebar values arrive while the walk is happening. They are held
   // here rather than inside TestRunScreen so that screen stays a view of a
@@ -175,10 +199,46 @@ export function TerminalApp({ adapter }) {
     );
   }
 
+  if (stage === STAGE.records) {
+    return (
+      <RecordsScreen
+        records={records}
+        onNavigate={navigate}
+        onOpenRecord={async (record) => {
+          setReport(await adapter.reportFor(record));
+          setStage(STAGE.reportPreview);
+        }}
+      />
+    );
+  }
+
+  if (stage === STAGE.reportPreview && report) {
+    return (
+      <ReportPreviewScreen
+        report={report}
+        onNavigate={navigate}
+        onBack={() => setStage(STAGE.records)}
+      />
+    );
+  }
+
+  if (stage === STAGE.deviceSupport && deviceInfo) {
+    return (
+      <DeviceSupportScreen
+        devices={deviceInfo.devices}
+        support={deviceInfo.support}
+        onNavigate={navigate}
+        onRecheck={handleRecheck}
+        onRepair={() => {}}
+      />
+    );
+  }
+
   if (stage === STAGE.hub && snapshot) {
     return (
       <HubScreen
         snapshot={snapshot}
+        onNavigate={navigate}
         onRecheck={handleRecheck}
         onStartNewAssessment={() => setStage(STAGE.subject)}
       />

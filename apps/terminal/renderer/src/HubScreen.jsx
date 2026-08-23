@@ -9,14 +9,14 @@ function recordStatus(status) {
   });
 }
 
-export function HubScreen({ snapshot, onRecheck, onStartNewAssessment }) {
+export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigate }) {
   const { deviceSummary, uploadSummary, recentRecords } = snapshot;
   const hasBattery = Number.isFinite(deviceSummary.leftBattery) && Number.isFinite(deviceSummary.rightBattery);
   const needsAttention = !deviceSummary.ready;
 
   return (
     <div className="hub-page">
-      <AppBar />
+      <AppBar current="工作台" onNavigate={onNavigate} />
       <main className="hub-content">
         <section className="hub-heading" aria-labelledby="hub-title">
           <div>

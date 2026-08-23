@@ -87,6 +87,79 @@ function copiedSnapshot() {
 let quickCreateCounter = 0;
 
 /**
+ * Records deliberately cover every status the list has to render, including the
+ * failed-quality one. A fixture of nothing but successes is how a status people
+ * only see on a bad day goes unreviewed until it happens on a real one.
+ */
+const RECORDS = [
+  { id: "r1", assessedAt: "2026-08-23 14:32", subjectLabel: "**2781", protocol: "120 秒", validSteps: 118, status: "已完成（基础版）", reportVersion: "R-2026-0823-0031" },
+  { id: "r2", assessedAt: "2026-08-23 13:58", subjectLabel: "**3140", protocol: "180 秒", validSteps: 164, status: "已完成（完整版）", reportVersion: "R-2026-0823-0030" },
+  { id: "r3", assessedAt: "2026-08-23 11:20", subjectLabel: "**9007", protocol: "120 秒", validSteps: 62, status: "未通过质检", reportVersion: "—" },
+  { id: "r4", assessedAt: "2026-08-23 10:44", subjectLabel: "临时002", protocol: "60 秒", validSteps: 51, status: "处理中", reportVersion: "—" },
+  { id: "r5", assessedAt: "2026-08-22 16:05", subjectLabel: "**1234", protocol: "120 秒", validSteps: 121, status: "上传中", reportVersion: "R-2026-0822-0028" },
+];
+
+export const REPORT = Object.freeze({
+  organization: "康健社区卫生服务中心",
+  subjectLabel: "**2781",
+  assessedAt: "2026-08-23",
+  protocolName: "定时步行测试",
+  protocolSeconds: 120,
+  edition: "基础版",
+  reportId: "R-2026-0823-0031",
+  algoVersion: "gait-core 0.4.1",
+  protocolVersion: "T-01 v3",
+  annotations: ["受试者使用了拄拐"],
+  summary: "本次步行的速度与节律处于日常活动可完成的范围，左右两侧差异不明显。",
+  advice: "建议关注近期是否有跌倒或步态改变，必要时复测。",
+  metrics: [
+    { key: "speed", title: "步速", value: "1.04", unit: "m/s", grade: "normal" },
+    { key: "cadence", title: "步频", value: "108", unit: "步/分", grade: "normal" },
+    { key: "stride", title: "步长", value: "1.15", unit: "m", grade: "normal" },
+    { key: "ds", title: "双支撑期占比", value: "27.9", unit: "%", grade: "low" },
+  ],
+  comparison: [
+    { label: "步长", left: 1.16, right: 1.14, unit: "m" },
+    { label: "站立相时长", left: 0.62, right: 0.64, unit: "s" },
+  ],
+  parameters: [
+    { label: "步长变异系数", value: "4.2", unit: "%", grade: "normal", qualityLabel: "良好" },
+    { label: "步周期变异系数", unit: "%", grade: "uncomputable", qualityLabel: "不适用" },
+    { label: "对称性指数", value: "0.96", unit: "", grade: "normal", qualityLabel: "良好" },
+    // Not produced by a 120 s protocol at all — unrelated to algorithm quality.
+    { label: "疲劳衰减", unit: "%", grade: "uncomputable", qualityLabel: "不适用" },
+  ],
+  timeline: {
+    left: [40, 96, 152, 208, 264, 320, 376, 432],
+    right: [66, 122, 178, 234, 290, 346, 402, 458],
+  },
+  conditions: [
+    { label: "时长配置", value: "120 秒" },
+    { label: "有效时长", value: "112 秒（93%）" },
+    { label: "有效步数", value: "118" },
+    { label: "转身次数", value: "14" },
+    { label: "辅助器具", value: "拄拐" },
+    { label: "步行特征", value: "拖步" },
+  ],
+});
+
+const DEVICES = Object.freeze({
+  leftBattery: 82,
+  rightBattery: 76,
+  modules: [
+    { side: "left", maskedAddress: "…:9A:4C", firmware: "1.4.2", lastConnected: "2026-08-23 14:31", factoryCalibrated: true },
+    { side: "right", maskedAddress: "…:9A:51", firmware: "1.4.2", lastConnected: "2026-08-23 14:31", factoryCalibrated: true },
+  ],
+});
+
+const SUPPORT = Object.freeze({
+  phone: "400-000-0000",
+  terminalId: "T-KJ-0042",
+  appVersion: "0.1.0",
+  algoVersion: "gait-core 0.4.1",
+});
+
+/**
  * One finished session. `疲劳衰减` is deliberately uncomputable here: a metric
  * the terminal cannot produce must still occupy its slot and say why, rather
  * than vanish (C-7). A missing card reads as "there is no such measure"; an
@@ -260,6 +333,18 @@ export const mockTerminalAdapter = Object.freeze({
 
   async sessionResult() {
     return VALID_RESULT;
+  },
+
+  async listRecords() {
+    return RECORDS.map((record) => ({ ...record }));
+  },
+
+  async reportFor(record) {
+    return { ...REPORT, subjectLabel: record?.subjectLabel ?? REPORT.subjectLabel };
+  },
+
+  async deviceSupport() {
+    return { devices: DEVICES, support: SUPPORT };
   },
 
   async runPreflight() {
