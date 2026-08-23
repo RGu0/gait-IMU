@@ -634,9 +634,125 @@ body {
   .run-endprompt__title { font-size: 96px; }
 }
 
+/* ── P-10 shared page shell ───────────────────────────────────────── */
+
+.page { min-height: 100vh; display: flex; flex-direction: column; }
+
+.page-body {
+  flex: 1;
+  width: min(var(--content-max-reading), 100%);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-6) var(--space-8);
+  display: grid;
+  gap: var(--space-6);
+  align-content: start;
+}
+
+.page-body h1 { margin: 0; font: var(--text-h1); }
+.page-body h2 { margin: 0 0 var(--space-3); font: var(--text-h3); }
+
+/* ── P-10a records ────────────────────────────────────────────────── */
+
+.filter-bar { display: flex; align-items: flex-end; gap: var(--space-4); }
+.filter { display: grid; gap: var(--space-1); }
+.filter span { color: var(--text-secondary); font: var(--text-secondary-size); }
+
+.filter select {
+  height: 44px;
+  min-width: 160px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: var(--text-body);
+}
+
+.filter-count { margin-left: auto; color: var(--text-secondary); font: var(--text-secondary-size); }
+.empty-note { margin: 0; color: var(--text-secondary); }
+
+/* ── P-10b report preview ─────────────────────────────────────────── */
+
+.preview-body {
+  /* Fixed to the viewport so the sheet scrolls inside its own pane rather than
+     taking the whole page with it — the report meta must stay in view while the
+     operator pages through the report. 64px is the AppBar. */
+  height: calc(100vh - 64px);
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: var(--space-6);
+  padding: var(--space-6);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.preview-pane {
+  overflow: auto;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  padding: var(--space-6);
+  display: flex;
+  justify-content: center;
+}
+
+/* The sheet keeps A4 proportions and is scaled, never re-laid-out: a
+   "screen-friendly" variant would quietly become a second template (R-4). */
+/* `zoom`, not `transform: scale`. Scale leaves the original layout box behind:
+   the first version left a 417px empty band under the sheet and made the pane
+   un-scrollable, because the box was still 297mm tall while the picture was
+   0.72 of that. zoom participates in layout, so the box matches what is on
+   screen. Chromium-only is fine here — this app ships inside Electron. */
+.preview-sheet {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 18mm;
+  background: #fff;
+  box-shadow: var(--shadow-card);
+  zoom: 0.72;
+  flex: none;
+}
+
+.preview-meta {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  padding: var(--space-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  height: fit-content;
+}
+
+.preview-meta h1 { margin: 0; font: var(--text-h2); }
+.preview-actions { display: flex; gap: var(--space-3); }
+
+/* ── P-10c devices and support ────────────────────────────────────── */
+
+.module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+
+.module-card {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+}
+
+.module-card header { display: flex; align-items: center; gap: var(--space-3); font-weight: 500; }
+.module-card header > :last-child { margin-left: auto; }
+
+.device-actions { display: flex; gap: var(--space-3); }
+
+@media (max-width: 1200px) {
+  .preview-body { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 900px) {
   .candidate-grid,
-  .profile-measures {
+  .profile-measures,
+  .module-grid {
     grid-template-columns: 1fr;
   }
 }
