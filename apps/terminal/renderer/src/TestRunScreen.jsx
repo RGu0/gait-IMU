@@ -27,6 +27,34 @@ import { Button, Dialog, LinkStatus, RhythmStrip, SideBadge, CountdownFocus } fr
 
 export const END_HOLD_MS = 3000;
 
+/** Below this the 160px countdown no longer fits with its instruction (C-14). */
+export const COMPACT_MAX_HEIGHT = 800;
+
+/**
+ * The countdown's size is an inline style inside CountdownFocus, so a media
+ * query cannot reach it — the breakpoint has to be evaluated here. Defaulting
+ * to `false` on a server-less render is safe: the terminal is always a browser.
+ */
+function useCompactViewport() {
+  const query = `(max-height: ${COMPACT_MAX_HEIGHT}px)`;
+  // Guarded rather than assumed. This is the screen a session cannot proceed
+  // without; a missing browser API must degrade to the larger type, never to a
+  // crash. Falling back to `false` keeps the subject-facing digits readable.
+  const supported = typeof window !== "undefined" && typeof window.matchMedia === "function";
+  const [compact, setCompact] = useState(() => (supported ? window.matchMedia(query).matches : false));
+
+  useEffect(() => {
+    if (!supported) return undefined;
+    const mql = window.matchMedia(query);
+    const onChange = (event) => setCompact(event.matches);
+    setCompact(mql.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query, supported]);
+
+  return compact;
+}
+
 function StepCount({ side, steps }) {
   return (
     <div className="step-tile">
@@ -43,8 +71,10 @@ export function TestRunScreen({
   onAbort,
   tickMs = 1000,
   holdMs = END_HOLD_MS,
-  compact = false,
+  compact,
 }) {
+  const viewportCompact = useCompactViewport();
+  const isCompact = compact ?? viewportCompact;
   const [remaining, setRemaining] = useState(live.totalSeconds);
   const [confirmingStop, setConfirmingStop] = useState(false);
 
@@ -123,7 +153,7 @@ export function TestRunScreen({
             <CountdownFocus
               seconds={remaining}
               instruction={live.instruction}
-              compact={compact}
+              compact={isCompact}
             />
           )}
         </section>

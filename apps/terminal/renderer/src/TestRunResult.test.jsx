@@ -55,6 +55,24 @@ describe("C-1 / C-2 — during capture the screen shows three things only", () =
   });
 });
 
+describe("C-14 — the countdown steps down on a 720-high terminal", () => {
+  const digits = () => screen.getByText(String(live.totalSeconds));
+
+  it("uses the large size when there is room", () => {
+    renderRun({}, { compact: false });
+    expect(digits().style.font).toContain("160px");
+  });
+
+  it("steps down to 120px when there is not", () => {
+    // 1280×720 is the floor the product must run on (C-14). The size lives in
+    // an inline style, so no media query can reach it — the breakpoint has to
+    // be evaluated in JS, and this asserts the wiring exists at all. It did not
+    // in the first version: the prop was accepted and never passed.
+    renderRun({}, { compact: true });
+    expect(digits().style.font).toContain("120px");
+  });
+});
+
 describe("C-5 — capture cannot be navigated away from", () => {
   it("offers no navigation and no back control", () => {
     renderRun();
