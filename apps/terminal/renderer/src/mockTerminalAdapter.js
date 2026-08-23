@@ -225,6 +225,7 @@ export const INVALID_RESULT = Object.freeze({
  * working retry from a button that merely re-renders.
  */
 let preflightRuns = 0;
+let calibrationRuns = 0;
 
 const PREFLIGHT_ITEMS = [
   { id: "link-left", label: "左模块连接", passHint: "已连接" },
@@ -345,6 +346,19 @@ export const mockTerminalAdapter = Object.freeze({
 
   async deviceSupport() {
     return { devices: DEVICES, support: SUPPORT };
+  },
+
+  /**
+   * Fails once, then passes — same reasoning as runPreflight: the failure
+   * screen is the one nobody looks at unless the mock puts it in front of them,
+   * and a retry that visibly changes the outcome is the only way to tell a
+   * working retry from a re-render.
+   */
+  async runCalibration() {
+    calibrationRuns += 1;
+    return calibrationRuns === 1
+      ? { ok: false, reason: "loose" }
+      : { ok: true };
   },
 
   async runPreflight() {

@@ -634,6 +634,76 @@ body {
   .run-endprompt__title { font-size: 96px; }
 }
 
+/* ── P-06 / P-07 illustration + text, two columns ─────────────────── */
+
+.two-column {
+  display: grid;
+  grid-template-columns: 560px 456px;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.two-column__figure {
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+}
+
+.ankle-diagram { max-width: 100%; height: auto; }
+
+.two-column__text { display: grid; gap: var(--space-5); align-content: start; }
+
+.wear-points { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-4); }
+
+.wear-points li {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.wear-points strong { color: var(--brand-primary); }
+.wear-points span { color: var(--text-secondary); }
+
+.wear-confirm {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  cursor: pointer;
+}
+
+.wear-confirm input {
+  width: 22px;
+  height: 22px;
+  margin: 1px 0 0;
+  flex: none;
+  accent-color: var(--brand-primary);
+}
+
+.calib-instruction { margin: 0; font: var(--text-body-lg); }
+.calib-substep { margin: 0; color: var(--text-secondary); font: var(--text-secondary-size); }
+
+.calib-failure {
+  padding: var(--space-6);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-card);
+}
+
+/* Action language, read at a glance while the operator is beside the subject. */
+.calib-failure__copy { margin: 0; font: 400 24px/1.5 var(--font-ui); color: var(--warning-fg); }
+
+@media (max-width: 1120px) {
+  .two-column { grid-template-columns: 1fr; }
+}
+
 /* ── P-10 shared page shell ───────────────────────────────────────── */
 
 .page { min-height: 100vh; display: flex; flex-direction: column; }

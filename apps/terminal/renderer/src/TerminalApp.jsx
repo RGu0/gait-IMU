@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CalibrationScreen } from "./CalibrationScreen.jsx";
 import { ConsentScreen } from "./ConsentScreen.jsx";
 import { DeviceSupportScreen } from "./DeviceSupportScreen.jsx";
 import { RecordsScreen } from "./RecordsScreen.jsx";
@@ -10,6 +11,7 @@ import { ProfileScreen } from "./ProfileScreen.jsx";
 import { ResultScreen } from "./ResultScreen.jsx";
 import { SubjectScreen } from "./SubjectScreen.jsx";
 import { TestRunScreen } from "./TestRunScreen.jsx";
+import { WearGuideScreen } from "./WearGuideScreen.jsx";
 
 /**
  * Screens are selected by an explicit `stage` rather than by inferring one from
@@ -23,6 +25,8 @@ const STAGE = {
   profile: "profile",
   consent: "consent",
   preflight: "preflight",
+  wear: "wear",
+  calibration: "calibration",
   running: "running",
   result: "result",
   records: "records",
@@ -148,13 +152,24 @@ export function TerminalApp({ adapter }) {
     return (
       <PreflightScreen
         runChecks={() => adapter.runPreflight()}
-        // P-06/P-07 (wear guidance and calibration) are RAY-222, held pending
-        // the RAY-260 decision. Until then a ready terminal goes straight to
-        // the walk rather than through two screens that do not exist yet.
-        onReady={() => {
+        onReady={() => setStage(STAGE.wear)}
+      />
+    );
+  }
+
+  if (stage === STAGE.wear) {
+    return <WearGuideScreen onContinue={() => setStage(STAGE.calibration)} />;
+  }
+
+  if (stage === STAGE.calibration) {
+    return (
+      <CalibrationScreen
+        runCalibration={() => adapter.runCalibration()}
+        onDone={() => {
           setLive(adapter.startSession());
           setStage(STAGE.running);
         }}
+        onAbandon={() => setStage(STAGE.hub)}
       />
     );
   }
