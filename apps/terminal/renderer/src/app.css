@@ -187,3 +187,167 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Wizard shell (skeleton B), shared by P-02…P-07 ───────────────── */
+
+.wizard-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-page);
+}
+
+.wizard-header {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-6);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.wizard-header > * {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+}
+
+.wizard-body {
+  flex: 1;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6);
+  display: grid;
+  gap: var(--space-6);
+  align-content: start;
+}
+
+.wizard-body--narrow { width: min(var(--content-max-wizard), 100%); }
+.wizard-body--wide { width: min(1040px, 100%); }
+
+.wizard-heading { display: grid; gap: var(--space-2); }
+.wizard-heading h1 { margin: 0; font: var(--text-h1); }
+.wizard-lead { margin: 0; color: var(--text-secondary); }
+
+/* The action rail is pinned so the primary action sits in the same place on
+   every wizard page — the operator should not have to hunt for it. */
+.wizard-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-default);
+}
+
+/* ── P-02 subject identification ──────────────────────────────────── */
+
+.lookup-form { max-width: 480px; }
+
+.review-card {
+  padding: var(--space-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+
+.review-list { margin: 0; display: grid; gap: var(--space-3); }
+
+.review-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--space-4);
+  align-items: baseline;
+}
+
+.review-row dt { color: var(--text-secondary); font: var(--text-secondary-size); }
+.review-row__value { margin: 0; }
+
+.review-row__value--emphasis {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.candidate-card {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  padding: var(--space-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+}
+
+.candidate-card h3 {
+  margin: 0;
+  font: var(--text-h3);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.conflict-escape { display: flex; gap: var(--space-3); }
+
+/* ── P-03 optional profile ────────────────────────────────────────── */
+
+.profile-grid { display: grid; gap: var(--space-6); }
+.profile-field { display: grid; gap: var(--space-2); }
+
+.profile-field__label {
+  color: var(--text-secondary);
+  font: var(--text-secondary-size);
+  font-weight: 500;
+}
+
+.profile-measures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+/* ── P-04 consent ─────────────────────────────────────────────────── */
+
+.consent-section { display: grid; gap: var(--space-3); }
+.consent-section h2 { margin: 0; font: var(--text-h3); }
+
+.consent-item {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  cursor: pointer;
+}
+
+.consent-item input {
+  width: 22px;
+  height: 22px;
+  margin: 2px 0 0;
+  flex: none;
+  accent-color: var(--brand-primary);
+}
+
+.consent-item__text { display: grid; gap: var(--space-1); }
+.consent-item__title { font-weight: 500; }
+
+.consent-item__detail {
+  color: var(--text-secondary);
+  font: var(--text-secondary-size);
+}
+
+.consent-gate { margin: 0; color: var(--text-secondary); font: var(--text-secondary-size); }
+
+@media (max-width: 900px) {
+  .candidate-grid,
+  .profile-measures {
+    grid-template-columns: 1fr;
+  }
+}
