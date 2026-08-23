@@ -43,10 +43,16 @@ importers:
         version: 4.1.11(jsdom@30.0.1)(vite@8.2.2)
 
   packages/design-system:
-    dependencies:
+    devDependencies:
       react:
         specifier: ^19.2.8
         version: 19.2.8
+      react-dom:
+        specifier: ^19.2.8
+        version: 19.2.8(react@19.2.8)
+      vitest:
+        specifier: latest
+        version: 4.1.11(jsdom@30.0.1)(vite@8.2.2)
 
 packages:
 
