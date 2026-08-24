@@ -44,6 +44,16 @@ from gait.sync.integrity import assess
 #: 一个足够细的时钟分辨率，用于把「时钟守卫」从其他断言里隔离出来。
 _FINE_CLOCK = 1e-7
 
+
+class _FakeDiscovered:
+    """`scan()` 结果的替身，只需要 name/address 两个字段。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.address = f"addr-{name}"
+        self.rssi = -40
+        self.handle = None
+
 _FRAME = b"\x55\x61" + struct.pack("<9h", *range(9))
 _ENV = BenchEnvironment(
     label="selftest", distance_m=None, occlusion="无", note="合成回放"
@@ -308,6 +318,57 @@ def test_consume_drops_samples_older_than_started() -> None:
         assert len(run.arrivals) == 1, "只有 started 之后的样本应被计入"
 
     asyncio.run(scenario())
+
+
+def test_scan_retries_until_both_devices_appear() -> None:
+    """真机实测：单次扫描常只看到一台，且每次是不同的那台。必须重试。"""
+    from gait.cli import linktest as mod
+
+    calls: list[float] = []
+    rounds = [
+        [_FakeDiscovered("A")],  # 只看到 A
+        [_FakeDiscovered("B")],  # 只看到 B
+        [_FakeDiscovered("A"), _FakeDiscovered("B")],  # 终于都看到
+    ]
+
+    async def fake_scan(timeout: float, **_: object) -> list[object]:
+        calls.append(timeout)
+        return rounds[len(calls) - 1]
+
+    async def scenario() -> list[object]:
+        original = mod.scan
+        mod.scan = fake_scan  # type: ignore[assignment]
+        try:
+            return await mod._scan_for(2, 20.0, 4, lambda *_: None)
+        finally:
+            mod.scan = original  # type: ignore[assignment]
+
+    found = asyncio.run(scenario())
+    assert len(found) == 2
+    assert len(calls) == 3, "应当一直重试到扫够为止"
+
+
+def test_scan_gives_up_after_the_attempt_budget() -> None:
+    """重试不是无限的：扫不够就把最后一次的结果交回去，由调用方报错退出。"""
+    from gait.cli import linktest as mod
+
+    calls: list[float] = []
+
+    async def fake_scan(timeout: float, **_: object) -> list[object]:
+        calls.append(timeout)
+        return [_FakeDiscovered("A")]
+
+    async def scenario() -> list[object]:
+        original = mod.scan
+        mod.scan = fake_scan  # type: ignore[assignment]
+        try:
+            return await mod._scan_for(2, 5.0, 3, lambda *_: None)
+        finally:
+            mod.scan = original  # type: ignore[assignment]
+
+    found = asyncio.run(scenario())
+    assert len(found) == 1
+    assert len(calls) == 3
 
 
 def test_verdict_flags_recording_error_alongside_integrity_problems() -> None:

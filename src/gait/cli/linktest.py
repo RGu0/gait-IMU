@@ -331,6 +331,30 @@ def _verdict(
     }
 
 
+async def _scan_for(
+    device_count: int, scan_timeout: float, attempts: int, echo
+) -> list[DiscoveredDevice]:
+    """扫到 ``device_count`` 台为止，最多试 ``attempts`` 次。
+
+    真机实测（2026-08-24，两台 WT901BLE67 并排放在桌上、RSSI −32/−36）：单次
+    扫描窗口经常**只看到其中一台，且每次是不同的那台** —— 模块 1 分钟未连接
+    就进休眠，广播间隔变长，两台的广播窗口未必落在同一次扫描里。
+
+    这不该由操作者用重跑来兜：一轮 30 分钟的实验，工位已经摆好，因为一次扫描
+    抖动就退出去让人重来是把工具的缺陷转嫁给人。重试三四次即可。
+    """
+    found: list[DiscoveredDevice] = []
+    for attempt in range(1, attempts + 1):
+        found = await scan(scan_timeout)
+        if len(found) >= device_count:
+            return found
+        echo(
+            f"扫描到 {len(found)}/{device_count} 台"
+            f"（第 {attempt}/{attempts} 次）：{[d.name for d in found]}"
+        )
+    return found
+
+
 async def _connect_live(
     device_count: int,
     mac_filters: list[str] | None,
@@ -338,8 +362,9 @@ async def _connect_live(
     out_dir: Path,
     label: str,
     echo,
+    scan_attempts: int = 4,
 ) -> list[tuple[WT901Device, DeviceRun, ThreadedRecordingWriter]]:
-    found = await scan(scan_timeout)
+    found = await _scan_for(device_count, scan_timeout, scan_attempts, echo)
     if mac_filters:
         selected: list[DiscoveredDevice] = []
         for needle in mac_filters:
@@ -650,6 +675,14 @@ def _markdown(report: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 一轮跑 30 分钟，操作者靠逐 10 s 的到达率判断「还活着吗」。stdout 一旦是
+    # 管道（`| tee round-1.log`，无人值守时的标准用法）Python 就转成块缓冲，
+    # 进度整段憋在缓冲区里 —— 真机第一轮就是这样：设备连上了、数据在落盘，
+    # 终端却一片安静，看起来和死机一模一样。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(
         prog="gait-linktest",
         description="200 Hz 双设备 BLE 链路压测（RAY-200 / PRD V2）",
