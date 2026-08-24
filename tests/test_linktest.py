@@ -68,9 +68,21 @@ _CHUNK_INTERVAL = 0.02
 def _write_synthetic_recording(
     path: Path, *, chunks: int, dropped: tuple[int, ...] = ()
 ) -> int:
-    """写一段合成录制，返回其中的样本数。``dropped`` 里的包被整包丢弃。"""
+    """写一段合成录制，返回其中的样本数。``dropped`` 里的包被整包丢弃。
+
+    包间隔带**确定性抖动**（±2 ms，固定种子）。这不是装饰：真实 BLE 的包间隔
+    从不精确相等，而「时刻是否被粗时钟量化」正是靠间隔的细结构判出来的
+    （见 `_observed_resolution`）。一份精确 20 ms 等距的录制与一台 20 ms 时钟
+    量化出来的录制在原理上无法区分 —— 夹具规整过头，测的就不是真实情形。
+    抖动幅度（0~0.6 ms，非负以保持时刻单调）远小于 3 样本（15 ms）的空洞阈值，不影响丢包检测。
+    """
+    rng = np.random.default_rng(20260824)
+    offsets = rng.uniform(0.0, 0.0006, size=chunks)
     recorded = tuple(
-        RecordedChunk(t=index * _CHUNK_INTERVAL, data=_FRAME * _FRAMES_PER_CHUNK)
+        RecordedChunk(
+            t=round(index * _CHUNK_INTERVAL + offsets[index], 6),
+            data=_FRAME * _FRAMES_PER_CHUNK,
+        )
         for index in range(chunks)
         if index not in dropped
     )
@@ -288,7 +300,8 @@ def test_replay_reports_host_clock_in_the_record(tmp_path: Path) -> None:
     assert clock["monotonic_resolution_s"] == host_clock_resolution()
     assert clock["sample_period_s"] == 1.0 / 200.0
     assert clock["required_ratio"] == CLOCK_RESOLUTION_RATIO
-    assert "主机单调时钟分辨率" in (out_dir / "report.md").read_text(encoding="utf-8")
+    assert clock["source"] == "host"
+    assert "本机时钟粒度" in (out_dir / "report.md").read_text(encoding="utf-8")
 
 
 def test_consume_drops_samples_older_than_started() -> None:
@@ -386,6 +399,91 @@ def test_streaming_span_trims_only_the_edges() -> None:
     assert first < 10 < last, "中间的低速段被裁掉了 —— 那是要测的东西"
 
 
+def test_observed_resolution_distinguishes_a_coarse_capture_clock() -> None:
+    """时钟粒度要从录制的时刻里量出来 —— 相关的是采集时的时钟，不是分析时的。
+
+    实测对照：真机 macOS 录制最小正间隔 0.066 ms；同一份数据量化到 15.625 ms
+    （Windows + Python 3.12 的 `time.monotonic()`）后是 15.625 ms。
+    """
+    from gait.cli.linktest import _observed_resolution
+
+    rng = np.random.default_rng(7)
+    fine = [round(i * 0.03 + rng.uniform(-0.002, 0.002), 6) for i in range(500)]
+    # 细时钟不留量化痕迹 —— 测不出来就是「没有证据表明它粗」，返回 None。
+    assert _observed_resolution(fine) is None
+
+    quantum = 0.015625
+    coarse = [round(t / quantum) * quantum for t in fine]
+    observed = _observed_resolution(coarse)
+    assert observed is not None
+    assert abs(observed - quantum) < 1e-9
+
+    assert _observed_resolution([]) is None
+    assert _observed_resolution([1.0]) is None
+    assert _observed_resolution([1.0, 1.0, 1.0]) is None
+
+
+def test_analyze_judges_the_capture_clock_not_the_analysing_host(
+    tmp_path: Path,
+) -> None:
+    """一份粗时钟采集的录制，无论在哪台机器上分析都必须被判作废。"""
+    path = tmp_path / "coarse.jsonl"
+    quantum = 0.015625
+    chunks = tuple(
+        RecordedChunk(
+            t=round(round(i * _CHUNK_INTERVAL / quantum) * quantum, 9),
+            data=_FRAME * _FRAMES_PER_CHUNK,
+        )
+        for i in range(300)
+    )
+    write_recording(
+        path,
+        Recording(
+            device_id="coarse",
+            created_utc="2026-08-24T00:00:00+00:00",
+            note="",
+            chunks=chunks,
+        ),
+    )
+
+    report = analyze_recordings(
+        paths=[path],
+        out_dir=tmp_path / "out",
+        env=_ENV,
+        nominal_fs=200.0,
+        echo=lambda *_: None,
+    )
+
+    assert report["host_clock"]["source"] == "recording"
+    assert report["verdict"]["clock_adequate"] is False
+    assert not report["verdict"]["pass"]
+    assert any("时钟分辨率" in p for p in report["verdict"]["problems"])
+
+
+def test_analyze_of_a_fine_recording_ignores_the_analysing_hosts_clock(
+    tmp_path: Path,
+) -> None:
+    """细粒度录制在**任何**机器上分析都应判合格 —— 包括时钟只有 15.6 ms 的
+    Windows。这条正是修复的要点：相关的是采集时的时钟，不是分析时的。
+    """
+    path = tmp_path / "fine.jsonl"
+    _write_synthetic_recording(path, chunks=200)
+
+    report = analyze_recordings(
+        paths=[path],
+        out_dir=tmp_path / "out",
+        env=_ENV,
+        nominal_fs=200.0,
+        echo=lambda *_: None,
+    )
+
+    assert report["host_clock"]["source"] == "recording"
+    # 未检出量化痕迹 —— 那本身就是时钟够细的证据。
+    assert report["host_clock"]["monotonic_resolution_s"] is None
+    assert report["verdict"]["clock_adequate"] is True
+    assert report["verdict"]["timing_valid"] is True
+
+
 def test_streaming_span_skips_the_high_rate_residual_before_config() -> None:
     """设备一连上就在高速流（200 Hz 固化在 flash），配置阶段夹在它后面。
 
@@ -434,8 +532,12 @@ def test_analyze_trims_the_low_rate_tail_before_measuring(tmp_path: Path) -> Non
     """回归：真机 round-2 补算时，卡死期间 11 分钟的 10 Hz 尾巴把缺失率顶到 37.8%。"""
     path = tmp_path / "with_tail.jsonl"
     frame = _FRAME
+    rng = np.random.default_rng(11)
     chunks = [
-        RecordedChunk(t=i * _CHUNK_INTERVAL, data=frame * _FRAMES_PER_CHUNK)
+        RecordedChunk(
+            t=round(i * _CHUNK_INTERVAL + rng.uniform(0.0, 0.0006), 6),
+            data=frame * _FRAMES_PER_CHUNK,
+        )
         for i in range(200)
     ]
     # 尾部 40 段 10 Hz（每包 1 帧，间隔 100 ms）——- 就是电量复读/卡死那一段。

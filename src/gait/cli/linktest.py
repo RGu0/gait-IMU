@@ -294,17 +294,23 @@ def _verdict(
     *,
     timing_valid: bool,
     nominal_fs: float,
-    clock_resolution: float,
+    clock_resolution: float | None,
 ) -> dict[str, Any]:
     """对照 V2 判据。任何一台设备不达标即整轮不达标。
 
     时钟分辨率不足时**先于**任何链路结论报出来：那种情况下缺失率量的是时钟，
     不是链路（见模块 docstring）。
+
+    ``clock_resolution`` 为 ``None`` 表示**没有检出量化痕迹**（见
+    `_observed_resolution`）—— 那本身就是时钟够细的证据，按合格处理。
     """
     problems: list[str] = []
     period = 1.0 / nominal_fs
-    clock_adequate = clock_resolution * CLOCK_RESOLUTION_RATIO <= period
+    clock_adequate = (
+        clock_resolution is None or clock_resolution * CLOCK_RESOLUTION_RATIO <= period
+    )
     if not clock_adequate:
+        assert clock_resolution is not None
         problems.append(
             f"主机单调时钟分辨率 {clock_resolution * 1e3:.3f} ms 粗于采样周期 "
             f"{period * 1e3:.1f} ms 的 1/{CLOCK_RESOLUTION_RATIO}，"
@@ -583,6 +589,8 @@ def _emit_report(
     replay_speed: float | str | None,
     echo,
     extra: dict[str, Any] | None = None,
+    clock_resolution: float | None = None,
+    clock_source: str = "host",
 ) -> dict[str, Any]:
     """统计、判定、写出报告。现场采集与离线分析共用这一条出口。
 
@@ -591,7 +599,9 @@ def _emit_report(
     """
     for run in runs:
         _finalize(run, nominal_fs)
-    clock_resolution = host_clock_resolution()
+    # 现场采集查本机时钟；离线分析用从录制时刻量出的粒度（None = 未检出量化）。
+    if clock_source == "host":
+        clock_resolution = host_clock_resolution()
     verdict = _verdict(
         runs,
         timing_valid=timing_valid,
@@ -614,6 +624,7 @@ def _emit_report(
             "sample_period_s": 1.0 / nominal_fs,
             "required_ratio": CLOCK_RESOLUTION_RATIO,
             "adequate": verdict["clock_adequate"],
+            "source": clock_source,
         },
         "environment": env.snapshot(),
         "source": source,
@@ -655,6 +666,49 @@ def _emit_report(
 
 #: 配置/电量自检阶段一定发生在录制的最前面这段时间内，s。见 `_streaming_span`。
 SETUP_WINDOW_S = 60.0
+
+
+def _observed_resolution(stamps: list[float]) -> float | None:
+    """从录制的时刻里量出打点时钟的粒度，s。样本不足时返回 ``None``。
+
+    ## 为什么离线分析不能查「当前这台机器」的时钟
+
+    `host_clock_resolution()` 问的是**正在跑分析的这台机器**，而录制里的时刻是
+    **当初采集那台机器**打的。拿一份 macOS 采集的录制到 Windows 上分析，会因为
+    Windows 的 15.6 ms 时钟被误判作废；反过来，一份 Windows 采集的（真的被
+    15.6 ms 量化过的）数据拿到 Mac 上分析，反而会被错误放行。相关的是采集时的
+    时钟 —— 而它就写在数据里。
+
+    ## 判法：查**量化**，不是查最小间隔
+
+    分辨率为 `q` 的时钟，所有时刻都是 `q` 的整数倍，因此任意两个时刻之差也是
+    `q` 的整数倍。所以判据是「全部间隔是否都落在某个公共步长的整数倍上」。
+
+    一开始用的是「最小正间隔」，那是错的：它只在包**成簇**时才小。真机 macOS
+    录制量到 0.066 ms 正是因为 BLE 会把两个通知挤进同一个连接事件；而一段没有
+    成簇的录制，最小间隔就等于包距（几十 ms），会被误判成粗时钟。
+
+    量化检测没有这个毛病：包距 30 ms 上下浮动的录制，间隔彼此不成整数倍关系；
+    而被 15.625 ms 量化过的录制，每个间隔都是它的整数倍。
+
+    返回 ``None`` 表示**测不出量化痕迹** —— 那说明时钟至少细到能分辨这些间隔的
+    差异，没有证据表明它粗，调用方按「无异常」处理。要它给出确切分辨率是做不到
+    的：细时钟本来就不留量化痕迹。
+    """
+    unique = np.unique(np.asarray(stamps, dtype=np.float64))
+    if unique.size < 3:
+        return None
+    diffs = np.diff(unique)
+    positive = diffs[diffs > 0]
+    if positive.size < 2:
+        return None
+    step = float(positive.min())
+    if step <= 0:
+        return None
+    ratios = positive / step
+    if float(np.max(np.abs(ratios - np.round(ratios)))) < 0.01:
+        return step
+    return None
 
 
 def _streaming_span(
@@ -730,6 +784,7 @@ def analyze_recordings(
     """
     runs: list[DeviceRun] = []
     trims: list[dict[str, float]] = []
+    resolutions: list[float] = []
     for path in paths:
         recording = read_recording(path)
         decoder = FrameDecoder()
@@ -740,6 +795,9 @@ def analyze_recordings(
             counts.append(len(frames))
             stamps.append(chunk.t)
 
+        observed = _observed_resolution(stamps)
+        if observed is not None:
+            resolutions.append(observed)
         first, last = _streaming_span(counts, stamps)
         arrivals = [
             stamps[i] for i in range(first, last + 1) for _ in range(counts[i])
@@ -779,7 +837,28 @@ def analyze_recordings(
         sources=[str(p) for p in paths],
         replay_speed=None,
         extra={"trimmed": trims},
+        # 时钟粒度取自**录制里的时刻**，不是正在跑分析的这台机器 —— 相关的是
+        # 采集时的时钟。多份录制取最粗的那个（最保守）。
+        clock_resolution=max(resolutions) if resolutions else None,
+        clock_source="recording",
         echo=echo,
+    )
+
+
+def _clock_line(clock: dict[str, Any]) -> str:
+    """报告里那行时钟说明。分辨率可能为 ``None`` —— 见 `_observed_resolution`。"""
+    period_ms = clock["sample_period_s"] * 1e3
+    where = "采集录制的宿主" if clock["source"] == "recording" else "本机"
+    resolution = clock["monotonic_resolution_s"]
+    if resolution is None:
+        measured = "未检出量化痕迹（说明足够细）"
+    else:
+        measured = f"{resolution * 1e3:.4g} ms"
+    suffix = "" if clock["adequate"] else " — ❌ 不足"
+    return (
+        f"- {where}时钟粒度：{measured}"
+        f"（采样周期 {period_ms:.1f} ms，要求细于其 1/{clock['required_ratio']}）"
+        f"{suffix}"
     )
 
 
@@ -797,13 +876,7 @@ def _markdown(report: dict[str, Any]) -> str:
         ),
         f"- 平台：{env['platform']}",
         f"- 链路：{env['host_bluetooth']}",
-        (
-            f"- 主机单调时钟分辨率："
-            f"{report['host_clock']['monotonic_resolution_s'] * 1e3:.4g} ms"
-            f"（采样周期 {report['host_clock']['sample_period_s'] * 1e3:.1f} ms，"
-            f"要求细于其 1/{report['host_clock']['required_ratio']}）"
-            f"{'' if report['host_clock']['adequate'] else ' — ❌ 不足'}"
-        ),
+        _clock_line(report["host_clock"]),
     ]
     if env["note"]:
         lines.append(f"- 备注：{env['note']}")
