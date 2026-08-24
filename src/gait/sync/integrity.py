@@ -329,6 +329,29 @@ def _robust_period(arrival: np.ndarray, boundaries: np.ndarray, nominal_fs: floa
     return float(np.median(block_elapsed / block_counts))
 
 
+def estimate_period(
+    arrival: np.ndarray, nominal_fs: float, cfg: AlgoConfig | None = None
+) -> float:
+    """器件的实测采样周期，s。`1/它` 就是器件**实发**速率。
+
+    为什么需要它：器件晶振偏差是真实且不小的。wt901 在真机上逐档实测，200 Hz
+    档（编码 `0x0B`）实际跑 198.43 Hz —— 比标称低 **0.8%**。RAY-200 实测两台
+    WT901BLE67 为 197.8 Hz。而 PRD §17.1 V2 的判据是「缺失率 < 0.5%」：光晶振
+    偏差就吃掉了全部预算，按标称算的话一条完美链路也永远不达标。
+
+    **判据要问的是「器件发出来的，链路丢了多少」**，分母因此必须是器件实发数。
+
+    局限，用之前必须知道：本估计对**成片**的丢包稳健（块间中位数拒绝含丢包的
+    块），但若丢包**均匀散布在每一个块**里，中位数块本身也含丢包，估计出的就
+    退化为**到达**速率而非器件速率，缺失率随之被低估。交叉验证的办法是看
+    `find_gaps` 给出的丢失数与「按本速率算的期望数 − 实收数」是否相符。
+    """
+    cfg = cfg or AlgoConfig()
+    times = np.asarray(arrival, dtype=np.float64)
+    boundaries = _packet_boundaries(times, nominal_fs, cfg.sync_packet_gap_fraction)
+    return _robust_period(times, boundaries, nominal_fs)
+
+
 def split_segments(samples: int, gaps: list[Gap]) -> list[tuple[int, int]]:
     """按空洞把 `[0, samples)` 切成连续段。
 

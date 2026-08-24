@@ -365,10 +365,70 @@ def test_analyze_and_live_reports_are_structurally_identical(tmp_path: Path) -> 
     )
     replayed = _run(tmp_path / "rp", [path], speed=None)
 
-    assert set(analyzed) == set(replayed)
+    # 共有字段必须同构；分析路径可以多带自己的溯源字段（trimmed 只对它有意义）。
+    assert set(replayed) <= set(analyzed)
+    assert set(analyzed) - set(replayed) == {"trimmed"}
     assert set(analyzed["devices"][0]) == set(replayed["devices"][0])
     assert set(analyzed["verdict"]) == set(replayed["verdict"])
     assert set(analyzed["host_clock"]) == set(replayed["host_clock"])
+
+
+def test_streaming_span_trims_only_the_edges() -> None:
+    """录制首尾的 10 Hz 段（电量/配置阶段）要裁掉，中间的低速段绝不能裁。"""
+    from gait.cli.linktest import _streaming_span
+
+    # 首 3 包与末 2 包是 1 帧/包（10 Hz），中间是 8 帧/包（200 Hz），
+    # 其中第 10 包是一次真实的链路劣化 —— 它必须留在区间内。
+    counts = [1, 1, 1] + [8] * 6 + [1] + [8] * 6 + [1, 1]
+    first, last = _streaming_span(counts)
+
+    assert (first, last) == (3, len(counts) - 3)
+    assert first < 10 < last, "中间的低速段被裁掉了 —— 那是要测的东西"
+
+
+def test_streaming_span_handles_a_recording_with_no_streaming() -> None:
+    from gait.cli.linktest import _streaming_span
+
+    assert _streaming_span([]) == (0, -1)
+    assert _streaming_span([0, 0, 0]) == (0, 2)
+
+
+def test_analyze_trims_the_low_rate_tail_before_measuring(tmp_path: Path) -> None:
+    """回归：真机 round-2 补算时，卡死期间 11 分钟的 10 Hz 尾巴把缺失率顶到 37.8%。"""
+    path = tmp_path / "with_tail.jsonl"
+    frame = _FRAME
+    chunks = [
+        RecordedChunk(t=i * _CHUNK_INTERVAL, data=frame * _FRAMES_PER_CHUNK)
+        for i in range(200)
+    ]
+    # 尾部 40 段 10 Hz（每包 1 帧，间隔 100 ms）——- 就是电量复读/卡死那一段。
+    tail_start = chunks[-1].t
+    chunks += [
+        RecordedChunk(t=tail_start + 0.1 * (i + 1), data=frame) for i in range(40)
+    ]
+    write_recording(
+        path,
+        Recording(
+            device_id="tail",
+            created_utc="2026-08-24T00:00:00+00:00",
+            note="",
+            chunks=tuple(chunks),
+        ),
+    )
+
+    report = analyze_recordings(
+        paths=[path],
+        out_dir=tmp_path / "out",
+        env=_ENV,
+        nominal_fs=200.0,
+        echo=lambda *_: None,
+    )
+
+    device = report["devices"][0]
+    assert device["samples"] == 200 * _FRAMES_PER_CHUNK, "尾巴没被裁掉"
+    assert report["trimmed"][0]["trailing_s"] > 3.0
+    assert device["integrity"]["lost_samples"] == 0
+    assert report["verdict"]["pass"]
 
 
 def test_scan_retries_until_both_devices_appear() -> None:

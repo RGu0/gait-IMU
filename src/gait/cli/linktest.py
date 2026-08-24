@@ -86,7 +86,7 @@ from gait.device.ble import (
     read_battery_at_low_rate,
 )
 from gait.device.recorder import ThreadedRecordingWriter
-from gait.sync.integrity import IntegrityReport, assess
+from gait.sync.integrity import IntegrityReport, assess, estimate_period
 
 __all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench"]
 
@@ -104,6 +104,10 @@ SUSTAINED_RATE_FLOOR = 0.99
 #: 取 10：量化误差 ≤ 半个周期的 1/5，不足以在残差上造出 3 样本（PRD 的空洞阈值）
 #: 的台阶。Windows + Python 3.12 的 15.6 ms 在 200 Hz 下差了 31 倍，会被拦住。
 CLOCK_RESOLUTION_RATIO = 10
+
+
+#: 关闭一台设备最多等多久，秒。见 `run_bench` 的 finally 块。
+CLOSE_TIMEOUT = 10.0
 
 
 def host_clock_resolution() -> float:
@@ -162,6 +166,8 @@ class DeviceRun:
     recording_error: str | None = None
     integrity: IntegrityReport | None = None
     sustained_windows: list[int] = field(default_factory=list)
+    measured_fs: float | None = None
+    """器件实发速率，由到达时刻估计。判据的分母，见 `_finalize`。"""
     arrival_array: np.ndarray | None = None
 
     @property
@@ -188,6 +194,7 @@ class DeviceRun:
                 self.applied_config.snapshot() if self.applied_config else None
             ),
             "disconnected_at": self.disconnected_at,
+            "measured_fs": self.measured_fs,
             "device_stats": self.stats,
             "recording": self.recording_path,
             "recording_error": self.recording_error,
@@ -274,7 +281,11 @@ def _finalize(run: DeviceRun, nominal_fs: float) -> None:
         # 让判定报「样本不足」，也不要产出一份看着正常的数字。
         return
     run.arrival_array = arrival
-    run.integrity = assess(arrival, nominal_fs)
+    # 判据按**器件实发速率**算，不按标称：器件晶振比标称低约 1%（实测 197.8 Hz
+    # vs 标称 200），光这一项就吃掉 0.5% 判据的全部预算，按标称算的话一条完美
+    # 链路也永远不达标。见 `integrity.estimate_period` 的说明与其局限。
+    run.measured_fs = 1.0 / estimate_period(arrival, nominal_fs)
+    run.integrity = assess(arrival, run.measured_fs)
     run.sustained_windows = sustained_undersampling(run.integrity.per_second_rate)
 
 
@@ -517,7 +528,16 @@ async def run_bench(
         for device, run in zip(devices, runs):
             run.stats = asdict(device.stats)
             try:
-                await device.close()  # RecordingTransport.disconnect 会关 writer。
+                # 必须带超时。真机实测（RAY-200 round-2）：对一台**已经断连**的
+                # peripheral 调 bleak 的 disconnect，CoreBluetooth 不会再回调，
+                # await 就永远挂着 —— 于是整轮卡死在采集**完成之后、写报告之前**，
+                # 30 分钟的数据被扣在进程里。清理失败不该有资格吃掉结果。
+                await asyncio.wait_for(device.close(), timeout=CLOSE_TIMEOUT)
+            except TimeoutError:
+                echo(
+                    f"关闭 {device.device_id} 超时（{CLOSE_TIMEOUT:.0f}s）：设备可能已"
+                    "断连，蓝牙栈不再回调。继续写报告。"
+                )
             except Exception as close_error:  # noqa: BLE001 - 一台关不掉不能拦住其余的清理
                 echo(f"关闭 {device.device_id} 时出错（忽略）：{close_error!r}")
         for writer in writers:
@@ -562,6 +582,7 @@ def _emit_report(
     sources: list[str] | None,
     replay_speed: float | str | None,
     echo,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """统计、判定、写出报告。现场采集与离线分析共用这一条出口。
 
@@ -601,6 +622,7 @@ def _emit_report(
         "replay_speed": replay_speed,
         "devices": [run.snapshot() for run in runs],
         "verdict": verdict,
+        **(extra or {}),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(
@@ -631,6 +653,33 @@ def _emit_report(
     return report
 
 
+def _streaming_span(counts: list[int]) -> tuple[int, int]:
+    """录制里真正处于高速流的那一段（首尾包索引，闭区间）。
+
+    一份录制不只有采集：开头有电量读与配置下发，结尾有电量复读，这些阶段设备
+    还停在 10 Hz。现场路径靠 `started` 把它们挡在统计之外（`_consume` 过滤
+    `t_host < started`），录制文件里却没有那个标记 —— 全吃进去的话，一段 10 Hz
+    在 200 Hz 的尺子下就是 95% 的「丢包」。真机 round-2 的第一次补算正是这样：
+    卡死期间设备以 10 Hz 挂了 11 分钟，缺失率被报成 37.8%。
+
+    判据用**每包帧数**，因为它直接对应物理差别：200 Hz 打包传输每次通知带 8 帧，
+    10 Hz 每次带 1 帧。取全片中位数的一半作阈值。
+
+    **只裁首尾，绝不裁中间。** 中间的低速段是真实的链路劣化（正是本实验要测的
+    东西），裁掉它等于把结论修饰成想要的样子。
+    """
+    if not counts:
+        return 0, -1
+    positive = [c for c in counts if c > 0]
+    if not positive:
+        return 0, len(counts) - 1
+    threshold = max(2.0, float(np.median(positive)) / 2.0)
+    streaming = [i for i, c in enumerate(counts) if c >= threshold]
+    if not streaming:
+        return 0, len(counts) - 1
+    return streaming[0], streaming[-1]
+
+
 def analyze_recordings(
     *,
     paths: list[Path],
@@ -654,14 +703,27 @@ def analyze_recordings(
     样本在 `t_host` 上只差几微秒），不是近似。
     """
     runs: list[DeviceRun] = []
+    trims: list[dict[str, float]] = []
     for path in paths:
         recording = read_recording(path)
         decoder = FrameDecoder()
-        arrivals: list[float] = []
+        counts: list[int] = []
+        stamps: list[float] = []
         for chunk in recording.chunks:
-            for frame in decoder.feed(chunk.data):
-                if frame.flag is FrameFlag.DATA:
-                    arrivals.append(chunk.t)
+            frames = [f for f in decoder.feed(chunk.data) if f.flag is FrameFlag.DATA]
+            counts.append(len(frames))
+            stamps.append(chunk.t)
+
+        first, last = _streaming_span(counts)
+        arrivals = [
+            stamps[i] for i in range(first, last + 1) for _ in range(counts[i])
+        ]
+        trimmed = {
+            "leading_s": round(stamps[first] - stamps[0], 3) if stamps else 0.0,
+            "trailing_s": round(stamps[-1] - stamps[last], 3) if stamps else 0.0,
+        }
+        trims.append(trimmed)
+
         run = DeviceRun(device_id=recording.device_id)
         run.arrivals = arrivals
         run.recording_path = str(path)
@@ -671,7 +733,10 @@ def analyze_recordings(
             "dropped_bytes": decoder.dropped_bytes,
         }
         runs.append(run)
-        echo(f"{recording.device_id}: {len(arrivals)} 样本，来自 {path.name}")
+        echo(
+            f"{recording.device_id}: {len(arrivals)} 样本，来自 {path.name}"
+            f"（裁掉首 {trimmed['leading_s']:.1f}s / 末 {trimmed['trailing_s']:.1f}s 的非流式段）"
+        )
 
     return _emit_report(
         runs=runs,
@@ -687,6 +752,7 @@ def analyze_recordings(
         source="analysis",
         sources=[str(p) for p in paths],
         replay_speed=None,
+        extra={"trimmed": trims},
         echo=echo,
     )
 
