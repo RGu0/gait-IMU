@@ -106,8 +106,32 @@ SUSTAINED_RATE_FLOOR = 0.99
 CLOCK_RESOLUTION_RATIO = 10
 
 
-#: 关闭一台设备最多等多久，秒。见 `run_bench` 的 finally 块。
+#: 关闭一台设备最多等多久，秒。见 `_close_quietly`。
 CLOSE_TIMEOUT = 10.0
+
+
+async def _close_quietly(device: WT901Device, echo) -> None:
+    """关闭一台设备，**永远不会挂住，也永远不抛**。
+
+    必须带超时。真机实测两次：对一台**已经断连**（或连接失败）的 peripheral 调
+    bleak 的 disconnect，CoreBluetooth 不会再回调，``await`` 就永远等下去。
+
+    - RAY-200 round-2：卡在采集**完成之后、写报告之前**，30 分钟数据被扣在进程里。
+    - RAY-200 round-3：卡在**连接失败的清理路径**里 —— 第二台连不上，清理第一台
+      时挂住，整个重试循环停摆，一次采集都没开始。
+
+    第一次只修了前者，没有把所有 ``close()`` 调用点一起收口，于是第二处又栽了
+    一遍。清理路径的失败不该有资格拖住主流程 —— 这个函数就是那个收口。
+    """
+    try:
+        await asyncio.wait_for(device.close(), timeout=CLOSE_TIMEOUT)
+    except TimeoutError:
+        echo(
+            f"关闭 {device.device_id} 超时（{CLOSE_TIMEOUT:.0f}s）：设备可能已断连，"
+            "蓝牙栈不再回调。继续。"
+        )
+    except Exception as error:  # noqa: BLE001 - 一台关不掉不能拦住其余的清理
+        echo(f"关闭 {device.device_id} 时出错（忽略）：{error!r}")
 
 
 def host_clock_resolution() -> float:
@@ -423,10 +447,7 @@ async def _connect_live(
             # 连接会让下一次 connect 直接失败（wt901 ble.py 的警告）。
             writer.close()
             for opened, _, _ in connected:
-                try:
-                    await opened.close()
-                except Exception as cleanup_error:  # noqa: BLE001 - 清理路径
-                    echo(f"清理 {opened.device_id} 时出错（忽略）：{cleanup_error!r}")
+                await _close_quietly(opened, echo)
             raise
         run = DeviceRun(device_id=device.device_id)
         run.recording_path = str(recording_path)
@@ -533,19 +554,7 @@ async def run_bench(
     finally:
         for device, run in zip(devices, runs):
             run.stats = asdict(device.stats)
-            try:
-                # 必须带超时。真机实测（RAY-200 round-2）：对一台**已经断连**的
-                # peripheral 调 bleak 的 disconnect，CoreBluetooth 不会再回调，
-                # await 就永远挂着 —— 于是整轮卡死在采集**完成之后、写报告之前**，
-                # 30 分钟的数据被扣在进程里。清理失败不该有资格吃掉结果。
-                await asyncio.wait_for(device.close(), timeout=CLOSE_TIMEOUT)
-            except TimeoutError:
-                echo(
-                    f"关闭 {device.device_id} 超时（{CLOSE_TIMEOUT:.0f}s）：设备可能已"
-                    "断连，蓝牙栈不再回调。继续写报告。"
-                )
-            except Exception as close_error:  # noqa: BLE001 - 一台关不掉不能拦住其余的清理
-                echo(f"关闭 {device.device_id} 时出错（忽略）：{close_error!r}")
+            await _close_quietly(device, echo)
         for writer in writers:
             writer.close()  # 幂等；只兜 device.close 没走到的路径。
 

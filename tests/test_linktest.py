@@ -570,6 +570,49 @@ def test_analyze_trims_the_low_rate_tail_before_measuring(tmp_path: Path) -> Non
     assert report["verdict"]["pass"]
 
 
+def test_close_quietly_never_hangs_on_an_unresponsive_device() -> None:
+    """清理路径的失败不该有资格拖住主流程。
+
+    真机栽过两次：对已断连（或连接失败）的 peripheral 调 bleak 的 disconnect，
+    CoreBluetooth 不再回调，await 永远等下去 —— round-2 卡在写报告之前（30 分钟
+    数据被扣住），round-3 卡在连接失败的清理里（一次采集都没开始）。
+    """
+    from gait.cli import linktest as mod
+
+    class _NeverCloses:
+        device_id = "stuck"
+
+        async def close(self) -> None:
+            await asyncio.sleep(3600)
+
+    messages: list[str] = []
+
+    async def scenario() -> None:
+        original = mod.CLOSE_TIMEOUT
+        mod.CLOSE_TIMEOUT = 0.05
+        try:
+            await mod._close_quietly(_NeverCloses(), messages.append)
+        finally:
+            mod.CLOSE_TIMEOUT = original
+
+    asyncio.run(scenario())
+    assert any("超时" in m for m in messages)
+
+
+def test_close_quietly_swallows_errors() -> None:
+    from gait.cli import linktest as mod
+
+    class _Explodes:
+        device_id = "boom"
+
+        async def close(self) -> None:
+            raise OSError("蓝牙栈炸了")
+
+    messages: list[str] = []
+    asyncio.run(mod._close_quietly(_Explodes(), messages.append))
+    assert any("出错" in m for m in messages)
+
+
 def test_scan_retries_until_both_devices_appear() -> None:
     """真机实测：单次扫描常只看到一台，且每次是不同的那台。必须重试。"""
     from gait.cli import linktest as mod
