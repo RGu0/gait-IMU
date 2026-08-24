@@ -72,6 +72,8 @@ from wt901 import (
     WT901Device,
     scan,
 )
+from wt901.protocol.frames import FrameDecoder, FrameFlag
+from wt901.recording import read_recording
 from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
@@ -527,7 +529,47 @@ async def run_bench(
     for run in runs:
         _finalize(run, nominal_fs)
     # 回放的到达时刻由 sleep 精度决定，不是录制里记的时刻 —— 一律不认时序指标。
-    timing_valid = not replay_files
+    return _emit_report(
+        runs=runs,
+        out_dir=out_dir,
+        env=env,
+        nominal_fs=nominal_fs,
+        duration=duration,
+        started_utc=started_utc,
+        # 回放的到达时刻由 sleep 精度决定，不是录制里记的时刻 —— 不认时序指标。
+        timing_valid=not replay_files,
+        source="replay" if replay_files else "live",
+        sources=[str(p) for p in replay_files] if replay_files else None,
+        replay_speed=(
+            ("full" if replay_speed is None else replay_speed)
+            if replay_files
+            else None
+        ),
+        echo=echo,
+    )
+
+
+def _emit_report(
+    *,
+    runs: list[DeviceRun],
+    out_dir: Path,
+    env: BenchEnvironment,
+    nominal_fs: float,
+    duration: float,
+    started_utc: str,
+    timing_valid: bool,
+    source: str,
+    sources: list[str] | None,
+    replay_speed: float | str | None,
+    echo,
+) -> dict[str, Any]:
+    """统计、判定、写出报告。现场采集与离线分析共用这一条出口。
+
+    共用不是为了省代码，是为了让两条路径的报告**逐字段同构** —— 一份离线补算
+    出来的报告若与现场报告长得不一样，评审时就无法直接比对。
+    """
+    for run in runs:
+        _finalize(run, nominal_fs)
     clock_resolution = host_clock_resolution()
     verdict = _verdict(
         runs,
@@ -553,15 +595,14 @@ async def run_bench(
             "adequate": verdict["clock_adequate"],
         },
         "environment": env.snapshot(),
-        "replay": [str(p) for p in replay_files] if replay_files else None,
-        "replay_speed": (
-            ("full" if replay_speed is None else replay_speed)
-            if replay_files
-            else None
-        ),
+        "source": source,
+        "replay": sources if source == "replay" else None,
+        "analyzed": sources if source == "analysis" else None,
+        "replay_speed": replay_speed,
         "devices": [run.snapshot() for run in runs],
         "verdict": verdict,
     }
+    out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -579,7 +620,7 @@ async def run_bench(
         np.savetxt(out_dir / f"arrival_{index}.csv", run.arrival_array, fmt="%.6f")
     (out_dir / "report.md").write_text(_markdown(report), encoding="utf-8")
     echo(f"报告已写入 {out_dir}")
-    if replay_files:
+    if source == "replay":
         echo("警告：回放模式，时序指标无效 —— 只证明采集通路接线正确。")
     if not verdict["clock_adequate"]:
         echo(
@@ -588,6 +629,66 @@ async def run_bench(
         )
     echo("判定：" + ("达标" if verdict["pass"] else f"不达标 {verdict['problems']}"))
     return report
+
+
+def analyze_recordings(
+    *,
+    paths: list[Path],
+    out_dir: Path,
+    env: BenchEnvironment,
+    nominal_fs: float,
+    echo=print,
+) -> dict[str, Any]:
+    """从**录制文件里记的到达时刻**补算一份报告。
+
+    这条路径存在的理由：`ThreadedRecordingWriter` 落盘时写的 ``t`` 就是 BLE
+    回调发生的时刻（与 `ImuSample.t_host` 同源同钟），所以一轮采集即使中途被
+    打断、没能走到写报告那一步，**字节和真实时序都还在盘上**。一轮 30 分钟的
+    实验加上摆工位的时间，不该因为进程没活到最后就整轮作废。
+
+    与 ``--replay`` 的关键区别：回放是把字节重新喂进设备层，`t_host` 在**回放
+    时刻**重新打点，时序信息就此丢失（所以回放一律 ``timing_valid: false``）。
+    这里直接采信录制里的 ``t``，因此时序指标**有效**。
+
+    一段字节里的多帧共享该段的到达时刻 —— 现场采集也是如此（同一次通知里的
+    样本在 `t_host` 上只差几微秒），不是近似。
+    """
+    runs: list[DeviceRun] = []
+    for path in paths:
+        recording = read_recording(path)
+        decoder = FrameDecoder()
+        arrivals: list[float] = []
+        for chunk in recording.chunks:
+            for frame in decoder.feed(chunk.data):
+                if frame.flag is FrameFlag.DATA:
+                    arrivals.append(chunk.t)
+        run = DeviceRun(device_id=recording.device_id)
+        run.arrivals = arrivals
+        run.recording_path = str(path)
+        run.stats = {
+            "frames": len(arrivals),
+            "resync_count": decoder.resync_count,
+            "dropped_bytes": decoder.dropped_bytes,
+        }
+        runs.append(run)
+        echo(f"{recording.device_id}: {len(arrivals)} 样本，来自 {path.name}")
+
+    return _emit_report(
+        runs=runs,
+        out_dir=out_dir,
+        env=env,
+        nominal_fs=nominal_fs,
+        duration=max(
+            (run.arrivals[-1] - run.arrivals[0] for run in runs if len(run.arrivals) > 1),
+            default=0.0,
+        ),
+        started_utc=datetime.now(UTC).isoformat(),
+        timing_valid=True,  # 录制里的 t 是真实到达时刻
+        source="analysis",
+        sources=[str(p) for p in paths],
+        replay_speed=None,
+        echo=echo,
+    )
 
 
 def _markdown(report: dict[str, Any]) -> str:
@@ -621,6 +722,12 @@ def _markdown(report: dict[str, Any]) -> str:
         lines.append(
             "- ⚠️ **时序指标无效**：回放的到达时刻由事件循环的 sleep 精度决定，"
             "不是录制里记的时刻。本报告只证明采集通路接线正确，不构成链路结论。"
+        )
+    if report.get("analyzed"):
+        lines.append(f"- **离线补算**：{report['analyzed']}")
+        lines.append(
+            "- 时序指标**有效**：到达时刻取自录制文件里落盘时记下的 BLE 回调"
+            "时刻（与现场 `t_host` 同源同钟），不是回放时重新打的点。"
         )
     if not report["verdict"]["clock_adequate"]:
         lines.append(
@@ -712,6 +819,14 @@ def main(argv: list[str] | None = None) -> int:
         "--replay", type=Path, action="append", default=None, help="录制文件，可重复"
     )
     parser.add_argument(
+        "--analyze",
+        type=Path,
+        action="append",
+        default=None,
+        help="从录制文件里记的到达时刻离线补算报告（可重复）。用于抢救被打断的"
+        "一轮：字节与真实时序都还在盘上。与 --replay 不同，时序指标有效。",
+    )
+    parser.add_argument(
         "--replay-speed",
         default="1.0",
         help="回放速度倍率；full = 全速不等待（时序指标随之无效）",
@@ -736,6 +851,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     replay_speed: float | None
     replay_speed = None if args.replay_speed == "full" else float(args.replay_speed)
+
+    if args.analyze:
+        report = analyze_recordings(
+            paths=args.analyze,
+            out_dir=out_dir,
+            env=env,
+            nominal_fs=float(args.rate),
+        )
+        return 0 if report["verdict"]["pass"] else 1
 
     report = asyncio.run(
         run_bench(

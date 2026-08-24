@@ -34,6 +34,7 @@ from gait.cli.linktest import (
     _consume,
     _finalize,
     _verdict,
+    analyze_recordings,
     host_clock_resolution,
     run_bench,
     sustained_undersampling,
@@ -318,6 +319,56 @@ def test_consume_drops_samples_older_than_started() -> None:
         assert len(run.arrivals) == 1, "只有 started 之后的样本应被计入"
 
     asyncio.run(scenario())
+
+
+def test_analyze_recovers_exact_timing_from_a_recording(tmp_path: Path) -> None:
+    """离线补算必须采信录制里记的到达时刻 —— 那是抢救被打断一轮的全部依据。
+
+    构造一段带已知空洞的录制（包间隔 20 ms，每包 4 帧 = 200 Hz），补算出的
+    丢失数必须精确等于注入值，且 `timing_valid` 为真（与回放相反）。
+    """
+    path = tmp_path / "interrupted.jsonl"
+    dropped = (60, 61)  # 连丢 2 包 = 8 个样本
+    _write_synthetic_recording(path, chunks=125, dropped=dropped)
+
+    report = analyze_recordings(
+        paths=[path],
+        out_dir=tmp_path / "out",
+        env=_ENV,
+        nominal_fs=200.0,
+        echo=lambda *_: None,
+    )
+
+    device = report["devices"][0]
+    assert device["samples"] == (125 - len(dropped)) * _FRAMES_PER_CHUNK
+    assert device["integrity"]["lost_samples"] == len(dropped) * _FRAMES_PER_CHUNK
+    # 与 --replay 的关键区别：录制里的 t 是真时刻，所以时序指标有效。
+    assert report["verdict"]["timing_valid"] is True
+    assert report["source"] == "analysis"
+    assert report["analyzed"] == [str(path)]
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "离线补算" in md
+    assert "时序指标**有效**" in md
+
+
+def test_analyze_and_live_reports_are_structurally_identical(tmp_path: Path) -> None:
+    """两条路径的报告必须逐字段同构，否则评审无法直接比对。"""
+    path = tmp_path / "a.jsonl"
+    _write_synthetic_recording(path, chunks=40)
+
+    analyzed = analyze_recordings(
+        paths=[path],
+        out_dir=tmp_path / "an",
+        env=_ENV,
+        nominal_fs=200.0,
+        echo=lambda *_: None,
+    )
+    replayed = _run(tmp_path / "rp", [path], speed=None)
+
+    assert set(analyzed) == set(replayed)
+    assert set(analyzed["devices"][0]) == set(replayed["devices"][0])
+    assert set(analyzed["verdict"]) == set(replayed["verdict"])
+    assert set(analyzed["host_clock"]) == set(replayed["host_clock"])
 
 
 def test_scan_retries_until_both_devices_appear() -> None:

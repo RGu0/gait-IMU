@@ -459,6 +459,113 @@ def test_a_larger_gap_threshold_lets_a_small_loss_through():
     assert find_gaps(arrival, NOMINAL_FS, lenient) == []
 
 
+# ── 成簇到达（RAY-200 真机实测的形态）────────────────────────────────────────
+#
+# `simulate` 的抖动锚定在绝对 `true_time` 上，所以包间隔围绕 per_packet/fs 对称 ——
+# 中位数等于均值。真机不是这样：BLE 通知**成簇**到达，几个挤在一起然后等一等，
+# 包间隔严重右偏（实测中位 30.7 ms、均值 40.5 ms、p99 91 ms）。这一组守着那个形态。
+
+
+#: BLE 连接事件栅格，s。投递只能发生在栅格点上。
+CONNECTION_EVENT = 0.030
+
+
+def bunched(
+    *,
+    packets: int = 400,
+    per_packet: int = 8,
+    fs: float = FS_TRUE,
+    drop: set[int] | None = None,
+) -> tuple[np.ndarray, int]:
+    """成簇到达：包按绝对时间生产，投递对齐到 BLE 连接事件栅格。
+
+    器件每 `per_packet/fs`（= 40 ms）攒满一包，但主机只能在连接事件上收到它，
+    于是投递时刻被**向上取整到 30 ms 的栅格**。生产周期 40 ms 与栅格 30 ms 不
+    互约，包间隔就在 30 与 60 ms 之间跳：中位数 30 ms，而均值必然回到 40 ms
+    （投递长期跟得上生产）。这正是真机实测的形态 —— 中位 30.7 ms / 均值
+    40.5 ms —— 也正是「对逐包比值取中位数」会栽的地方。
+
+    生产时刻是**绝对**的（与 `simulate` 同一个理由），所以丢包时时间轴自洽：
+    丢一包就少 `per_packet` 个样本，同时那 `per_packet/fs` 的时间照常流过。
+    """
+    drop = drop or set()
+    times: list[np.ndarray] = []
+    lost = 0
+    previous = -np.inf
+    for packet in range(packets):
+        produced = (packet + 1) * per_packet / fs
+        if packet in drop:
+            lost += per_packet
+            continue
+        delivered = np.ceil(produced / CONNECTION_EVENT) * CONNECTION_EVENT
+        delivered = max(delivered, previous + 1e-4)
+        previous = delivered
+        # 一包里的样本几乎同时到达，微秒级递增只为保持严格单调。
+        times.append(delivered + 1e-6 * np.arange(per_packet))
+    return np.concatenate(times), lost
+
+
+def test_bunched_arrival_intervals_really_are_skewed():
+    """先证明这个夹具确实复现了真机的偏斜，否则下面两条测的就不是那件事。"""
+    arrival, _ = bunched()
+    packet_starts = arrival[::8]
+    intervals = np.diff(packet_starts)
+
+    assert np.median(intervals) < 0.8 * intervals.mean()
+
+
+def test_robust_period_is_unbiased_under_bunched_arrivals():
+    """成簇到达下周期估计必须仍然无偏。
+
+    RAY-200 真机：逐包比值的中位数把 5.07 ms 估成 3.85 ms（偏小 24%），
+    残差随之单调爬升，`find_gaps` 把 1.41% 的真实缺口报成 24.00%。
+    """
+    from gait.sync.integrity import _packet_boundaries, _robust_period
+
+    arrival, _ = bunched()
+    cfg = AlgoConfig()
+    boundaries = _packet_boundaries(arrival, NOMINAL_FS, cfg.sync_packet_gap_fraction)
+
+    period = _robust_period(arrival, boundaries, NOMINAL_FS)
+    true_period = (arrival[-1] - arrival[0]) / (arrival.size - 1)
+
+    assert abs(period - true_period) / true_period < 0.02, (
+        f"估计 {period * 1e3:.3f} ms vs 真实 {true_period * 1e3:.3f} ms"
+    )
+
+    # 与被替换掉的估计器直接对比，说明差距不是精度级的而是量级级的。
+    ends = np.concatenate((boundaries - 1, [arrival.size - 1]))
+    elapsed = np.diff(arrival[ends])
+    counts = np.diff(np.concatenate(([0], boundaries, [arrival.size])))[1:]
+    old = float(np.median(elapsed[counts > 0] / counts[counts > 0]))
+    assert old < 0.85 * true_period, "夹具没能复现旧估计器的偏差，测的就不是那件事"
+
+
+def test_bunched_arrivals_do_not_manufacture_phantom_loss():
+    """回归：一条**干净**的成簇链路不得被报成丢包。
+
+    这是 RAY-200 真机上 24% 假丢包的直接回归测试。
+    """
+    arrival, _ = bunched()
+
+    report = assess(arrival, NOMINAL_FS)
+
+    lost = report.lost_samples
+    assert lost / report.received < 0.005, f"干净链路却报出 {lost} 个丢失"
+
+
+def test_loss_is_still_detected_under_bunched_arrivals():
+    """修掉偏差不能把稳健性一起修掉：成簇之下真丢包仍要被检出。"""
+    arrival, injected = bunched(drop={200, 201})
+
+    report = assess(arrival, NOMINAL_FS)
+
+    assert injected == 16
+    assert report.lost_samples == pytest.approx(injected, abs=4), (
+        f"注入 {injected}，检出 {report.lost_samples}"
+    )
+
+
 # ── Gap ───────────────────────────────────────────────────────────────────────
 
 
