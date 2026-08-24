@@ -22,13 +22,32 @@ PRD §17.1 验证点 V2：≤5 m 近距下 30 min 缺失率 < 0.5%。本工具�
 「不达标」的数据点被记录（PRD §6.1 的正式采集同样是断连即安全停止）。所以
 `auto_reconnect=False`，断连时刻由看门狗记进报告。
 
+## 主机时钟分辨率是这个实验的前提，必须先验
+
+整个 V2 判据建立在**主机接收时刻**上：wt901 用 `time.monotonic()` 给每个样本
+打 `t_host`，到达率、空洞、缺失率全是从这些时刻算出来的。如果主机的单调时钟
+分辨率粗于采样周期，这些时刻就被量化成台阶，**测出来的丢包是时钟的假象，不是
+链路的性质**。
+
+这不是理论风险：`time.monotonic()` 在 **Windows + Python 3.12** 上走
+`GetTickCount64()`，分辨率约 **15.6 ms** —— 而 200 Hz 的采样周期是 5 ms。
+（CPython 3.13 才改用 `QueryPerformanceCounter`。）本项目的正式交付平台正是
+Windows，所以这条必须在跑之前查，且查不过要进判定 —— 一份用 15.6 ms 时钟量
+出来的「缺失率 18%」会把 go/no-go 引向完全错误的方向。
+
+判据取 `分辨率 ≤ 采样周期 / 10`。
+
 ## 回放模式
 
 `--replay a.jsonl b.jsonl` 用录制文件代替真机（wt901 的 ReplayTransport），
-跳过配置与电量（回放不会应答寄存器读）。它验证的是采集与统计通路本身。
-**只有 `--replay-speed 1.0` 的时序指标才有效**：其他倍速下 `t_host` 打在被
-压缩/拉伸的到达时刻上，空洞在时间轴上消失，报告会把这标成 `timing_valid:
-false` 并在判定旁边警告 —— 全速回放跑出的「达标」只证明通路能跑，不证明链路。
+跳过配置与电量（回放不会应答寄存器读）。它验证的是采集通路的**接线**：
+字节 → 帧 → 样本 → 到达时刻 → 报告文件。
+
+**回放不验证时序指标。** 回放的到达时刻由事件循环的 `sleep` 精度决定，而不是
+录制里记的时刻：非 1.0 倍速会直接压缩/拉伸时间轴，即使 1.0 倍速，在定时器
+粒度粗的宿主上（同样是 Windows）也复现不出 20 ms 的节拍。所以报告对回放一律
+标 `timing_valid: false`（1.0 倍速且时钟够细时才为 true），测量链路本身的
+正确性由 `tests/test_linktest.py` 用**确定性到达时刻数组**验证。
 """
 
 from __future__ import annotations
@@ -38,6 +57,7 @@ import asyncio
 import json
 import platform
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +97,20 @@ LOSS_RATE_CRITERION = 0.005
 #: 阈值，这是窗口均值阈值；两者都等 RAY-200 实测分布定稿后一起校准。
 SUSTAINED_WINDOW_S = 30
 SUSTAINED_RATE_FLOOR = 0.99
+
+#: 主机单调时钟分辨率必须细于采样周期的这个比例，测量才有意义（见模块 docstring）。
+#: 取 10：量化误差 ≤ 半个周期的 1/5，不足以在残差上造出 3 样本（PRD 的空洞阈值）
+#: 的台阶。Windows + Python 3.12 的 15.6 ms 在 200 Hz 下差了 31 倍，会被拦住。
+CLOCK_RESOLUTION_RATIO = 10
+
+
+def host_clock_resolution() -> float:
+    """`t_host` 所用时钟的分辨率，秒。
+
+    wt901 用 `time.monotonic()` 打 `t_host`（device.py），所以要查的是它，
+    不是 `perf_counter` —— 两者在 Windows 上曾经是不同的实现。
+    """
+    return time.get_clock_info("monotonic").resolution
 
 _RATE_BY_HZ = {
     10: ReturnRate.HZ_10,
@@ -229,17 +263,40 @@ async def _watch(
 
 
 def _finalize(run: DeviceRun, nominal_fs: float) -> None:
-    if len(run.arrivals) >= 2:
-        run.arrival_array = np.asarray(run.arrivals, dtype=np.float64)
-        run.integrity = assess(run.arrival_array, nominal_fs)
-        run.sustained_windows = sustained_undersampling(
-            run.integrity.per_second_rate
-        )
+    if len(run.arrivals) < 2:
+        return
+    arrival = np.asarray(run.arrivals, dtype=np.float64)
+    if arrival[-1] - arrival[0] <= 0:
+        # 全部样本共享同一个时刻：时间轴上没有跨度，到达率无从谈起。发生在
+        # 全速回放，也发生在时钟分辨率粗到装不下整轮的场合。宁可留 None
+        # 让判定报「样本不足」，也不要产出一份看着正常的数字。
+        return
+    run.arrival_array = arrival
+    run.integrity = assess(arrival, nominal_fs)
+    run.sustained_windows = sustained_undersampling(run.integrity.per_second_rate)
 
 
-def _verdict(runs: list[DeviceRun], *, timing_valid: bool) -> dict[str, Any]:
-    """对照 V2 判据。任何一台设备不达标即整轮不达标。"""
+def _verdict(
+    runs: list[DeviceRun],
+    *,
+    timing_valid: bool,
+    nominal_fs: float,
+    clock_resolution: float,
+) -> dict[str, Any]:
+    """对照 V2 判据。任何一台设备不达标即整轮不达标。
+
+    时钟分辨率不足时**先于**任何链路结论报出来：那种情况下缺失率量的是时钟，
+    不是链路（见模块 docstring）。
+    """
     problems: list[str] = []
+    period = 1.0 / nominal_fs
+    clock_adequate = clock_resolution * CLOCK_RESOLUTION_RATIO <= period
+    if not clock_adequate:
+        problems.append(
+            f"主机单调时钟分辨率 {clock_resolution * 1e3:.3f} ms 粗于采样周期 "
+            f"{period * 1e3:.1f} ms 的 1/{CLOCK_RESOLUTION_RATIO}，"
+            "到达时刻被量化，本轮缺失率量的是时钟不是链路 —— 结论不可用"
+        )
     for run in runs:
         if run.integrity is None:
             problems.append(f"{run.device_id}: 样本不足，无法评估")
@@ -266,7 +323,12 @@ def _verdict(runs: list[DeviceRun], *, timing_valid: bool) -> dict[str, Any]:
                 f"{run.device_id}: 主机侧消费队列溢出 "
                 f"{run.stats['dropped_samples']} 样本，测量自身不可信"
             )
-    return {"pass": not problems, "problems": problems, "timing_valid": timing_valid}
+    return {
+        "pass": not problems,
+        "problems": problems,
+        "timing_valid": timing_valid and clock_adequate,
+        "clock_adequate": clock_adequate,
+    }
 
 
 async def _connect_live(
@@ -439,8 +501,15 @@ async def run_bench(
             run.recording_error = repr(writer.error)
     for run in runs:
         _finalize(run, nominal_fs)
-    timing_valid = not replay_files or replay_speed == 1.0
-    verdict = _verdict(runs, timing_valid=timing_valid)
+    # 回放的到达时刻由 sleep 精度决定，不是录制里记的时刻 —— 一律不认时序指标。
+    timing_valid = not replay_files
+    clock_resolution = host_clock_resolution()
+    verdict = _verdict(
+        runs,
+        timing_valid=timing_valid,
+        nominal_fs=nominal_fs,
+        clock_resolution=clock_resolution,
+    )
 
     report = {
         "issue": "RAY-200",
@@ -452,6 +521,12 @@ async def run_bench(
         "started_utc": started_utc,
         "duration_requested_s": duration,
         "nominal_fs": nominal_fs,
+        "host_clock": {
+            "monotonic_resolution_s": clock_resolution,
+            "sample_period_s": 1.0 / nominal_fs,
+            "required_ratio": CLOCK_RESOLUTION_RATIO,
+            "adequate": verdict["clock_adequate"],
+        },
         "environment": env.snapshot(),
         "replay": [str(p) for p in replay_files] if replay_files else None,
         "replay_speed": (
@@ -479,8 +554,13 @@ async def run_bench(
         np.savetxt(out_dir / f"arrival_{index}.csv", run.arrival_array, fmt="%.6f")
     (out_dir / "report.md").write_text(_markdown(report), encoding="utf-8")
     echo(f"报告已写入 {out_dir}")
-    if not timing_valid:
-        echo("警告：非 1.0 倍速回放，时序指标无效，判定只证明通路能跑。")
+    if replay_files:
+        echo("警告：回放模式，时序指标无效 —— 只证明采集通路接线正确。")
+    if not verdict["clock_adequate"]:
+        echo(
+            f"警告：主机时钟分辨率 {clock_resolution * 1e3:.4g} ms 不足以测 "
+            f"{nominal_fs:.0f} Hz，本轮到达率是时钟的假象，结论不可用。"
+        )
     echo("判定：" + ("达标" if verdict["pass"] else f"不达标 {verdict['problems']}"))
     return report
 
@@ -499,6 +579,13 @@ def _markdown(report: dict[str, Any]) -> str:
         ),
         f"- 平台：{env['platform']}",
         f"- 链路：{env['host_bluetooth']}",
+        (
+            f"- 主机单调时钟分辨率："
+            f"{report['host_clock']['monotonic_resolution_s'] * 1e3:.4g} ms"
+            f"（采样周期 {report['host_clock']['sample_period_s'] * 1e3:.1f} ms，"
+            f"要求细于其 1/{report['host_clock']['required_ratio']}）"
+            f"{'' if report['host_clock']['adequate'] else ' — ❌ 不足'}"
+        ),
     ]
     if env["note"]:
         lines.append(f"- 备注：{env['note']}")
@@ -506,10 +593,15 @@ def _markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"- **回放模式**（无真机，{report['replay_speed']}×）：{report['replay']}"
         )
-    if not report["verdict"]["timing_valid"]:
         lines.append(
-            "- ⚠️ **时序指标无效**：非 1.0 倍速回放会压缩/拉伸到达时刻，"
-            "空洞在时间轴上消失。本报告只证明通路能跑，不构成链路结论。"
+            "- ⚠️ **时序指标无效**：回放的到达时刻由事件循环的 sleep 精度决定，"
+            "不是录制里记的时刻。本报告只证明采集通路接线正确，不构成链路结论。"
+        )
+    if not report["verdict"]["clock_adequate"]:
+        lines.append(
+            "- ⚠️ **主机时钟分辨率不足**：到达时刻被量化，缺失率量的是时钟不是"
+            "链路。本轮结论不可用（Windows + Python 3.12 的 `time.monotonic()` "
+            "是 15.6 ms，需 Python ≥ 3.13 或换宿主）。"
         )
     lines += ["", "## 判据（PRD §17.1 V2）", ""]
     lines.append(
