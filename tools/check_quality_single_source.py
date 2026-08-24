@@ -19,11 +19,36 @@ low**，而两个数字都出自我们的系统，用户没有任何办法判断
    的签名。
 
 **抓不到**：把阈值拆成两半再拼、从后端拿一个数再自己比、或者干脆用别的词命名等级。
+**也抓不到等值比较**（`n === 0 ? "uncomputable" : "normal"`）—— 第 2 条只认尖括号，
+而 `===` 里一个尖括号都没有。那是一个真漏，不是取舍，另见 RAY-266。
+
 所以它是一道**防手滑**的闸，不是一个证明。这一点必须写明，否则它会被当成比实际更强
 的保证 —— 而那种误解比没有检查更危险。
 
-**它会误伤，而且方向是刻意的。** 像 `{items.length > 0 && <Badge grade="normal" />}`
-这样的一行会被拦下来 —— 那里并没有复算分级，只是同一行里恰好既有比较又有等级字面量。
+## `<` 与 `>` 既是运算符也是标点
+
+第 2 条在 JSX 里踩过一个坑，值得写下来。原先它直接对整行匹配 `[<>]=?`，于是
+
+    <MetricTile grade="low" />
+
+被判成"由比较得出等级" —— 那一行**没有任何比较**，`<` 只是开标签。反过来
+
+    const cls = g === "low" ? "a" : "b";
+
+**不会**被拦，因为 `===` 里没有尖括号。同一个比较，包不包在 JSX 里决定了拦不拦：
+判别的其实是"是不是 JSX"，不是"是不是在比较"。箭头函数的 `=>` 同理。
+
+现在的做法是**先把标点剔掉再匹配**（见 `_without_punctuation`）：剔完整的 JSX 标签、
+剔箭头。剔的是**完整标签**而不是单个 `<` —— 标签内部若含真正的比较，那个标签就剔
+不干净，残留的运算符照样触发。所以 `<p className={n < 16 ? "low" : "normal"}>` 仍然
+会被抓住。**收窄的是语法面，不是规则本身。**
+
+## 它仍然会误伤，而且方向是刻意的
+
+像 `{items.length > 0 && <Badge grade="normal" />}` 这样的一行仍然会被拦下来 ——
+那里并没有复算分级，只是同一行里恰好既有一个真比较又有等级字面量。这一条保持不变：
+它至少确实包含一个比较，与上面那种"纯标点"的误伤不是一回事。
+
 误伤会当场暴露并被讨论（改一行、拆成两行，或者在这里加一条豁免）；漏过则不会，而漏
 过的那一天正是这个检查该拦没拦住的那一天。与 `io/session.py` 那道身份明文检查同一个
 取舍。
@@ -68,6 +93,29 @@ _GRADE_LITERAL = re.compile(
     r"""['"`](?:""" + "|".join(re.escape(grade) for grade in GRADES) + r""")['"`]"""
 )
 
+#: `<` 与 `>` 在 JSX/TS 里既是运算符也是标点。这两条把**标点**从行里剔掉，
+#: 剩下的才当运算符看。
+#:
+#: 剔的是**完整标签**而不是单个 `<` —— 这一点是整个修法的关键。标签内部若含
+#: 真正的比较，`[^<>]*` 跨不过那个 `<`，整条正则就匹配不上，标签**剔不干净**，
+#: 残留的运算符照样触发拦截。也就是说
+#:
+#:     <p className={n < MIN ? "low" : "normal"}>
+#:
+#: 仍然会被抓住，而
+#:
+#:     <p className={g === "low" ? "a" : "b"}>
+#:
+#: 不会。把 `<` 单独排除掉就做不到这个区分。
+_JSX_TAG = re.compile(r"</?[A-Za-z][^<>]*/?>|</?>")
+#: 箭头函数的 `>` 同样只是标点。注意 `=>` 与 `>=` 字符顺序相反，剔前者不会碰后者。
+_ARROW = re.compile(r"=>")
+
+
+def _without_punctuation(line: str) -> str:
+    """把 JSX 标签与箭头剔掉，只留下可能是关系运算符的 `<` / `>`。"""
+    return _ARROW.sub(" ", _JSX_TAG.sub(" ", line))
+
 
 def _sources(root: Path) -> list[Path]:
     found: list[Path] = []
@@ -104,7 +152,7 @@ def scan(root: Path) -> tuple[list[str], int]:
                 offences.append(
                     f"{path}:{number}: 同一行里既有阈值 {MIN_STEPS_FOR_NORMAL} 又有等级字面量"
                 )
-            if _RELATIONAL.search(line) and _GRADE_LITERAL.search(line):
+            if _RELATIONAL.search(_without_punctuation(line)) and _GRADE_LITERAL.search(line):
                 offences.append(f"{path}:{number}: 由比较得出等级（渲染进程不得复算分级）")
     return offences, len(files)
 

@@ -409,6 +409,62 @@ def test_the_check_allows_merely_rendering_a_grade(tmp_path):
     assert offences == 0
 
 
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("自闭合标签传 grade", 'export const A = () => <MetricTile grade="low" />;'),
+        (
+            "开标签里按 grade 分支",
+            'export function B({g}) { return <p className={g === "low" ? "a" : "b"}>x</p>; }',
+        ),
+        (
+            "标签内读 grade 决定文案",
+            'export const C = ({r}) => <td>{r.grade === "uncomputable" ? "本次不适用" : r.value}</td>;',
+        ),
+        ("箭头函数按 grade 分支", 'export const toneOf = (g) => g === "low" ? 1 : 0;'),
+    ],
+)
+def test_the_check_does_not_mistake_punctuation_for_a_comparison(tmp_path, label, source):
+    """`<`、`>` 在 JSX 与箭头里是**标点**，不是运算符。
+
+    原先这些全都被拦下来，而它们一个比较都没有。判别的成了"是不是 JSX"，不是
+    "是不是在比较" —— 同一个 `g === "low"`，写在 JSX 里被拦、写在赋值里放行。
+    见 RAY-265。
+    """
+    offences, _ = run_check_against(make_fake_repo(tmp_path, source + "\n"))
+
+    assert offences == 0, label
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "标签里藏着真比较",
+            'export const F = ({n}) => <p className={n < 16 ? "low" : "normal"}>x</p>;',
+        ),
+        ("比较与等级同一行", 'export function D(x, g) { return x < 16 && g === "low"; }'),
+        (
+            "标签外有真比较",
+            'export const G = ({i}) => <div>{i.length > 0 && <Badge grade="normal" />}</div>;',
+        ),
+    ],
+)
+def test_剔掉标点不会放过真正的比较(tmp_path, label, source):
+    """**只测"不再误伤"会让一个什么都不拦的实现也全绿。**
+
+    所以这一组反过来测：剔标点之后，真正的比较必须仍然被抓住。
+
+    第一条是关键 —— 剔的是**完整标签**，标签内部若含真正的 `<`，那个标签就剔不
+    干净，残留的运算符照样触发。把 `<` 单独排除掉就做不到这个区分。
+
+    第三条是**刻意保留**的误伤：那一行确实有一个真比较，与"纯标点"不是一回事。
+    """
+    offences, _ = run_check_against(make_fake_repo(tmp_path, source + "\n"))
+
+    assert offences > 0, label
+
+
 def test_the_check_ignores_comments(tmp_path):
     root = make_fake_repo(
         tmp_path,
