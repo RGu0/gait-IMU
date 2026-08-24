@@ -386,6 +386,43 @@ def test_streaming_span_trims_only_the_edges() -> None:
     assert first < 10 < last, "中间的低速段被裁掉了 —— 那是要测的东西"
 
 
+def test_streaming_span_skips_the_high_rate_residual_before_config() -> None:
+    """设备一连上就在高速流（200 Hz 固化在 flash），配置阶段夹在它后面。
+
+    真机 round-1 的离线复算：只裁到「第一个流式包」会把那段残留连同其后的
+    10 Hz 配置段一起留下，458 个丢失里 450 个因此挤在前 60 s，而现场报告在
+    同一份数据上只丢 4 个。
+    """
+    from gait.cli.linktest import _streaming_span
+
+    # 高速流残留(4) → 10 Hz 电量/配置(3) → 正式采集(10)
+    counts = [8] * 4 + [1] * 3 + [8] * 10
+    stamps = [i * 0.04 for i in range(4)] + [0.16 + i * 0.1 for i in range(3)] + [
+        0.5 + i * 0.04 for i in range(10)
+    ]
+
+    first, last = _streaming_span(counts, stamps)
+
+    assert first == 7, "配置阶段之前的高速流残留没被跳过"
+    assert last == len(counts) - 1
+
+
+def test_streaming_span_keeps_a_late_dropout_even_inside_the_setup_window() -> None:
+    """配置窗口只覆盖开头一分钟；此后的低速段一律保留。"""
+    from gait.cli.linktest import _streaming_span
+
+    counts = [1, 1] + [8] * 20 + [1] + [8] * 20
+    # 让那个低速包落在开头 60 s **之外**。
+    stamps = [0.0, 0.1] + [1.0 + i * 0.04 for i in range(20)] + [90.0] + [
+        90.1 + i * 0.04 for i in range(20)
+    ]
+
+    first, last = _streaming_span(counts, stamps)
+
+    assert first == 2
+    assert first < 22 < last, "60 s 之后的低速段被裁掉了 —— 那是真实劣化"
+
+
 def test_streaming_span_handles_a_recording_with_no_streaming() -> None:
     from gait.cli.linktest import _streaming_span
 

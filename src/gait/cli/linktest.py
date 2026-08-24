@@ -653,7 +653,13 @@ def _emit_report(
     return report
 
 
-def _streaming_span(counts: list[int]) -> tuple[int, int]:
+#: 配置/电量自检阶段一定发生在录制的最前面这段时间内，s。见 `_streaming_span`。
+SETUP_WINDOW_S = 60.0
+
+
+def _streaming_span(
+    counts: list[int], stamps: list[float] | None = None
+) -> tuple[int, int]:
     """录制里真正处于高速流的那一段（首尾包索引，闭区间）。
 
     一份录制不只有采集：开头有电量读与配置下发，结尾有电量复读，这些阶段设备
@@ -667,6 +673,17 @@ def _streaming_span(counts: list[int]) -> tuple[int, int]:
 
     **只裁首尾，绝不裁中间。** 中间的低速段是真实的链路劣化（正是本实验要测的
     东西），裁掉它等于把结论修饰成想要的样子。
+
+    ## 开头为什么不能只裁「第一个流式包之前」
+
+    设备把 200 Hz 固化在 flash 里，所以**一连上就在高速流** —— 录制的第一个包
+    往往已经是 8 帧。真正的顺序是：高速流残留 → 降到 10 Hz 读电量 → 下发配置 →
+    正式采集。只裁到「第一个流式包」会把前两段一起留下，那段 10 Hz 就成了开头
+    的一个假空洞。实测（round-1 离线复算）：458 个丢失里 450 个挤在前 60 s，
+    而现场报告在同一份数据上只丢 4 个。
+
+    所以起点取「落在开头 `SETUP_WINDOW_S` 内的**最后一个**非流式包之后」。
+    配置阶段必然在最前面的一分钟内完成，这个窗口之外的低速段一律保留。
     """
     if not counts:
         return 0, -1
@@ -677,7 +694,16 @@ def _streaming_span(counts: list[int]) -> tuple[int, int]:
     streaming = [i for i, c in enumerate(counts) if c >= threshold]
     if not streaming:
         return 0, len(counts) - 1
-    return streaming[0], streaming[-1]
+
+    first, last = streaming[0], streaming[-1]
+    if stamps:
+        origin = stamps[0]
+        for index, count in enumerate(counts):
+            if index > last or stamps[index] - origin > SETUP_WINDOW_S:
+                break
+            if count < threshold:
+                first = index + 1
+    return min(first, last), last
 
 
 def analyze_recordings(
@@ -714,7 +740,7 @@ def analyze_recordings(
             counts.append(len(frames))
             stamps.append(chunk.t)
 
-        first, last = _streaming_span(counts)
+        first, last = _streaming_span(counts, stamps)
         arrivals = [
             stamps[i] for i in range(first, last + 1) for _ in range(counts[i])
         ]
