@@ -1,8 +1,8 @@
-"""`gait.device.ble.configure_streaming`：时序、校验、200 Hz 下读不到速率的容忍。
+"""`gait.device.ble`：配置下发时序、回读校验（含超时容忍）、低速电量读取。
 
 假设备按手册语义应答：``FF AA 27 <reg> 00`` 回一帧 ``0x55 0x71``，携带起始地址起
 4 个寄存器；其余 ``FF AA`` 写直接落进寄存器表。它不模拟延时 —— 时序（解锁→写→
-保存、间隔）由 wt901 的写事务保证，这里断言的是**顺序与内容**。
+保存、间隔）由 wt901 的写事务保证，这里断言的是**顺序、内容与超时容忍**。
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from gait.device.ble import (
     BANDWIDTH_42HZ,
     StreamConfig,
     configure_streaming,
+    read_battery_at_low_rate,
 )
 
 _UNLOCK = 0x69
 _SAVE = 0x00
 _READ = 0x27
+_POWER = int(Register.POWER)
 
 
 class FakeDeviceTransport(Transport):
@@ -32,8 +34,13 @@ class FakeDeviceTransport(Transport):
     def __init__(self) -> None:
         super().__init__()
         self._connected = False
-        # 出厂默认：10 Hz、带宽 20 Hz、9 轴。
-        self.registers: dict[int, int] = {0x03: 0x06, 0x1F: 0x04, 0x24: 0}
+        # 出厂默认：10 Hz、带宽 20 Hz、9 轴、满电。
+        self.registers: dict[int, int] = {
+            0x03: 0x06,
+            0x1F: 0x04,
+            0x24: 0,
+            _POWER: 400,
+        }
         self.commands: list[tuple[int, int]] = []
         #: 写入被固件静默忽略的寄存器（模拟不支持的配置项）。
         self.reject_writes: set[int] = set()
@@ -120,7 +127,7 @@ def test_every_config_write_is_unlocked_then_saved() -> None:
 
     async def scenario() -> None:
         device = await _connect(transport)
-        await configure_streaming(device)
+        await configure_streaming(device, StreamConfig())
         await device.close()
 
     asyncio.run(scenario())
@@ -140,7 +147,7 @@ def test_silently_rejected_write_is_reported_not_trusted() -> None:
 
     async def scenario() -> None:
         device = await _connect(transport)
-        applied = await configure_streaming(device)
+        applied = await configure_streaming(device, StreamConfig())
         assert not applied.verified
         assert any("algorithm" in m for m in applied.mismatches)
         # 其余项不受连坐：带宽照常校验通过。
@@ -150,16 +157,103 @@ def test_silently_rejected_write_is_reported_not_trusted() -> None:
     asyncio.run(scenario())
 
 
-def test_rate_readback_timeout_is_tolerated() -> None:
+def test_rate_readback_timeout_is_tolerated_and_not_a_mismatch() -> None:
     """200 Hz 下读速率超时是预期行为：记 None，不算失败。"""
     transport = FakeDeviceTransport()
     transport.mute_reads.add(int(Register.RRATE))
 
     async def scenario() -> None:
         device = await _connect(transport)
-        applied = await configure_streaming(device)
+        applied = await configure_streaming(device, StreamConfig())
         assert applied.rate_readback is None
         assert applied.verified
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_bandwidth_readback_timeout_is_reported_as_mismatch_not_raised() -> None:
+    """带宽/算法回读超时最常见于设备仍在高速流；必须体现为 mismatch，不能抛异常。"""
+    transport = FakeDeviceTransport()
+    transport.mute_reads.add(int(Register.BANDWIDTH))
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        assert applied.bandwidth_readback is None
+        assert not applied.verified
+        assert any("bandwidth" in m and "超时" in m for m in applied.mismatches)
+        # 算法项不受连坐。
+        assert applied.algorithm_readback == ALGORITHM_SIX_AXIS
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_algorithm_readback_timeout_is_reported_as_mismatch_not_raised() -> None:
+    transport = FakeDeviceTransport()
+    transport.mute_reads.add(ALGORITHM_REGISTER)
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        assert applied.algorithm_readback is None
+        assert not applied.verified
+        assert any("algorithm" in m and "超时" in m for m in applied.mismatches)
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_rate_uses_validated_encoding_not_a_raw_register_write() -> None:
+    """速率经 wt901 的 ReturnRate 校验，不接受未核实的编码——写错速率的表现是
+
+    「连接正常但数据不对」，必须在写之前拦住。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        try:
+            await configure_streaming(
+                device, StreamConfig(rate=0x0A)
+            )  # 通用表里的编码，未在真机核实（wt901 有意排除）。
+        except Exception as exc:  # noqa: BLE001 - 只关心确实拒绝了
+            assert "未在真机上核实" in str(exc)
+        else:
+            raise AssertionError("未核实的速率编码应被拒绝")
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_read_battery_at_low_rate_drops_speed_temporarily_and_reads() -> None:
+    transport = FakeDeviceTransport()
+    transport.registers[_POWER] = 400  # 满电。
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        battery = await read_battery_at_low_rate(device)
+        assert battery is not None
+        assert battery.percent == 100
+        await device.close()
+
+    asyncio.run(scenario())
+
+    # 速率被临时降到 10 Hz，但不落 flash（无 save 指令跟在它后面）。
+    rate_writes = [i for i, (r, _) in enumerate(transport.commands) if r == 0x03]
+    assert rate_writes, "应下发过速率写入"
+    assert transport.commands[rate_writes[-1] + 1][0] != _SAVE
+
+
+def test_read_battery_at_low_rate_returns_none_on_timeout_not_raise() -> None:
+    transport = FakeDeviceTransport()
+    transport.mute_reads.add(_POWER)
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        battery = await read_battery_at_low_rate(device)
+        assert battery is None
         await device.close()
 
     asyncio.run(scenario())

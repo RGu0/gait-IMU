@@ -30,9 +30,16 @@ PRD 的列举是「解锁→200 Hz→带宽→6 轴→保存」。手册 §6 明
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
-from wt901 import Register, ReturnRate, TransportTimeoutError, WT901Device
+from wt901 import (
+    Battery,
+    Register,
+    ReturnRate,
+    TransportTimeoutError,
+    WT901Device,
+    WT901Error,
+)
 
 __all__ = [
     "ALGORITHM_NINE_AXIS",
@@ -42,6 +49,7 @@ __all__ = [
     "AppliedConfig",
     "StreamConfig",
     "configure_streaming",
+    "read_battery_at_low_rate",
 ]
 
 #: 算法选择寄存器。wt901 的 `Register` 枚举没有它（RAY-242），地址来自手册 §4.3。
@@ -60,6 +68,11 @@ class StreamConfig:
     rate: int = int(ReturnRate.HZ_200)
     bandwidth: int = BANDWIDTH_42HZ
     algorithm: int = ALGORITHM_SIX_AXIS
+
+
+#: `configure_streaming` 的默认参数。冻结 dataclass 的单例在多次调用间共享安全，
+#: 且避免 ruff B008（默认值里禁止函数调用）。
+_DEFAULT_STREAM_CONFIG = StreamConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +96,7 @@ class AppliedConfig:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "requested": {
-                "rate": self.requested.rate,
-                "bandwidth": self.requested.bandwidth,
-                "algorithm": self.requested.algorithm,
-            },
+            "requested": asdict(self.requested),
             "bandwidth_readback": self.bandwidth_readback,
             "algorithm_readback": self.algorithm_readback,
             "rate_readback": self.rate_readback,
@@ -96,50 +105,90 @@ class AppliedConfig:
         }
 
 
+async def _read_back(
+    device: WT901Device, register: int, label: str, mismatches: list[str]
+) -> int | None:
+    """回读一个寄存器。超时记为一条 mismatch 而不是抛异常。
+
+    回读超时最常见的原因是设备仍在高速流（上一轮把 200 Hz 固化在 flash 里，
+    降速写没生效）—— 这正是「校验失败」，调用方需要它出现在 `mismatches` 里
+    走阻断路径，而不是拿到一个裸 traceback、连 AppliedConfig 都没有。
+    """
+    try:
+        return await device.registers.read_value(register)
+    except TransportTimeoutError:
+        mismatches.append(f"{label}: 回读超时（设备可能仍在高速流）")
+        return None
+
+
 async def configure_streaming(
-    device: WT901Device, config: StreamConfig | None = None
+    device: WT901Device, config: StreamConfig = _DEFAULT_STREAM_CONFIG
 ) -> AppliedConfig:
     """按 PRD §6.1 的固定时序下发流式配置并回读校验。
 
     每一项都走 wt901 的原子写事务（解锁→写→保存，间隔 100 ms ≥ PRD 的 50 ms
-    下限）。回读对不上时**不抛异常**：调用方（自检流程/压测工具）需要完整的
-    `AppliedConfig` 来决定阻断还是记录，抛异常只会把回读值丢掉。
+    下限）。回读对不上或超时都记进 `AppliedConfig.mismatches`，**不抛异常**：
+    调用方（自检流程/压测工具）需要完整的回读结果来决定阻断还是记录。
+    速率不同 —— 它经 wt901 的 `set_output_rate` 校验编码（写错速率的表现是
+    「连接正常但数据不对」，必须在写之前拦住），且 200 Hz 下回读超时是手册
+    §6 记载的预期行为，不算 mismatch。
     """
-    cfg = config or StreamConfig()
     registers = device.registers
     mismatches: list[str] = []
 
-    await registers.write(Register.BANDWIDTH, cfg.bandwidth)
-    await registers.write(ALGORITHM_REGISTER, cfg.algorithm)
+    await registers.write(Register.BANDWIDTH, config.bandwidth)
+    await registers.write(ALGORITHM_REGISTER, config.algorithm)
 
-    bandwidth_readback = await registers.read_value(Register.BANDWIDTH)
-    if bandwidth_readback != cfg.bandwidth:
+    bandwidth_readback = await _read_back(
+        device, Register.BANDWIDTH, "bandwidth", mismatches
+    )
+    if bandwidth_readback is not None and bandwidth_readback != config.bandwidth:
         mismatches.append(
-            f"bandwidth: 写 0x{cfg.bandwidth:02X}，读回 0x{bandwidth_readback:02X}"
+            f"bandwidth: 写 0x{config.bandwidth:02X}，读回 0x{bandwidth_readback:02X}"
         )
-    algorithm_readback = await registers.read_value(ALGORITHM_REGISTER)
-    if algorithm_readback != cfg.algorithm:
+    algorithm_readback = await _read_back(
+        device, ALGORITHM_REGISTER, "algorithm", mismatches
+    )
+    if algorithm_readback is not None and algorithm_readback != config.algorithm:
         mismatches.append(
-            f"algorithm: 写 {cfg.algorithm}，读回 {algorithm_readback}"
+            f"algorithm: 写 {config.algorithm}，读回 {algorithm_readback}"
         )
 
-    await registers.write(Register.RRATE, cfg.rate)
+    await registers.set_output_rate(config.rate)
     rate_readback: int | None = None
     try:
-        rate_readback = await registers.read_value(Register.RRATE)
+        rate_readback = await registers.read_output_rate()
     except TransportTimeoutError:
         # 200 Hz 下读指令来不及回复（手册 §6），是预期行为而不是故障。
         pass
     else:
-        if rate_readback != cfg.rate:
+        if rate_readback != config.rate:
             mismatches.append(
-                f"rate: 写 0x{cfg.rate:02X}，读回 0x{rate_readback:02X}"
+                f"rate: 写 0x{config.rate:02X}，读回 0x{rate_readback:02X}"
             )
 
     return AppliedConfig(
-        requested=cfg,
+        requested=config,
         bandwidth_readback=bandwidth_readback,
         algorithm_readback=algorithm_readback,
         rate_readback=rate_readback,
         mismatches=tuple(mismatches),
     )
+
+
+async def read_battery_at_low_rate(device: WT901Device) -> Battery | None:
+    """把速率临时降到 10 Hz 后读电量。读不到返回 ``None``，不中止调用方。
+
+    手册 §6：200 Hz 下寄存器读指令来不及回复，而设备把配置固化在 flash ——
+    上一轮留下的 200 Hz 会让本轮一连上就是高速流。所以先把速率**临时**降下来
+    （``persist=False`` 不写 flash，``remember=False`` 不进重连重放），读完
+    电量再由调用方下发正式配置。PRD §6.1 的自检也要求电量在高速流开启前读，
+    这个时序将来归采集自检复用。
+    """
+    try:
+        await device.registers.write(
+            Register.RRATE, int(ReturnRate.HZ_10), persist=False, remember=False
+        )
+        return await device.telemetry.read_battery()
+    except (TransportTimeoutError, WT901Error):
+        return None

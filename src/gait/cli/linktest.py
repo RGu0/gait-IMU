@@ -1,31 +1,34 @@
 """200 Hz 双设备链路压测。cli 的 `linktest`（RAY-199 的最小实现，服务 RAY-200）。
 
 PRD §17.1 验证点 V2：≤5 m 近距下 30 min 缺失率 < 0.5%。本工具回答的正是这个
-判据，并把「无持续性欠采」操作化为一个可复核的数（见 `sustained_windows`）。
+判据，并把「无持续性欠采」操作化为一个可复核的数（见 `sustained_undersampling`）。
 
 一轮压测 = 扫描 → 双连接 → 电量（高速流开启**前**读）→ 固定时序配置下发并校验
 → Notify 回调第一动作落盘原始字节 → 持续采集 → 结束后降速、再读电量 → 逐秒
 到达率统计 → 报告。统计不在这里重新发明：`gait.sync.integrity.assess` 是 PRD
 §6.1「到达率逐秒监控 / 空洞切分」的唯一实现，压测与正式采集用同一把尺子。
 
-## 电量为什么在配置**之前**读，结束后为什么先降速
+## 采集只收 `t_host >= started` 的样本
 
-手册 §6：200 Hz 下寄存器读指令来不及回复。且设备把配置保存在 flash 里 ——
-上一轮压测留下的 200 Hz 会让本轮一连上就是高速流。所以连接后第一件事是把
-速率**临时**降到 10 Hz（不落 flash），把电量读出来，再走正式配置；结束时同样
-先降速再读电量。
+设备从连接那一刻就开始产出样本（上一轮固化的速率），电量与配置阶段的残留
+会带着更早的时刻混进统计 —— 配置期间设备只有 10 Hz，几十个残留样本足以让
+`assess` 在开头看到成片的假空洞，把一条完美链路判成不达标。`t_host` 与本模块
+的 `loop.time()` 同源（CPython 的事件循环时钟就是 `time.monotonic`），直接按
+时刻过滤。
 
 ## 断连不重连
 
 对压测而言断连是**结果**，不是要掩盖的故障：一轮里发生断连，这一轮就该作为
 「不达标」的数据点被记录（PRD §6.1 的正式采集同样是断连即安全停止）。所以
-`auto_reconnect=False`，断连时刻记进报告，该设备停止采集。
+`auto_reconnect=False`，断连时刻由看门狗记进报告。
 
 ## 回放模式
 
 `--replay a.jsonl b.jsonl` 用录制文件代替真机（wt901 的 ReplayTransport），
-跳过配置与电量（回放不会应答寄存器读）。它验证的是采集与统计通路本身 ——
-没有硬件时先证明工具是对的，真机压测才谈得上可信。
+跳过配置与电量（回放不会应答寄存器读）。它验证的是采集与统计通路本身。
+**只有 `--replay-speed 1.0` 的时序指标才有效**：其他倍速下 `t_host` 打在被
+压缩/拉伸的到达时刻上，空洞在时间轴上消失，报告会把这标成 `timing_valid:
+false` 并在判定旁边警告 —— 全速回放跑出的「达标」只证明通路能跑，不证明链路。
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ import asyncio
 import json
 import platform
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,19 +46,24 @@ from typing import Any
 import numpy as np
 from wt901 import (
     Battery,
+    BleTransport,
     DiscoveredDevice,
     ReturnRate,
-    TransportTimeoutError,
     WT901Device,
-    WT901Error,
     scan,
 )
-from wt901.protocol.registers import Register
-from wt901.transport.ble import BleTransport
+from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
-from gait.device.ble import AppliedConfig, StreamConfig, configure_streaming
-from gait.device.recorder import RecordingTransport, open_recording_writer
+from gait.device.ble import (
+    ALGORITHM_NINE_AXIS,
+    ALGORITHM_SIX_AXIS,
+    AppliedConfig,
+    StreamConfig,
+    configure_streaming,
+    read_battery_at_low_rate,
+)
+from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.integrity import IntegrityReport, assess
 
 __all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench"]
@@ -63,8 +71,10 @@ __all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench"]
 #: V2 判据：平均缺失率 < 0.5%。
 LOSS_RATE_CRITERION = 0.005
 #: 「无持续性欠采」的操作化：任何 30 s 滑动窗内逐秒到达率均值 < 0.99 记为一个
-#: 持续欠采窗口。0.99 取自实测抖动下限（integrity.py 记录无丢包时逐秒最低 0.94，
-#: 但那是单秒毛刺；30 s 均值仍低于 0.99 只能来自真实的速率不足）。
+#: 持续欠采窗口。0.99 取自实测抖动下限（integrity.py 记录无丢包时单秒最低读到
+#: 0.94，但那是毛刺；30 s 均值仍低于 0.99 只能来自真实的速率不足）。与
+#: `AlgoConfig.integrity_rate_warn`（0.98，逐秒分级用）不是同一个量 —— 那是单秒
+#: 阈值，这是窗口均值阈值；两者都等 RAY-200 实测分布定稿后一起校准。
 SUSTAINED_WINDOW_S = 30
 SUSTAINED_RATE_FLOOR = 0.99
 
@@ -113,8 +123,10 @@ class DeviceRun:
     disconnected_at: float | None = None
     stats: dict[str, int] = field(default_factory=dict)
     recording_path: str | None = None
+    recording_error: str | None = None
     integrity: IntegrityReport | None = None
     sustained_windows: list[int] = field(default_factory=list)
+    arrival_array: np.ndarray | None = None
 
     @property
     def loss_rate(self) -> float | None:
@@ -125,6 +137,12 @@ class DeviceRun:
         return lost / total if total else 0.0
 
     def snapshot(self) -> dict[str, Any]:
+        # 逐秒数组不进 JSON —— 同一份数据在 per_second_<n>.csv 里，重复一份
+        # 只会把评审要读的报告撑到几千行。
+        integrity = self.integrity.snapshot() if self.integrity else None
+        if integrity is not None:
+            integrity.pop("per_second_rate")
+            integrity.pop("per_second_loss")
         return {
             "device_id": self.device_id,
             "samples": len(self.arrivals),
@@ -136,9 +154,10 @@ class DeviceRun:
             "disconnected_at": self.disconnected_at,
             "device_stats": self.stats,
             "recording": self.recording_path,
+            "recording_error": self.recording_error,
             "loss_rate": self.loss_rate,
             "sustained_undersampling_windows": self.sustained_windows,
-            "integrity": self.integrity.snapshot() if self.integrity else None,
+            "integrity": integrity,
         }
 
 
@@ -169,53 +188,38 @@ def sustained_undersampling(
     return [int(i) for i in np.flatnonzero(means < floor)]
 
 
-async def _read_battery_at_low_rate(device: WT901Device) -> Battery | None:
-    """把速率临时降到 10 Hz 后读电量。读不到返回 ``None`` 而不是中止一轮。"""
-    try:
-        await device.registers.write(
-            Register.RRATE, int(ReturnRate.HZ_10), persist=False, remember=False
-        )
-        return await device.telemetry.read_battery()
-    except (TransportTimeoutError, WT901Error):
-        return None
+async def _consume(device: WT901Device, run: DeviceRun, started: float) -> None:
+    """把样本的 ``t_host`` 收进 ``run.arrivals``，直到被取消或流结束。
 
-
-async def _consume(
-    device: WT901Device, run: DeviceRun, stop_at: float, clock
-) -> None:
-    """把样本的 ``t_host`` 收进 ``run.arrivals``，直到时间到或断连。"""
-    iterator = device.samples()
-    while True:
-        remaining = stop_at - clock()
-        if remaining <= 0:
-            return
-        try:
-            sample = await asyncio.wait_for(
-                anext(iterator), timeout=min(remaining, 5.0)
-            )
-        except TimeoutError:
-            if not device.is_connected:
-                run.disconnected_at = clock()
-                return
-            continue
-        except StopAsyncIteration:
-            return
+    没有逐样本超时：给 ``anext`` 套 ``wait_for`` 会在超时取消时终结整个
+    async 生成器，之后静默停采（PEP 525 语义）—— 链路一次 >5 s 的停顿就会让
+    剩下的半小时颗粒无收。停顿与断连由看门狗在外部观察，这里只管收。
+    """
+    async for sample in device.samples():
+        if sample.t_host < started:
+            continue  # 电量/配置阶段的残留样本，见模块 docstring。
         run.arrivals.append(sample.t_host)
 
 
-async def _progress(
-    runs: list[DeviceRun], started: float, stop_at: float, clock, echo
+async def _watch(
+    pairs: list[tuple[WT901Device, DeviceRun]],
+    started: float,
+    stop_at: float,
+    echo,
 ) -> None:
-    """每 10 s 报一次各设备近 10 s 的到达率。看的是「还活着吗」，不是终值。"""
-    last_counts = [0] * len(runs)
+    """看门狗 + 进度：每 10 s 报一次近窗到达率，断连时刻记进 run。"""
+    loop = asyncio.get_running_loop()
+    last_counts = [0] * len(pairs)
     last_tick = started
-    while clock() < stop_at:
-        await asyncio.sleep(min(10.0, max(stop_at - clock(), 0.01)))
-        now = clock()
+    while loop.time() < stop_at:
+        await asyncio.sleep(min(10.0, max(stop_at - loop.time(), 0.01)))
+        now = loop.time()
         window = max(now - last_tick, 1e-9)
         last_tick = now
         parts = []
-        for i, run in enumerate(runs):
+        for i, (device, run) in enumerate(pairs):
+            if run.disconnected_at is None and not device.is_connected:
+                run.disconnected_at = now
             count = len(run.arrivals)
             rate = (count - last_counts[i]) / window
             last_counts[i] = count
@@ -226,14 +230,14 @@ async def _progress(
 
 def _finalize(run: DeviceRun, nominal_fs: float) -> None:
     if len(run.arrivals) >= 2:
-        arrival = np.asarray(run.arrivals, dtype=np.float64)
-        run.integrity = assess(arrival, nominal_fs)
+        run.arrival_array = np.asarray(run.arrivals, dtype=np.float64)
+        run.integrity = assess(run.arrival_array, nominal_fs)
         run.sustained_windows = sustained_undersampling(
             run.integrity.per_second_rate
         )
 
 
-def _verdict(runs: list[DeviceRun]) -> dict[str, Any]:
+def _verdict(runs: list[DeviceRun], *, timing_valid: bool) -> dict[str, Any]:
     """对照 V2 判据。任何一台设备不达标即整轮不达标。"""
     problems: list[str] = []
     for run in runs:
@@ -252,12 +256,77 @@ def _verdict(runs: list[DeviceRun]) -> dict[str, Any]:
             )
         if run.disconnected_at is not None:
             problems.append(f"{run.device_id}: 采集中断连")
+        if run.recording_error is not None:
+            problems.append(
+                f"{run.device_id}: 录制写盘失败（{run.recording_error}），"
+                "原始字节不完整"
+            )
         if run.stats.get("dropped_samples", 0):
             problems.append(
                 f"{run.device_id}: 主机侧消费队列溢出 "
                 f"{run.stats['dropped_samples']} 样本，测量自身不可信"
             )
-    return {"pass": not problems, "problems": problems}
+    return {"pass": not problems, "problems": problems, "timing_valid": timing_valid}
+
+
+async def _connect_live(
+    device_count: int,
+    mac_filters: list[str] | None,
+    scan_timeout: float,
+    out_dir: Path,
+    label: str,
+    echo,
+) -> list[tuple[WT901Device, DeviceRun, ThreadedRecordingWriter]]:
+    found = await scan(scan_timeout)
+    if mac_filters:
+        selected: list[DiscoveredDevice] = []
+        for needle in mac_filters:
+            matches = [
+                d
+                for d in found
+                if needle.lower() in d.address.lower()
+                and all(d.address != s.address for s in selected)
+            ]
+            if not matches:
+                raise SystemExit(
+                    f"扫描到 {len(found)} 台 WT 设备，无一（未被选过的）匹配 "
+                    f"{needle!r}。已发现：{[d.address for d in found]}"
+                )
+            selected.append(matches[0])
+    else:
+        selected = found[:device_count]
+    if len(selected) < device_count:
+        raise SystemExit(
+            f"需要 {device_count} 台设备，只扫描到 {len(selected)} 台："
+            f"{[(d.name, d.address) for d in found]}。"
+            "确认模块已按键开机（1 分钟未连接会休眠但仍广播）。"
+        )
+
+    connected: list[tuple[WT901Device, DeviceRun, ThreadedRecordingWriter]] = []
+    for index, discovered in enumerate(selected):
+        safe = discovered.address.replace(":", "-")
+        recording_path = out_dir / f"raw_{index}_{safe}.jsonl"
+        writer = ThreadedRecordingWriter(
+            recording_path, device_id=discovered.address, note=label
+        )
+        device = WT901Device(RecordingTransport(BleTransport(discovered), writer))
+        try:
+            await device.open()
+        except BaseException:
+            # 本台没连上：把它和**已连上的前几台**都收干净再抛 —— 泄漏的 BLE
+            # 连接会让下一次 connect 直接失败（wt901 ble.py 的警告）。
+            writer.close()
+            for opened, _, _ in connected:
+                try:
+                    await opened.close()
+                except Exception as cleanup_error:  # noqa: BLE001 - 清理路径
+                    echo(f"清理 {opened.device_id} 时出错（忽略）：{cleanup_error!r}")
+            raise
+        run = DeviceRun(device_id=device.device_id)
+        run.recording_path = str(recording_path)
+        connected.append((device, run, writer))
+        echo(f"已连接 {discovered.name} {discovered.address}")
+    return connected
 
 
 async def run_bench(
@@ -277,67 +346,33 @@ async def run_bench(
     """跑一轮压测，返回并写出报告。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     loop = asyncio.get_running_loop()
-    clock = loop.time
     started_utc = datetime.now(UTC).isoformat()
 
     devices: list[WT901Device] = []
     runs: list[DeviceRun] = []
-    writers = []
+    writers: list[ThreadedRecordingWriter] = []
     replay_transports: list[ReplayTransport] = []
 
-    if replay_files:
-        for path in replay_files:
-            transport = ReplayTransport.from_file(path, speed=replay_speed)
-            replay_transports.append(transport)
-            device = WT901Device(transport)
-            await device.open()
-            devices.append(device)
-            runs.append(DeviceRun(device_id=device.device_id))
-    else:
-        found = await scan(scan_timeout)
-        if mac_filters:
-            selected: list[DiscoveredDevice] = []
-            for needle in mac_filters:
-                matches = [
-                    d for d in found if needle.lower() in d.address.lower()
-                ]
-                if not matches:
-                    raise SystemExit(
-                        f"扫描到 {len(found)} 台 WT 设备，无一匹配 {needle!r}。"
-                        f"已发现：{[d.address for d in found]}"
-                    )
-                selected.append(matches[0])
-        else:
-            selected = found[:device_count]
-        if len(selected) < device_count:
-            raise SystemExit(
-                f"需要 {device_count} 台设备，只扫描到 {len(selected)} 台："
-                f"{[(d.name, d.address) for d in found]}。"
-                "确认模块已按键开机（1 分钟未连接会休眠但仍广播）。"
-            )
-        for index, discovered in enumerate(selected):
-            safe = discovered.address.replace(":", "-")
-            recording_path = out_dir / f"raw_{index}_{safe}.jsonl"
-            writer = open_recording_writer(
-                recording_path, device_id=discovered.address, note=env.label
-            )
-            writers.append(writer)
-            transport = RecordingTransport(
-                BleTransport(discovered), writer
-            )
-            device = WT901Device(transport)
-            await device.open()
-            devices.append(device)
-            run = DeviceRun(device_id=device.device_id)
-            run.recording_path = str(recording_path)
-            runs.append(run)
-            echo(f"已连接 {discovered.name} {discovered.address}")
-
     try:
-        if not replay_files:
+        if replay_files:
+            for path in replay_files:
+                transport = ReplayTransport.from_file(path, speed=replay_speed)
+                replay_transports.append(transport)
+                device = WT901Device(transport)
+                await device.open()
+                devices.append(device)
+                runs.append(DeviceRun(device_id=device.device_id))
+        else:
+            for device, run, writer in await _connect_live(
+                device_count, mac_filters, scan_timeout, out_dir, env.label, echo
+            ):
+                devices.append(device)
+                runs.append(run)
+                writers.append(writer)
+
             # 电量在高速流开启前读（PRD §6.1 自检顺序）；随后正式配置并校验。
             for device, run in zip(devices, runs):
-                run.battery_before = await _read_battery_at_low_rate(device)
+                run.battery_before = await read_battery_at_low_rate(device)
                 echo(
                     f"{run.device_id} 电量（前）："
                     f"{_battery_snapshot(run.battery_before)}"
@@ -350,59 +385,62 @@ async def run_bench(
                     )
                 echo(f"{run.device_id} 配置已下发并校验")
 
-        started = clock()
+        started = loop.time()
         stop_at = started + duration
         consumers = [
-            asyncio.ensure_future(_consume(device, run, stop_at, clock))
+            asyncio.ensure_future(_consume(device, run, started))
             for device, run in zip(devices, runs)
         ]
-        reporter = asyncio.ensure_future(
-            _progress(runs, started, stop_at, clock, echo)
+        watchdog = asyncio.ensure_future(
+            _watch(list(zip(devices, runs)), started, stop_at, echo)
         )
-        if replay_transports:
-            # 回放喂完就结束，不必等满 duration；但要等消费者把队列排空，
-            # 否则最后一批样本会被裁掉，全速回放下尤其明显。
-            await asyncio.gather(
-                *(transport.wait_exhausted() for transport in replay_transports)
-            )
-            drain_deadline = clock() + 5.0
-            while (
-                any(device.pending_samples for device in devices)
-                and clock() < drain_deadline
-            ):
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.05)
+        try:
+            if replay_transports:
+                # 回放喂完就结束，不必等满 duration；等消费者把队列排空再收，
+                # 否则最后一批样本会被裁掉，全速回放下尤其明显。
+                await asyncio.gather(
+                    *(t.wait_exhausted() for t in replay_transports)
+                )
+                drain_deadline = loop.time() + 5.0
+                while (
+                    any(device.pending_samples for device in devices)
+                    and loop.time() < drain_deadline
+                ):
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(duration)
+        finally:
             for task in consumers:
                 task.cancel()
-        await asyncio.gather(*consumers, return_exceptions=True)
-        reporter.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+            watchdog.cancel()
 
         if not replay_files:
             for device, run in zip(devices, runs):
-                if run.disconnected_at is None:
-                    run.battery_after = await _read_battery_at_low_rate(device)
+                if run.disconnected_at is None and device.is_connected:
+                    run.battery_after = await read_battery_at_low_rate(device)
                     echo(
                         f"{run.device_id} 电量（后）："
                         f"{_battery_snapshot(run.battery_after)}"
                     )
     finally:
         for device, run in zip(devices, runs):
-            stats = device.stats
-            run.stats = {
-                "frames": stats.frames,
-                "samples": stats.samples,
-                "dropped_samples": stats.dropped_samples,
-                "resync_count": stats.resync_count,
-                "dropped_bytes": stats.dropped_bytes,
-                "reconnects": stats.reconnects,
-            }
-            await device.close()
+            run.stats = asdict(device.stats)
+            try:
+                await device.close()  # RecordingTransport.disconnect 会关 writer。
+            except Exception as close_error:  # noqa: BLE001 - 一台关不掉不能拦住其余的清理
+                echo(f"关闭 {device.device_id} 时出错（忽略）：{close_error!r}")
         for writer in writers:
-            writer.close()
+            writer.close()  # 幂等；只兜 device.close 没走到的路径。
 
+    for run, writer in zip(runs, writers):
+        if writer.error is not None:
+            run.recording_error = repr(writer.error)
     for run in runs:
         _finalize(run, nominal_fs)
-    verdict = _verdict(runs)
+    timing_valid = not replay_files or replay_speed == 1.0
+    verdict = _verdict(runs, timing_valid=timing_valid)
 
     report = {
         "issue": "RAY-200",
@@ -416,6 +454,11 @@ async def run_bench(
         "nominal_fs": nominal_fs,
         "environment": env.snapshot(),
         "replay": [str(p) for p in replay_files] if replay_files else None,
+        "replay_speed": (
+            ("full" if replay_speed is None else replay_speed)
+            if replay_files
+            else None
+        ),
         "devices": [run.snapshot() for run in runs],
         "verdict": verdict,
     }
@@ -433,13 +476,11 @@ async def run_bench(
         (out_dir / f"per_second_{index}.csv").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
-        np.savetxt(
-            out_dir / f"arrival_{index}.csv",
-            np.asarray(run.arrivals, dtype=np.float64),
-            fmt="%.6f",
-        )
+        np.savetxt(out_dir / f"arrival_{index}.csv", run.arrival_array, fmt="%.6f")
     (out_dir / "report.md").write_text(_markdown(report), encoding="utf-8")
     echo(f"报告已写入 {out_dir}")
+    if not timing_valid:
+        echo("警告：非 1.0 倍速回放，时序指标无效，判定只证明通路能跑。")
     echo("判定：" + ("达标" if verdict["pass"] else f"不达标 {verdict['problems']}"))
     return report
 
@@ -462,7 +503,14 @@ def _markdown(report: dict[str, Any]) -> str:
     if env["note"]:
         lines.append(f"- 备注：{env['note']}")
     if report["replay"]:
-        lines.append(f"- **回放模式**（无真机）：{report['replay']}")
+        lines.append(
+            f"- **回放模式**（无真机，{report['replay_speed']}×）：{report['replay']}"
+        )
+    if not report["verdict"]["timing_valid"]:
+        lines.append(
+            "- ⚠️ **时序指标无效**：非 1.0 倍速回放会压缩/拉伸到达时刻，"
+            "空洞在时间轴上消失。本报告只证明通路能跑，不构成链路结论。"
+        )
     lines += ["", "## 判据（PRD §17.1 V2）", ""]
     lines.append(
         f"平均缺失率 < {report['criterion']['loss_rate']:.1%}，且无持续性欠采"
@@ -478,7 +526,9 @@ def _markdown(report: dict[str, Any]) -> str:
     for dev in report["devices"]:
         integ = dev["integrity"]
         if integ is None:
-            lines.append(f"| {dev['device_id']} | {dev['samples']} | — | 样本不足 | | | | | | |")
+            lines.append(
+                f"| {dev['device_id']} | {dev['samples']} | — | 样本不足 | | | | | | |"
+            )
             continue
         loss = dev["loss_rate"]
         b0, b1 = dev["battery_before"], dev["battery_after"]
@@ -539,18 +589,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--replay-speed",
         default="1.0",
-        help="回放速度倍率；full = 全速不等待",
+        help="回放速度倍率；full = 全速不等待（时序指标随之无效）",
     )
     args = parser.parse_args(argv)
 
-    config_kwargs: dict[str, int] = {"rate": int(_RATE_BY_HZ[args.rate])}
-    if args.bandwidth is not None:
-        config_kwargs["bandwidth"] = args.bandwidth
-    if args.nine_axis:
-        from gait.device.ble import ALGORITHM_NINE_AXIS
-
-        config_kwargs["algorithm"] = ALGORITHM_NINE_AXIS
-    config = StreamConfig(**config_kwargs)
+    default_bandwidth = StreamConfig().bandwidth
+    config = StreamConfig(
+        rate=int(_RATE_BY_HZ[args.rate]),
+        bandwidth=default_bandwidth if args.bandwidth is None else args.bandwidth,
+        algorithm=ALGORITHM_NINE_AXIS if args.nine_axis else ALGORITHM_SIX_AXIS,
+    )
 
     out_dir = args.out or Path(
         f"linktest-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{args.label}"
