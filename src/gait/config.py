@@ -36,6 +36,10 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.7（RAY-212 `anchor-tool`）：`AlgoConfig` 增加物理对碰锚点的三个检测参数。
+#: 锚点是工程模式实验室工具，但参数仍走 `AlgoConfig` —— 复现性契约（PRD §6.1）
+#: 不区分产品与实验：RAY-213 的实验结论同样要能凭元数据复现。
+#:
 #: 1.6（RAY-211 `sync-selfcheck`）：`AlgoConfig` 增加同步自检的三个判据参数。
 #:
 #: 1.5（RAY-210 `integrity-gaps`）：`AlgoConfig` 增加空洞判据与到达率分级阈值。
@@ -54,7 +58,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.6"
+CONFIG_VERSION: Final[str] = "1.7"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与

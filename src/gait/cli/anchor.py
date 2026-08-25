@@ -72,7 +72,11 @@ class LoadedFoot:
     signal: FootSignal
     device_id: str
     source: Path
-    frames: int
+
+    @property
+    def frames(self) -> int:
+        """样本数。派生而不是存储：若将来有裁剪步骤，存的数会静默报出裁剪前的值。"""
+        return int(self.signal.magnitude.size)
 
 
 def load_foot_signal(path: Path, epoch: float = 0.0) -> LoadedFoot:
@@ -108,7 +112,6 @@ def load_foot_signal(path: Path, epoch: float = 0.0) -> LoadedFoot:
         ),
         device_id=recording.device_id,
         source=path,
-        frames=len(magnitude),
     )
 
 
@@ -137,7 +140,8 @@ def _summary(
         flags = []
         if pair.left.peak.clipped or pair.right.peak.clipped:
             flags.append("削顶")
-        if not (pair.left.peak.interpolated and pair.right.peak.interpolated):
+        elif not (pair.left.peak.interpolated and pair.right.peak.interpolated):
+            # 削顶必然不插值，只在未削顶却插值失败时单独说。
             flags.append("未插值")
         note = f"（{'、'.join(flags)}）" if flags else ""
         echo(
@@ -232,16 +236,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.left is not None and args.right is None:
         parser.error("--left 需要配套的 --right")
+    if args.session is not None and args.right is not None:
+        # 静默忽略比报错危险：换单侧文件重跑时误带 --session，会分析错误的录制
+        # 而退出码还是 0。
+        parser.error("--right 只与 --left 配套；--session 自带左右文件路径")
     if (args.left_epoch is None) != (args.right_epoch is None):
         parser.error("--left-epoch 与 --right-epoch 必须成对给出：单边平移只是换一个未知常数")
     common_clock = args.left_epoch is not None
 
-    cfg = AlgoConfig()
-    if args.threshold_g is not None:
-        cfg = replace(cfg, anchor_threshold_m_s2=args.threshold_g * STANDARD_GRAVITY)
-
     left_path, right_path = _foot_paths(args)
     try:
+        # 阈值换算放在 try 内：ConfigError 是 ValueError，让 --threshold-g 0
+        # 走同一条"锚点分析失败"路径，而不是裸栈退出。
+        cfg = AlgoConfig()
+        if args.threshold_g is not None:
+            cfg = replace(cfg, anchor_threshold_m_s2=args.threshold_g * STANDARD_GRAVITY)
         left = load_foot_signal(left_path, epoch=args.left_epoch or 0.0)
         right = load_foot_signal(right_path, epoch=args.right_epoch or 0.0)
         # 无 epoch 时两份文件各自归零，零点差可达秒级，必须先粗对齐才配得上对。

@@ -53,13 +53,15 @@ v1 默认同步机制是主机侧接收时刻（`timebase.py`，RAY-209）。本
 故意的、间隔小于该窗口的连击也会被合并；但两侧按同一规则合并，配对与 delta
 不受影响，只是计数少一次。
 
-轻碰可能只在一侧过阈值。配对因此必须容忍单侧漏检：按主机时基就近贪心配对，
-超出 `anchor_pairing_window_s` 的峰归入 `unpaired_*` 而不是硬配 —— 硬配一对
-错误的峰，会把一个几百毫秒的假偏移混进 ±10~30 ms 的分布里。
+轻碰可能只在一侧过阈值。配对因此必须容忍单侧漏检：按主机时基做非交叉最优
+匹配（见 `pair_events`），超出 `anchor_pairing_window_s` 的峰归入 `unpaired_*`
+而不是硬配 —— 硬配一对错误的峰，会把一个几百毫秒的假偏移混进 ±10~30 ms 的
+分布里。
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -106,8 +108,9 @@ class ImpactPeak:
     clipped: bool
     #: 抛物线插值是否成立。False 表示回退到了整数样本索引（或平台中点）。
     interpolated: bool
-    #: 超阈值区段的样本数（合并回弹后的整个事件跨度）。诊断用：宽事件多半是
-    #: 削顶或拖碰，窄事件是干脆的对碰。
+    #: 事件的样本跨度：首个到末个超阈值样本，**含**合并进来的回弹之间的
+    #: 亚阈值间隙。诊断用：拖碰与带回弹的干脆对碰都会展宽它，只有结合峰形
+    #: 才能区分 —— 它不是"超阈值样本计数"。
     width_samples: int
 
 
@@ -265,12 +268,14 @@ class AnchorReport:
             "unpaired_right": [event.snapshot() for event in self.unpaired_right],
             "offset": {
                 "count": len(self.pairs),
-                "mean_s": self.offset_mean,
-                "std_s": self.offset_std,
-                "median_s": self.offset_median,
-                "p90_abs_s": self.offset_p90_abs,
-                "max_abs_s": self.offset_max_abs,
-                "drift_s_per_min": self.drift_s_per_min,
+                # 非有限值以 None 落盘：json.dumps 会把 nan 写成裸 `NaN`，
+                # 那不是合法 JSON，非 Python 的读取方会在上面摔跤。
+                "mean_s": _json_number(self.offset_mean),
+                "std_s": _json_number(self.offset_std),
+                "median_s": _json_number(self.offset_median),
+                "p90_abs_s": _json_number(self.offset_p90_abs),
+                "max_abs_s": _json_number(self.offset_max_abs),
+                "drift_s_per_min": _json_number(self.drift_s_per_min),
                 "degraded_pairs": sum(1 for pair in self.pairs if pair.degraded),
             },
             "left_sync": self.left_sync.snapshot(),
@@ -278,15 +283,23 @@ class AnchorReport:
         }
 
 
+def _json_number(value: float) -> float | None:
+    """快照里的数值：非有限值转 None。理由见 `AnchorReport.snapshot` 的注释。"""
+    return value if math.isfinite(value) else None
+
+
 def _merge_runs(above: np.ndarray, merge_gap: int) -> list[tuple[int, int]]:
-    """超阈值样本的连续区段，间隔小于 `merge_gap` 的相邻区段合并。
+    """超阈值样本的连续区段，间隔**小于** `merge_gap` 个样本的相邻区段合并。
 
     合并的对象是回弹：一次对碰的次级冲击与主峰隔几十毫秒，是同一个物理事件。
+    分裂条件是 `diff >= merge_gap`（相邻超阈值样本的索引差恰为窗口时**不**合并），
+    与配置文档"间隔小于它才并成一个事件"一致；`merge_gap` 因此必须 ≥ 2，
+    否则连续样本（diff = 1）会被拆散。
     """
     indices = np.flatnonzero(above)
     if indices.size == 0:
         return []
-    breaks = np.flatnonzero(np.diff(indices) > merge_gap)
+    breaks = np.flatnonzero(np.diff(indices) >= merge_gap)
     starts = np.concatenate(([0], breaks + 1))
     stops = np.concatenate((breaks, [indices.size - 1]))
     return [(int(indices[a]), int(indices[b])) for a, b in zip(starts, stops, strict=True)]
@@ -345,19 +358,35 @@ def detect_impacts(
             )
 
     threshold = cfg.anchor_threshold_m_s2
-    merge_gap = max(1, round(cfg.anchor_merge_window_s * fs))
+    merge_gap = max(2, round(cfg.anchor_merge_window_s * fs))
     peaks: list[ImpactPeak] = []
     for start, stop in _merge_runs(series >= threshold, merge_gap):
         segment = series[start : stop + 1]
         peak = start + int(np.argmax(segment))
         event_clipped = bool(flags[start : stop + 1].any()) if flags is not None else False
-        if event_clipped:
-            # 削顶平台的中点。找包含最大值的连续削顶区段：平台近似对称于真峰。
-            run = np.flatnonzero(flags[start : stop + 1])
-            index = start + float((run[0] + run[-1]) / 2.0)
+        if event_clipped and flags is not None and flags[peak]:
+            # 峰值样本本身削顶：取**包含它的**连续削顶段的中点 —— 平台近似
+            # 对称于真峰。只看这一段，不看整个事件：主峰与回弹都削顶时，
+            # 事件内首尾削顶样本的中点会落在两个平台之间，偏差几十毫秒。
+            run_start = peak
+            while run_start > start and flags[run_start - 1]:
+                run_start -= 1
+            run_stop = peak
+            while run_stop < stop and flags[run_stop + 1]:
+                run_stop += 1
+            index = (run_start + run_stop) / 2.0
             interpolated = False
         else:
+            # 峰值样本未削顶（削顶的只是回弹等次级样本）：真峰仍可插值。
+            # 但邻居削顶时抛物线用的是被压平的读数，回退整数索引。
             index, interpolated = _refine_peak(series, peak)
+            if (
+                event_clipped
+                and flags is not None
+                and interpolated
+                and (flags[max(peak - 1, 0)] or flags[min(peak + 1, series.size - 1)])
+            ):
+                index, interpolated = float(peak), False
         peaks.append(
             ImpactPeak(
                 index=index,
@@ -375,41 +404,51 @@ def pair_events(
     right: list[AnchorEvent],
     cfg: AlgoConfig | None = None,
 ) -> tuple[list[AnchorPair], list[AnchorEvent], list[AnchorEvent]]:
-    """按主机时基就近配对。返回 (配对, 左侧落单, 右侧落单)。
+    """按主机时基做非交叉最优匹配。返回 (配对, 左侧落单, 右侧落单)。
 
-    两个前提让贪心就是正确算法：同一次对碰的两侧峰相差不过几十毫秒（主机侧
-    同步误差的量级），而相邻两次对碰隔着至少几百毫秒（人抬手再碰的时间）。
-    配对窗口 `anchor_pairing_window_s` 落在两个尺度之间，就近匹配不会跨事件。
+    两侧事件都按时间有序，且是同一串物理事件 —— 最优匹配因此不交叉，可用
+    O(L·R) 的动态规划**精确**求解：配对数最多者胜，同数取 |Δ| 总和最小。
+    配对窗口 `anchor_pairing_window_s` 之外的组合不许配 —— 硬配一对错误的峰
+    会把几百毫秒的假偏移混进 ±10~30 ms 的分布。
 
-    仍要处理的一种歧义：左侧一个峰的窗口内出现两个右侧峰（比如右侧把一次
-    回弹判成了独立事件）。取更近的那个，另一个落单 —— 落单峰进 `unpaired_*`
-    可见，而不是被静默丢弃。
+    不用就近贪心：贪心（含单步前瞻）在密集场景下会丢弃本可配对的峰 ——
+    左 [0.00, 0.10]、右 [0.06, 0.09] 时，前瞻贪心只配出一对并制造两个假落单，
+    而最优匹配是 (0.00↔0.06, 0.10↔0.09)。锚点会话的事件数在几十的量级，
+    O(L·R) 不构成负担。
     """
     cfg = cfg or AlgoConfig()
     window = cfg.anchor_pairing_window_s
+    n_left, n_right = len(left), len(right)
+    # best[i][j] = 从 left[i:], right[j:] 起的最优 (−配对数, |Δ| 总和)。
+    # 元组取 min：配对数多者优先，其次总时差小者。
+    best: list[list[tuple[int, float]]] = [
+        [(0, 0.0)] * (n_right + 1) for _ in range(n_left + 1)
+    ]
+    for i in range(n_left - 1, -1, -1):
+        for j in range(n_right - 1, -1, -1):
+            candidates = [best[i + 1][j], best[i][j + 1]]
+            gap = abs(left[i].t_host - right[j].t_host)
+            if gap <= window:
+                matched, cost = best[i + 1][j + 1]
+                candidates.append((matched - 1, cost + gap))
+            best[i][j] = min(candidates)
+
     pairs: list[AnchorPair] = []
     lone_left: list[AnchorEvent] = []
     lone_right: list[AnchorEvent] = []
     i = j = 0
-    while i < len(left) and j < len(right):
-        gap = left[i].t_host - right[j].t_host
-        if gap > window:
-            lone_right.append(right[j])
+    while i < n_left and j < n_right:
+        gap = abs(left[i].t_host - right[j].t_host)
+        matched, cost = best[i + 1][j + 1]
+        if gap <= window and best[i][j] == (matched - 1, cost + gap):
+            pairs.append(AnchorPair(left=left[i], right=right[j]))
+            i += 1
             j += 1
-        elif gap < -window:
+        elif best[i][j] == best[i + 1][j]:
             lone_left.append(left[i])
             i += 1
         else:
-            if j + 1 < len(right) and abs(left[i].t_host - right[j + 1].t_host) < abs(gap):
-                lone_right.append(right[j])
-                j += 1
-                continue
-            if i + 1 < len(left) and abs(left[i + 1].t_host - right[j].t_host) < abs(gap):
-                lone_left.append(left[i])
-                i += 1
-                continue
-            pairs.append(AnchorPair(left=left[i], right=right[j]))
-            i += 1
+            lone_right.append(right[j])
             j += 1
     lone_left.extend(left[i:])
     lone_right.extend(right[j:])
@@ -450,11 +489,12 @@ def coarse_alignment(
     if not left or not right:
         return None
     window = cfg.anchor_pairing_window_s
-    candidates = np.sort(
-        np.asarray(
-            [a.t_host - b.t_host for a in left for b in right], dtype=np.float64
-        )
-    )
+    # outer 差在单个 float64 缓冲里出全表：事件数被误用场景推到上千时
+    # （整段步行录制配低阈值），逐元素的 Python 列表要秒级与上百 MB，
+    # 向量化是毫秒级。正常锚点会话（几十事件）两者都无所谓。
+    left_times = np.asarray([event.t_host for event in left], dtype=np.float64)
+    right_times = np.asarray([event.t_host for event in right], dtype=np.float64)
+    candidates = np.sort(np.subtract.outer(left_times, right_times).ravel())
     # 滑窗找最密的簇：对每个候选，数落在它 +2·window 内的候选个数。
     ends = np.searchsorted(candidates, candidates + 2.0 * window, side="right")
     counts = ends - np.arange(candidates.size)
@@ -464,6 +504,13 @@ def coarse_alignment(
 
 
 def _events(signal: FootSignal, nominal_fs: float, cfg: AlgoConfig) -> tuple[list[AnchorEvent], SyncReport]:
+    """一侧的完整检测：时基构建 + 找峰 + 峰索引换算成两种时刻。
+
+    换算刻意用**实测**采样率（`report.fs`），不用手边现成的 `nominal_fs`：
+    晶振几百 ppm 的偏差乘上几十秒的会话时长就是几十毫秒 —— 与被测效应同量级。
+    找峰传 `nominal_fs` 则无妨，它只把合并窗口换算成样本数，几十毫秒的窗口
+    差不出一个样本。
+    """
     magnitude = np.asarray(signal.magnitude, dtype=np.float64)
     arrival = np.asarray(signal.arrival, dtype=np.float64)
     if magnitude.shape != arrival.shape:

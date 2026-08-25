@@ -24,16 +24,20 @@ import struct
 
 import numpy as np
 import pytest
+from wt901.protocol.units import STANDARD_GRAVITY as G
+from wt901.recording import RecordedChunk, Recording, write_recording
 
 from gait.config import AlgoConfig, ConfigError
 from gait.sync.anchor import (
     AnchorError,
+    AnchorEvent,
     FootSignal,
+    ImpactPeak,
     detect_impacts,
     measure_offsets,
+    pair_events,
 )
 
-G = 9.80665
 NOMINAL_FS = 200.0
 
 #: 两侧固有链路延迟。不可观测、不相等 —— 其差就是要恢复的真值。
@@ -55,6 +59,32 @@ def hann_pulse(t: np.ndarray, centre: float, width: float, amp: float) -> np.nda
     return out
 
 
+def arrival_stream(
+    t_true: np.ndarray,
+    *,
+    latency: float,
+    rng: np.random.Generator,
+    per_packet: int = 4,
+    jitter_mean: float = 0.004,
+) -> np.ndarray:
+    """逐样本到达时刻。`synth_foot` 与 CLI fixture 共用**同一个**链路模型。
+
+    性质与 `test_timebase.simulate_arrival` 一致：整包到达、延迟单边为正且
+    长尾、有序交付。独立成函数是为了让"改到达模型"只有一处可改 —— 两份
+    略有出入的副本正是合成真值测试要预防的那类漂移。
+    """
+    n = t_true.size
+    arrival = np.empty(n)
+    previous = -math.inf
+    for begin in range(0, n, per_packet):
+        end = min(begin + per_packet, n)
+        moment = t_true[end - 1] + latency + rng.exponential(jitter_mean)
+        moment = max(moment, previous)  # 有序交付
+        arrival[begin:end] = moment
+        previous = moment
+    return arrival
+
+
 def synth_foot(
     impacts,
     *,
@@ -70,11 +100,7 @@ def synth_foot(
     clip_at: float | None = None,
     seed: int = 0,
 ) -> FootSignal:
-    """一台设备的合成流。`impacts` 是绝对时刻列表，元素可为 `(时刻, 幅值)`。
-
-    到达模型与 `test_timebase.simulate_arrival` 同一组性质：整包到达、延迟
-    单边为正且长尾、有序交付。
-    """
+    """一台设备的合成流。`impacts` 是绝对时刻列表，元素可为 `(时刻, 幅值)`。"""
     rng = np.random.default_rng(seed)
     t_true = start + np.arange(n) / fs_true
     magnitude = G + rng.normal(0.0, noise, n)
@@ -85,15 +111,9 @@ def synth_foot(
     if clip_at is not None:
         clipped = magnitude >= clip_at
         magnitude = np.minimum(magnitude, clip_at)
-
-    arrival = np.empty(n)
-    previous = -math.inf
-    for begin in range(0, n, per_packet):
-        end = min(begin + per_packet, n)
-        moment = t_true[end - 1] + latency + rng.exponential(jitter_mean)
-        moment = max(moment, previous)  # 有序交付
-        arrival[begin:end] = moment
-        previous = moment
+    arrival = arrival_stream(
+        t_true, latency=latency, rng=rng, per_packet=per_packet, jitter_mean=jitter_mean
+    )
     return FootSignal(magnitude=magnitude, arrival=arrival, clipped=clipped)
 
 
@@ -168,6 +188,63 @@ def test_clipped_plateau_uses_midpoint_and_flags():
     assert peaks[0].clipped
     assert not peaks[0].interpolated
     assert abs(peaks[0].index / fs - true_centre) < 2.0 / fs
+
+
+def test_double_clipped_plateau_uses_run_containing_peak():
+    """主峰与回弹**都**削顶时，峰时刻取包含最大值的那个平台的中点 ——
+    不是整个事件首尾削顶样本的中点（那会落在两平台之间，偏差几十毫秒）。"""
+    fs = NOMINAL_FS
+    t = np.arange(2000) / fs
+    true_centre = 5.0
+    magnitude = (
+        G
+        + hann_pulse(t, true_centre, 0.03, 30 * G)
+        + hann_pulse(t, 5.06, 0.03, 20 * G)
+    )
+    clip_level = 15.5 * G
+    clipped = magnitude >= clip_level
+    magnitude = np.minimum(magnitude, clip_level)
+    # 前提自检：确实是两个不相连的削顶平台。
+    runs = np.flatnonzero(np.diff(np.flatnonzero(clipped)) > 1)
+    assert runs.size >= 1
+    peaks = detect_impacts(magnitude, fs, clipped=clipped)
+    assert len(peaks) == 1
+    assert peaks[0].clipped
+    assert abs(peaks[0].index / fs - true_centre) < 2.0 / fs
+
+
+def test_clipped_rebound_does_not_displace_unclipped_peak():
+    """只有回弹样本被标削顶、主峰本身未削顶：峰时刻留在主峰，不挪去削顶段。"""
+    fs = NOMINAL_FS
+    t = np.arange(2000) / fs
+    magnitude = G + hann_pulse(t, 5.0, 0.02, 12 * G) + hann_pulse(t, 5.06, 0.02, 9 * G)
+    clipped = np.zeros_like(magnitude, dtype=bool)
+    rebound_peak = round(5.06 * fs)
+    clipped[rebound_peak - 1 : rebound_peak + 2] = True  # 模拟单轴满量程的回弹
+    peaks = detect_impacts(magnitude, fs, clipped=clipped)
+    assert len(peaks) == 1
+    assert peaks[0].clipped  # 降级仍可见
+    assert abs(peaks[0].index / fs - 5.0) < 1.0 / fs
+
+
+def test_pairing_dense_events_is_optimal_not_greedy():
+    """密集事件的反例：贪心（含单步前瞻）只配出 1 对并制造 2 个假落单，
+    非交叉最优匹配配出全部 2 对。"""
+
+    def event(t: float) -> AnchorEvent:
+        peak = ImpactPeak(
+            index=0.0, magnitude=100.0, clipped=False, interpolated=True, width_samples=3
+        )
+        return AnchorEvent(peak=peak, t_host=t, t_device=t)
+
+    pairs, lone_left, lone_right = pair_events(
+        [event(0.00), event(0.10)], [event(0.06), event(0.09)]
+    )
+    assert len(pairs) == 2
+    assert not lone_left and not lone_right
+    # 同数配对取 |Δ| 总和最小：0.00↔0.06 与 0.10↔0.09。
+    assert abs(pairs[0].delta - (-0.06)) < 1e-12
+    assert abs(pairs[1].delta - 0.01) < 1e-12
 
 
 def test_invalid_inputs_are_refused():
@@ -272,28 +349,18 @@ def test_anchor_config_must_be_positive():
 def _write_recording(path, device_id, magnitude_axis, arrival_abs, per_packet=4):
     """把 (轴向加速度, 绝对到达时刻) 写成 wt901 录制文件。
 
-    帧格式：`0x55 0x61` + 9×int16 LE（加速度 3、角速度 3、角度 3）。重力放 z 轴，
-    冲击放 x 轴 —— 模值 = hypot(x, 0, z)，与 CLI 的解析路径完全一致。
-    文件 `t` 按 wt901 的语义**归零到首段字节**；返回该文件的 epoch（首段绝对时刻）。
+    帧负载是本测试真正要造的东西：`0x55 0x61` + 9×int16 LE（加速度 3、角速度 3、
+    角度 3），重力放 z 轴、冲击放 x 轴 —— 模值 = hypot(x, 0, z)，与 CLI 的解析
+    路径完全一致。文件级序列化交给 `wt901.recording.write_recording`：格式与
+    版本头由格式的主人产出，wt901 收紧头部校验时本测试跟着走而不是悄悄漂移。
+    `t` 按 wt901 语义**归零到首段字节**；返回该文件的 epoch（首段绝对时刻）。
     """
     scale = 32768.0 / (16.0 * G)
     counts_x = np.clip(np.rint(np.asarray(magnitude_axis) * scale), -32768, 32767).astype(int)
     count_z = round(G * scale)
-    lines = [
-        json.dumps(
-            {
-                "format": "wt901-recording",
-                "version": 1,
-                "device_id": device_id,
-                "created_utc": "2026-08-25T00:00:00+00:00",
-                "note": "synthetic anchor test",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    ]
     epoch = float(arrival_abs[0])
     n = len(magnitude_axis)
+    chunks = []
     for begin in range(0, n, per_packet):
         end = min(begin + per_packet, n)
         payload = b"".join(
@@ -301,14 +368,16 @@ def _write_recording(path, device_id, magnitude_axis, arrival_abs, per_packet=4)
             + struct.pack("<9h", int(counts_x[k]), 0, count_z, 0, 0, 0, 0, 0, 0)
             for k in range(begin, end)
         )
-        lines.append(
-            json.dumps(
-                {"t": round(arrival_abs[end - 1] - epoch, 6), "hex": payload.hex()},
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        chunks.append(RecordedChunk(t=round(arrival_abs[end - 1] - epoch, 6), data=payload))
+    write_recording(
+        path,
+        Recording(
+            device_id=device_id,
+            created_utc="2026-08-25T00:00:00+00:00",
+            note="synthetic anchor test",
+            chunks=tuple(chunks),
+        ),
+    )
     return epoch
 
 
@@ -327,14 +396,7 @@ def _cli_fixture(tmp_path):
         axis = rng.normal(0.0, 0.05, n)
         for tap in taps:
             axis += hann_pulse(t_true, tap, 0.02, 8 * G)
-        arrival = np.empty(n)
-        previous = -math.inf
-        for begin in range(0, n, 4):
-            end = min(begin + 4, n)
-            moment = t_true[end - 1] + latency + rng.exponential(0.004)
-            moment = max(moment, previous)
-            arrival[begin:end] = moment
-            previous = moment
+        arrival = arrival_stream(t_true, latency=latency, rng=rng)
         path = tmp_path / f"{label}.raw"
         epochs[label] = _write_recording(path, f"AA:BB:{label}", axis, arrival)
         files[label] = path
@@ -424,6 +486,21 @@ def test_cli_session_layout_and_epoch_pairing_errors(tmp_path):
                 "--left-epoch", "5.0",  # 单边 epoch
             ]
         )
+    with pytest.raises(SystemExit):
+        # --session 与 --right 并用：静默忽略 --right 会分析错误的录制。
+        main(["--session", str(tmp_path / "session"), "--right", str(files["right"])])
+
+
+def test_cli_invalid_threshold_fails_cleanly(tmp_path, capsys):
+    """--threshold-g 0 走"锚点分析失败"路径（退出码 2），不裸栈。"""
+    from gait.cli.anchor import main
+
+    files, _epochs, _ = _cli_fixture(tmp_path)
+    code = main(
+        ["--left", str(files["left"]), "--right", str(files["right"]), "--threshold-g", "0"]
+    )
+    assert code == 2
+    assert "锚点分析失败" in capsys.readouterr().err
 
 
 def test_cli_missing_file_fails_cleanly(tmp_path, capsys):
