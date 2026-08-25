@@ -287,6 +287,27 @@ class AlgoConfig:
     #: 整段噪声大得多，所以它是一个**保守**的读数：分窗都稳，整段必然更稳。
     sync_stability_window_samples: int = 4000
 
+    # ── 物理对碰锚点（RAY-212）。工程模式实验室工具，不进产品流程 ──────────
+
+    #: 冲击检测阈值，加速度**模值**的绝对值，m/s²。
+    #:
+    #: 3 g。静止基线是 1 g，正常步行踝部冲击很少超过 2 g 模值，而外壳对碰
+    #: 即使轻碰也在 5 g 以上 —— 3 g 落在两个分布之间的空档里。检测在模值上做，
+    #: 对模块姿态不变，所以阈值不需要先估重力方向。
+    anchor_threshold_m_s2: float = 29.42
+    #: 同一事件的合并窗口，s。间隔小于它的超阈值区段并成一个事件。
+    #:
+    #: 合并的是回弹：一次对碰的次级冲击与主峰隔几十毫秒，是同一个物理事件，
+    #: 分开计数会让两侧配对错乱。代价是间隔小于 0.1 s 的故意连击也被合并 ——
+    #: 但两侧按同一规则合并，配对与偏移不受影响，只是计数少一次。
+    anchor_merge_window_s: float = 0.1
+    #: 跨足配对窗口，s。两侧峰的主机时基时刻差超过它就不配对。
+    #:
+    #: 上界由相邻对碰的间隔定（人抬手再碰至少几百毫秒），下界由被测对象定
+    #: （主机侧同步误差 ±10~30 ms，PRD §8）。0.25 s 落在中间：远大于待测偏移，
+    #: 远小于对碰节奏 —— 就近贪心配对因此不会跨事件。
+    anchor_pairing_window_s: float = 0.25
+
     # ── 数据完整性（RAY-210）。PRD §6.1 ────────────────────────────────────
 
     #: 空洞判据：估计丢失超过这么多样本就切分数据段。**PRD §6.1 写死的是 3。**
@@ -373,6 +394,9 @@ class AlgoConfig:
             "dualfoot_double_support_max_s",
             "dualfoot_flight_max_s",
             "sync_packet_gap_fraction",
+            "anchor_threshold_m_s2",
+            "anchor_merge_window_s",
+            "anchor_pairing_window_s",
             "integrity_rate_warn",
             "integrity_rate_unusable",
             "selfcheck_stride_period_tolerance",
