@@ -51,7 +51,7 @@ from typing import Final
 import numpy as np
 
 from gait.config import AlgoConfig
-from gait.contracts import FootLabel, NavResult
+from gait.contracts import NavResult
 from gait.core import quaternion as quat
 
 #: 静立时两脚的横向间距，m。见模块文档"初始足间偏置从哪来"。
@@ -503,30 +503,19 @@ def _longest_run(mask: np.ndarray) -> int:
 
 
 def swapped(left: NavResult, right: NavResult) -> tuple[NavResult, NavResult]:
-    """把两路数据对调。`identify_feet` 报告戴反时用。
+    """把两路数据对调。
 
     `NavResult` 没有 `label` 字段（契约 §3.3 —— 足别在 `FootSeries` 上），所以"交换"
     就是把两个对象换个位置。保留一个具名函数是为了让调用点读起来是"交换左右"，而不是
     "这两个变量为什么反着传"。
 
-    **检测与处置分开**是有意的：`identify_feet` 只报告，不改数据。戴反是一件要让操作员
-    知道的事（PRD §6.1 的佩戴引导要给动作语言提示），静静地把数据换过来等于把一次真实
-    的操作错误藏起来 —— 而下一次采集它还会发生。
+    它现在唯一的用处是**复核不可判定性**：把左右对调后重算 `lateral_separation`，两次的
+    `nominal_left_lateral` 之和精确等于假设的步宽（见测试里的对调恒等式）。那条恒等式把
+    "位置法给不出左右"从一个判断变成一个可以复核的事实。
+
+    本模块**没有任何函数会给出左右结论**，这是 RAY-205 需求修订 R2 的决定（本仓别处的裸
+    "R2" 指契约 R2 的单位口径，与此无关）。所以也不存在"检测到戴反就把数据换过来"这条通
+    路。戴反是一件要让操作员知道的事（PRD §6.1 的佩戴引导要给动作语言提示），静静地把数
+    据换过来等于把一次真实的操作错误藏起来 —— 而下一次采集它还会发生。
     """
     return right, left
-
-
-def lateral_offset(
-    left: NavResult, right: NavResult, foot: FootLabel, *, step_width: float = DEFAULT_STEP_WIDTH
-) -> float:
-    """某一只脚相对双足中线的横向位置均值，m。步宽指标的原料（整体设计 §6.2）。"""
-    offset = np.array([0.0, -step_width, 0.0])
-    midline = 0.5 * (left.p + right.p + offset)
-    path = left.p if foot == "L" else right.p + offset
-    travel = midline[-1, :2] - midline[0, :2]
-    distance = float(np.linalg.norm(travel))
-    if distance <= 0:
-        raise DualFootError("整段没有前进，行进方向定不下来")
-    direction = travel / distance
-    normal = np.array([-direction[1], direction[0]])
-    return float(np.mean((path[:, :2] - midline[:, :2]) @ normal))
