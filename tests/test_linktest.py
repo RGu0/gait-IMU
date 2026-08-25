@@ -37,7 +37,7 @@ from gait.cli.linktest import (
     analyze_recordings,
     host_clock_resolution,
     run_bench,
-    sustained_undersampling,
+    worst_window_loss,
 )
 from gait.device.ble import StreamConfig
 from gait.sync.integrity import assess
@@ -113,26 +113,38 @@ def _run(out_dir: Path, replay_files: list[Path], speed: float | None) -> dict:
     )
 
 
-def test_sustained_undersampling_flags_real_deficit_not_jitter() -> None:
-    steady = np.full(120, 1.0)
-    assert sustained_undersampling(steady) == []
+def test_worst_window_loss_surfaces_a_bad_stretch_the_average_hides() -> None:
+    """整轮均值会把一段集中的坏时期洗掉 —— 这个数专门把它捞出来。"""
+    fs = 200.0
+    # 30 分钟，只有第 600~629 秒每秒丢 20 个。
+    loss = np.zeros(1800)
+    loss[600:630] = 20.0
 
-    # 单秒毛刺（integrity.py 实测无丢包时逐秒最低 0.94）不该报。
-    jitter = steady.copy()
-    jitter[30] = 0.94
-    jitter[31] = 1.06
-    assert sustained_undersampling(jitter) == []
+    whole_round = loss.sum() / (1800 * fs)
+    worst = worst_window_loss(loss, fs)
 
-    # 持续 30 s 跑在 97%：真实的欠采，必须报，且起点落在低速段附近。
-    deficit = steady.copy()
-    deficit[40:80] = 0.97
-    windows = sustained_undersampling(deficit)
-    assert windows
-    assert 10 <= windows[0] <= 41
+    assert abs(worst - 20 / fs) < 1e-12  # 那 30 s 窗：每秒丢 20/200 = 10%
+    assert abs(whole_round - 600 / 360_000) < 1e-12  # 整轮均值只有 0.167%
+    assert worst > 50 * whole_round, "整轮均值把这段坏时期洗掉了，正是要捞它"
 
-    # 整轮不足一个窗口时退化为整轮均值判定。
-    assert sustained_undersampling(np.full(5, 0.9)) == [0]
-    assert sustained_undersampling(np.full(5, 1.0)) == []
+    # 干净的一轮是 0。
+    assert worst_window_loss(np.zeros(1800), fs) == 0.0
+
+
+def test_worst_window_loss_is_immune_to_arrival_rate_jitter() -> None:
+    """被替换掉的那版建在逐秒**到达率**上，被真机两次证伪（见函数 docstring）。
+
+    这一版只看丢失：抖动不改变「样本存不存在」，所以零丢包必然读 0，
+    无论逐秒到达率怎么起伏。
+    """
+    assert worst_window_loss(np.zeros(1800), 200.0) == 0.0
+
+
+def test_worst_window_loss_handles_short_captures() -> None:
+    """短于一个窗口时按实际长度算，而不是静默返回 0。"""
+    loss = np.full(5, 10.0)
+    assert worst_window_loss(loss, 200.0) == 10.0 / 200.0
+    assert worst_window_loss(np.zeros(0), 200.0) == 0.0
 
 
 def _synthetic_arrivals(
@@ -671,7 +683,6 @@ def test_verdict_flags_recording_error_alongside_integrity_problems() -> None:
     run.arrivals = list(arrival)
     run.arrival_array = arrival
     run.integrity = assess(arrival, 200.0)
-    run.sustained_windows = []
     run.recording_error = "OSError('磁盘已满')"
 
     verdict = _verdict(

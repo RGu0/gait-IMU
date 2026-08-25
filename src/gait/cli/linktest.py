@@ -1,7 +1,8 @@
 """200 Hz 双设备链路压测。cli 的 `linktest`（RAY-199 的最小实现，服务 RAY-200）。
 
 PRD §17.1 验证点 V2：≤5 m 近距下 30 min 缺失率 < 0.5%。本工具回答的正是这个
-判据，并把「无持续性欠采」操作化为一个可复核的数（见 `sustained_undersampling`）。
+判据，并把「无持续性欠采」量化成一个可复核的数（见 `worst_window_loss`）——
+但**不替 PRD 定阈值**：pass/fail 只由已明文的「平均缺失率 < 0.5%」决定。
 
 一轮压测 = 扫描 → 双连接 → 电量（高速流开启**前**读）→ 固定时序配置下发并校验
 → Notify 回调第一动作落盘原始字节 → 持续采集 → 结束后降速、再读电量 → 逐秒
@@ -88,17 +89,17 @@ from gait.device.ble import (
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.integrity import IntegrityReport, assess, estimate_period
 
-__all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench"]
+__all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench", "worst_window_loss"]
 
 #: V2 判据：平均缺失率 < 0.5%。
 LOSS_RATE_CRITERION = 0.005
-#: 「无持续性欠采」的操作化：任何 30 s 滑动窗内逐秒到达率均值 < 0.99 记为一个
-#: 持续欠采窗口。0.99 取自实测抖动下限（integrity.py 记录无丢包时单秒最低读到
-#: 0.94，但那是毛刺；30 s 均值仍低于 0.99 只能来自真实的速率不足）。与
-#: `AlgoConfig.integrity_rate_warn`（0.98，逐秒分级用）不是同一个量 —— 那是单秒
-#: 阈值，这是窗口均值阈值；两者都等 RAY-200 实测分布定稿后一起校准。
+#: 「无持续性欠采」看多长的窗口，秒。见 `worst_window_loss`。
+#:
+#: **阈值刻意不在代码里定。** PRD §17.1 只写了「无持续性欠采」，没有定量口径；
+#: RAY-200 的实测分布已具备定它的条件，但那属 requirement 变更，不由工具发明。
+#: 所以本模块只把「最差 30 s 窗缺失率」报出来，pass/fail 仅由「平均缺失率 <
+#: 0.5%」这一条已明文的判据决定。
 SUSTAINED_WINDOW_S = 30
-SUSTAINED_RATE_FLOOR = 0.99
 
 #: 主机单调时钟分辨率必须细于采样周期的这个比例，测量才有意义（见模块 docstring）。
 #: 取 10：量化误差 ≤ 半个周期的 1/5，不足以在残差上造出 3 样本（PRD 的空洞阈值）
@@ -189,7 +190,8 @@ class DeviceRun:
     recording_path: str | None = None
     recording_error: str | None = None
     integrity: IntegrityReport | None = None
-    sustained_windows: list[int] = field(default_factory=list)
+    worst_window_loss: float | None = None
+    """最差 30 s 窗的缺失率。只报数，不参与判定 —— 阈值属 PRD §17.1。"""
     measured_fs: float | None = None
     """器件实发速率，由到达时刻估计。判据的分母，见 `_finalize`。"""
     arrival_array: np.ndarray | None = None
@@ -223,7 +225,7 @@ class DeviceRun:
             "recording": self.recording_path,
             "recording_error": self.recording_error,
             "loss_rate": self.loss_rate,
-            "sustained_undersampling_windows": self.sustained_windows,
+            "worst_window_loss": self.worst_window_loss,
             "integrity": integrity,
         }
 
@@ -234,25 +236,51 @@ def _battery_snapshot(battery: Battery | None) -> dict[str, Any] | None:
     return {"raw": battery.raw, "percent": battery.percent}
 
 
-def sustained_undersampling(
-    per_second_rate: np.ndarray,
+def worst_window_loss(
+    per_second_loss: np.ndarray,
+    measured_fs: float,
     *,
     window: int = SUSTAINED_WINDOW_S,
-    floor: float = SUSTAINED_RATE_FLOOR,
-) -> list[int]:
-    """逐秒到达率里均值低于 ``floor`` 的滑动窗口起始秒。
+) -> float:
+    """最差的一个 ``window`` 秒窗口里丢了多少（占该窗应收的比例）。
 
-    整轮不足一个窗口时退化为整轮均值 —— 短采集（自测、回放）也要有判定，
-    而不是静默返回「没有窗口所以没有欠采」。
+    这是 PRD §17.1「无持续性欠采」该看的量：**整轮均值会把一段集中的坏时期
+    洗掉**，而这个数专门把它捞出来。实测四轮（RAY-200）：
+
+    | 工况 | 整轮缺失 | 最差 30 s 窗 |
+    | --- | --- | --- |
+    | ≤1 m 桌面 | 0.000% / 0.002% | 0.00% / 0.07% |
+    | 2 m 贴地 + 全程躯干遮挡 | 0.064% / 0.118% | 1.60% / 1.14% |
+    | 3 m 贴地 | 3.45% / 2.27% | 23.8% / 25.3% |
+    | 5 m 桌面 | 3.90% / 5.08% | 24.9% / 37.7% |
+
+    数量级分开，且**不含抖动**。
+
+    ## 为什么不建在逐秒到达率上（被替换掉的那版就是）
+
+    上一版实现是「30 s 窗内逐秒**到达率**均值 < 0.99」。它建在
+    `integrity.py` 明确警告过「不能用来分级」的量上，被真机两次证伪：
+
+    1. **round-1（零丢包）**：534/1799 秒的逐秒率低于 0.99，而**一个样本都没丢**
+       —— 那是 BLE 通知成簇造成的读数波动，基线本来就贴着 0.99 晃。
+    2. **round-4**：报出 29 个「持续欠采窗口」，追下去实际是**一次 0.4 秒的瞬断**
+       （单秒丢 82 个）被 30 秒窗口摊开的。区间中位数 1.0092，健康。
+
+    改成中位数并不能修好它 —— 只是把误报换到另一台设备上（0→16）。问题不在
+    均值还是中位，在于底下那个量本身含抖动。丢失不含抖动，所以建在丢失上。
+
+    ## 阈值不在这里定
+
+    本函数只返回数，**不判 pass/fail**：把它变成判据需要一个阈值，而那属于
+    PRD §17.1 的措辞（「无持续性欠采」目前没有定量口径）。RAY-200 的实测分布
+    已经具备定它的条件，但那是 requirement 变更，不由工具发明。
     """
-    rates = np.asarray(per_second_rate, dtype=np.float64)
-    if rates.size == 0:
-        return []
-    if rates.size < window:
-        return [0] if float(rates.mean()) < floor else []
-    kernel = np.ones(window) / window
-    means = np.convolve(rates, kernel, mode="valid")
-    return [int(i) for i in np.flatnonzero(means < floor)]
+    losses = np.asarray(per_second_loss, dtype=np.float64)
+    if losses.size == 0 or measured_fs <= 0:
+        return 0.0
+    span = min(window, losses.size)
+    summed = np.convolve(losses, np.ones(span), mode="valid")
+    return float(summed.max() / (span * measured_fs))
 
 
 async def _consume(device: WT901Device, run: DeviceRun, started: float) -> None:
@@ -310,7 +338,9 @@ def _finalize(run: DeviceRun, nominal_fs: float) -> None:
     # 链路也永远不达标。见 `integrity.estimate_period` 的说明与其局限。
     run.measured_fs = 1.0 / estimate_period(arrival, nominal_fs)
     run.integrity = assess(arrival, run.measured_fs)
-    run.sustained_windows = sustained_undersampling(run.integrity.per_second_rate)
+    run.worst_window_loss = worst_window_loss(
+        run.integrity.per_second_loss, run.measured_fs
+    )
 
 
 def _verdict(
@@ -348,11 +378,6 @@ def _verdict(
         if loss >= LOSS_RATE_CRITERION:
             problems.append(
                 f"{run.device_id}: 缺失率 {loss:.3%} ≥ {LOSS_RATE_CRITERION:.1%}"
-            )
-        if run.sustained_windows:
-            problems.append(
-                f"{run.device_id}: {len(run.sustained_windows)} 个持续欠采窗口"
-                f"（首个起于第 {run.sustained_windows[0]} 秒）"
             )
         if run.disconnected_at is not None:
             problems.append(f"{run.device_id}: 采集中断连")
@@ -623,7 +648,6 @@ def _emit_report(
         "criterion": {
             "loss_rate": LOSS_RATE_CRITERION,
             "sustained_window_s": SUSTAINED_WINDOW_S,
-            "sustained_rate_floor": SUSTAINED_RATE_FLOOR,
         },
         "started_utc": started_utc,
         "duration_requested_s": duration,
@@ -911,13 +935,14 @@ def _markdown(report: dict[str, Any]) -> str:
         )
     lines += ["", "## 判据（PRD §17.1 V2）", ""]
     lines.append(
-        f"平均缺失率 < {report['criterion']['loss_rate']:.1%}，且无持续性欠采"
-        f"（任何 {report['criterion']['sustained_window_s']} s 窗内逐秒到达率"
-        f"均值 ≥ {report['criterion']['sustained_rate_floor']:.0%}）。"
+        f"pass/fail 只看**平均缺失率 < {report['criterion']['loss_rate']:.1%}**"
+        f"（分母为器件实测速率）。「无持续性欠采」以"
+        f"**最差 {report['criterion']['sustained_window_s']} s 窗缺失率**量化并列在下表，"
+        "但 PRD §17.1 尚未给出定量口径，故不参与判定。"
     )
     lines += ["", "## 各设备", ""]
     lines.append(
-        "| 设备 | 样本 | 时长 s | 缺失率 | 最差秒丢失 | 空洞数 | 持续欠采窗 | "
+        "| 设备 | 样本 | 时长 s | 缺失率 | 最差 30s 窗 | 最差秒丢失 | 空洞数 | "
         "resync | 队列溢出 | 电量前→后 |"
     )
     lines.append("|---|---|---|---|---|---|---|---|---|---|")
@@ -937,8 +962,8 @@ def _markdown(report: dict[str, Any]) -> str:
         )
         lines.append(
             f"| {dev['device_id']} | {integ['received']} | {integ['duration']:.1f} "
-            f"| {loss:.3%} | {integ['worst_second_loss']} | {len(integ['gaps'])} "
-            f"| {len(dev['sustained_undersampling_windows'])} "
+            f"| {loss:.3%} | {dev['worst_window_loss']:.2%} "
+            f"| {integ['worst_second_loss']} | {len(integ['gaps'])} "
             f"| {dev['device_stats'].get('resync_count', '—')} "
             f"| {dev['device_stats'].get('dropped_samples', '—')} | {battery} |"
         )
