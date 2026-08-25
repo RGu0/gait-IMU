@@ -9,6 +9,18 @@ linear_project: "gait-IMU"
 # account of the review, and each receipt records that this policy was in
 # force. Restore "independent" as soon as a second reviewer exists.
 review_policy: "self"
+# entrypoint: ./dev 与 dev.ps1 自己按 .node-version 解析 Node（fnm exec），不看
+# PATH。没有这行声明时 preflight 默认校验 PATH —— 那是一条入口永远不会用的路径，
+# 于是本机装了别的 Node 就会让闸门红，而项目本身是好的（RAY-236 为此在 preflight
+# 里加了这个开关，RAY-275 补上本仓库的声明）。
+#
+# 这不是豁免：entrypoint 模式下 preflight 仍把探针结果与 .node-version 比对，
+# 版本不符照样停，变的只是问谁。fnm 不在时入口回退 PATH，探针就返回 PATH 的版本，
+# 检查照旧拦得住。
+#
+# 改这行前先确认两个入口都还有 node 逃生舱（./dev node <cmd> / dev.ps1 node <cmd>）
+# —— 探针正是经它执行的，缺了它这行声明会让闸门变成无法回答而不是回答正确。
+node_resolution: "entrypoint"
 shared_library:
   provider: "onedrive"
   library_id: "c527af59-9d77-4944-b6c1-ca14cd65ef5d"
