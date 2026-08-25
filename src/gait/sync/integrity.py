@@ -260,14 +260,50 @@ def find_gaps(
     return gaps
 
 
+#: 估计周期时一个块里放多少个包。见 `_robust_period` 的说明。
+#:
+#: 真机实测（RAY-200，WT901BLE67 @200 Hz）：包平均 25 个/s，成簇效应在几个包内
+#: 就排空（间隔 p99 = 91 ms）。25 个包 ≈ 1 s，足以把成簇抹平；同时一轮 30 分钟
+#: 有 400+ 个块，中位数拒绝含丢包的块仍然有效。
+PERIOD_BLOCK_PACKETS: Final[int] = 25
+
+
 def _robust_period(arrival: np.ndarray, boundaries: np.ndarray, nominal_fs: float) -> float:
     """采样周期的稳健估计，s。
 
-    取逐包的 `(包间到达时差) / (包内样本数)` 的**中位数**。丢包只影响少数包，中位数
-    因此看不见它们 —— 这正是这里需要的性质：估计周期时不能被丢包带偏，否则台阶判据
-    的基线本身就是错的。
+    ## 为什么不能取逐包比值的中位数
 
-    包数不足时退回标称值。那种情形下本来也没什么可检测的。
+    第一版取逐包 `(包间到达时差) / (包内样本数)` 的**中位数**，理由是丢包只影响
+    少数包、中位数看不见它们。那个理由本身没错，但它默认了「包间隔的中位数≈均值」
+    —— 而真机不是这样。
+
+    RAY-200 真机实测（WT901BLE67，200 Hz，8 帧/包）：包间隔**严重右偏**，
+    中位数 30.7 ms 而均值 40.5 ms（p99 91 ms，max 331 ms）—— BLE 通知成簇到达，
+    几个挤在一起，然后等一等。逐包比值的中位数因此系统性偏小 **24%**：
+
+    | 量 | 值 |
+    | --- | --- |
+    | 中位数法估计周期 | 3.85 ms |
+    | 真实平均周期 | 5.07 ms |
+    | 残差 851 s 内累计漂移 | 205 s |
+    | `find_gaps` 报出的缺失率 | **24.00%** |
+    | 按到达率反推的真实缺口 | **1.41%** |
+
+    周期偏小 24% 会让残差 `t − k·period` 随样本数**单调爬升**，于是**每一个包边界
+    都是正台阶**，累出来的假丢包恰好等于周期的偏差量。这不是精度问题，是把结论
+    整个翻转的量级问题：未修复时 RAY-200 会报「200 Hz 丢包 24%、不可行」。
+
+    模拟数据抓不到它 —— 模拟的包间隔规整，中位数等于均值，偏差为零。只有真机的
+    成簇到达才触发。
+
+    ## 分块：块内取比值之和，块间取中位数
+
+    偏差来自「对**比值**取中位数」。改成：把包分成块，**块内**用
+    `Σ时差 / Σ样本数`（比值之和，不是和的比值 —— 成簇在块内自然抹平，无偏），
+    **块间**取中位数（含丢包的块被拒绝，保住稳健性）。两个性质各由一层负责。
+
+    块数不足时退回块内同一个无偏估计（整段的 `Σ时差/Σ样本数`）：那种长度下
+    本来也没什么可稳健的，而无偏比有偏重要。包数不足时退回标称值。
     """
     if boundaries.size < 3:
         return 1.0 / nominal_fs
@@ -278,9 +314,42 @@ def _robust_period(arrival: np.ndarray, boundaries: np.ndarray, nominal_fs: floa
     sizes = np.diff(np.concatenate(([0], boundaries, [arrival.size])))
     counts = sizes[1:]
     usable = counts > 0
-    if not np.any(usable):
+    elapsed, counts = elapsed[usable], counts[usable]
+    if elapsed.size == 0:
         return 1.0 / nominal_fs
-    return float(np.median(elapsed[usable] / counts[usable]))
+
+    block = PERIOD_BLOCK_PACKETS
+    blocks = elapsed.size // block
+    if blocks < 3:
+        total = float(counts.sum())
+        return float(elapsed.sum() / total) if total else 1.0 / nominal_fs
+    trimmed = blocks * block
+    block_elapsed = elapsed[:trimmed].reshape(blocks, block).sum(axis=1)
+    block_counts = counts[:trimmed].reshape(blocks, block).sum(axis=1)
+    return float(np.median(block_elapsed / block_counts))
+
+
+def estimate_period(
+    arrival: np.ndarray, nominal_fs: float, cfg: AlgoConfig | None = None
+) -> float:
+    """器件的实测采样周期，s。`1/它` 就是器件**实发**速率。
+
+    为什么需要它：器件晶振偏差是真实且不小的。wt901 在真机上逐档实测，200 Hz
+    档（编码 `0x0B`）实际跑 198.43 Hz —— 比标称低 **0.8%**。RAY-200 实测两台
+    WT901BLE67 为 197.8 Hz。而 PRD §17.1 V2 的判据是「缺失率 < 0.5%」：光晶振
+    偏差就吃掉了全部预算，按标称算的话一条完美链路也永远不达标。
+
+    **判据要问的是「器件发出来的，链路丢了多少」**，分母因此必须是器件实发数。
+
+    局限，用之前必须知道：本估计对**成片**的丢包稳健（块间中位数拒绝含丢包的
+    块），但若丢包**均匀散布在每一个块**里，中位数块本身也含丢包，估计出的就
+    退化为**到达**速率而非器件速率，缺失率随之被低估。交叉验证的办法是看
+    `find_gaps` 给出的丢失数与「按本速率算的期望数 − 实收数」是否相符。
+    """
+    cfg = cfg or AlgoConfig()
+    times = np.asarray(arrival, dtype=np.float64)
+    boundaries = _packet_boundaries(times, nominal_fs, cfg.sync_packet_gap_fraction)
+    return _robust_period(times, boundaries, nominal_fs)
 
 
 def split_segments(samples: int, gaps: list[Gap]) -> list[tuple[int, int]]:

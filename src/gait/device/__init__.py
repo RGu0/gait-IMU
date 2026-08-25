@@ -12,4 +12,11 @@ Modules, and the Issue that delivers each::
 Pure-function protocol parsing stays in protocol.py so it can be unit
 tested without a radio.
 
+**ble.py and recorder.py currently hold RAY-200's minimal subset, not the
+full RAY-196/197/198 delivery.** ble.py has `configure_streaming` (the fixed
+PRD §6.1 write sequence) but not scan/connect/MAC-binding orchestration —
+`cli/linktest.py` does that inline for now, to be absorbed here when
+RAY-196/197 land. recorder.py has the threaded disk writer but not session
+directory layout or crash recovery.
+
 """
