@@ -36,6 +36,10 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.7（RAY-212 `anchor-tool`）：`AlgoConfig` 增加物理对碰锚点的三个检测参数。
+#: 锚点是工程模式实验室工具，但参数仍走 `AlgoConfig` —— 复现性契约（PRD §6.1）
+#: 不区分产品与实验：RAY-213 的实验结论同样要能凭元数据复现。
+#:
 #: 1.6（RAY-211 `sync-selfcheck`）：`AlgoConfig` 增加同步自检的三个判据参数。
 #:
 #: 1.5（RAY-210 `integrity-gaps`）：`AlgoConfig` 增加空洞判据与到达率分级阈值。
@@ -54,7 +58,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.6"
+CONFIG_VERSION: Final[str] = "1.7"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -287,6 +291,27 @@ class AlgoConfig:
     #: 整段噪声大得多，所以它是一个**保守**的读数：分窗都稳，整段必然更稳。
     sync_stability_window_samples: int = 4000
 
+    # ── 物理对碰锚点（RAY-212）。工程模式实验室工具，不进产品流程 ──────────
+
+    #: 冲击检测阈值，加速度**模值**的绝对值，m/s²。
+    #:
+    #: 3 g。静止基线是 1 g，正常步行踝部冲击很少超过 2 g 模值，而外壳对碰
+    #: 即使轻碰也在 5 g 以上 —— 3 g 落在两个分布之间的空档里。检测在模值上做，
+    #: 对模块姿态不变，所以阈值不需要先估重力方向。
+    anchor_threshold_m_s2: float = 29.42
+    #: 同一事件的合并窗口，s。间隔小于它的超阈值区段并成一个事件。
+    #:
+    #: 合并的是回弹：一次对碰的次级冲击与主峰隔几十毫秒，是同一个物理事件，
+    #: 分开计数会让两侧配对错乱。代价是间隔小于 0.1 s 的故意连击也被合并 ——
+    #: 但两侧按同一规则合并，配对与偏移不受影响，只是计数少一次。
+    anchor_merge_window_s: float = 0.1
+    #: 跨足配对窗口，s。两侧峰的主机时基时刻差超过它就不配对。
+    #:
+    #: 上界由相邻对碰的间隔定（人抬手再碰至少几百毫秒），下界由被测对象定
+    #: （主机侧同步误差 ±10~30 ms，PRD §8）。0.25 s 落在中间：远大于待测偏移，
+    #: 远小于对碰节奏 —— 就近贪心配对因此不会跨事件。
+    anchor_pairing_window_s: float = 0.25
+
     # ── 数据完整性（RAY-210）。PRD §6.1 ────────────────────────────────────
 
     #: 空洞判据：估计丢失超过这么多样本就切分数据段。**PRD §6.1 写死的是 3。**
@@ -373,6 +398,9 @@ class AlgoConfig:
             "dualfoot_double_support_max_s",
             "dualfoot_flight_max_s",
             "sync_packet_gap_fraction",
+            "anchor_threshold_m_s2",
+            "anchor_merge_window_s",
+            "anchor_pairing_window_s",
             "integrity_rate_warn",
             "integrity_rate_unusable",
             "selfcheck_stride_period_tolerance",

@@ -52,8 +52,8 @@ import pytest
 
 from gait.cloud.chain import run_basic_chain, run_full_chain
 from gait.config import AlgoConfig
-from gait.core import anchor, rts
 from gait.core import quaternion as quat
+from gait.core import rts, stance_anchor
 from gait.core.eskf import run_ins_with_history
 from gait.validate.synthetic import (
     NoiseModel,
@@ -86,7 +86,7 @@ def chains(spec_kwargs, seed=3, seconds=30.0):
     )
     forward, history = run_ins_with_history(series, AlgoConfig())
     smoothed = rts.smooth(forward, history).navigation
-    full = anchor.anchor_stance_positions(smoothed).navigation
+    full = stance_anchor.anchor_stance_positions(smoothed).navigation
     return forward, full, truth
 
 

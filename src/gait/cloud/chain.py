@@ -38,8 +38,8 @@ import numpy as np
 from gait.analysis import events, segments, variability
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel, FootSeries, GaitCycle, NavResult
-from gait.core import anchor, rts
 from gait.core import quaternion as quat
+from gait.core import rts, stance_anchor
 from gait.core.dualfoot import DualFootReport, apply_distance_constraint
 from gait.core.eskf import run_ins, run_ins_with_history
 from gait.quality import annotate as quality
@@ -90,7 +90,7 @@ class FootOutcome:
     #: 抛异常会把一份本可以出（其余指标标注为 `uncomputable`）的报告整个打掉。
     spatiotemporal: events.SpatioTemporal | None
     smooth_report: rts.SmoothReport | None
-    anchor_report: anchor.AnchorReport | None
+    anchor_report: stance_anchor.AnchorReport | None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -199,7 +199,7 @@ def _analyse_foot(
     navigation: NavResult,
     cfg: AlgoConfig,
     smooth_report: rts.SmoothReport | None,
-    anchor_report: anchor.AnchorReport | None,
+    anchor_report: stance_anchor.AnchorReport | None,
 ) -> FootOutcome:
     cycles, _ = events.segment_cycles(
         label,
@@ -336,11 +336,11 @@ def run_full_chain(
 
     navigation: dict[FootLabel, NavResult] = {}
     smooth_reports: dict[FootLabel, rts.SmoothReport] = {}
-    anchor_reports: dict[FootLabel, anchor.AnchorReport] = {}
+    anchor_reports: dict[FootLabel, stance_anchor.AnchorReport] = {}
     for label, series in sorted(series_by_foot.items()):
         forward, history = run_ins_with_history(series, cfg)
         smoothed = rts.smooth(forward, history)
-        anchored = anchor.anchor_stance_positions(smoothed.navigation)
+        anchored = stance_anchor.anchor_stance_positions(smoothed.navigation)
         navigation[label] = anchored.navigation
         smooth_reports[label] = smoothed.report
         anchor_reports[label] = anchored.report
