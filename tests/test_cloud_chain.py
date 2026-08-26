@@ -16,6 +16,7 @@ from gait.cloud.chain import (
     run_full_chain,
 )
 from gait.config import AlgoConfig
+from gait.contracts import FootSeries
 from gait.core.eskf import run_ins, run_ins_with_history
 from gait.quality.annotate import CHAIN_BASIC, CHAIN_FULL, QualityError, summarize
 from gait.validate.synthetic import NoiseModel, WalkSpec, generate_dual_walk
@@ -27,6 +28,20 @@ SENSOR = NoiseModel(accel_density=1.5e-3, gyro_density=3.0e-4, seed=3)
 def dual(duration=20.0, **kwargs):
     pair = generate_dual_walk(WalkSpec(duration_s=duration, **kwargs), noise=SENSOR)
     return {label: pair[label][0] for label in pair}, pair
+
+
+def _truncate(series, drop=200):
+    """砍掉尾部若干样本，制造两足时间轴长度不等。"""
+    keep = len(series.t) - drop
+    return FootSeries(
+        label=series.label,
+        t=series.t[:keep],
+        acc=series.acc[:keep],
+        gyr=series.gyr[:keep],
+        quality=series.quality[:keep],
+        segments=[(0, keep)],
+        fs=series.fs,
+    )
 
 
 class TestTheSharedKernelRedLine:
@@ -139,6 +154,41 @@ class TestPartialInput:
         assert result.footer.chain == CHAIN_FULL
         cross = [item for item in result.annotations if item.metric == "double_support_ratio"]
         assert cross and cross[0].grade == "uncomputable"
+
+    def test_no_cross_foot_metric_is_graded_normal_without_a_value(self):
+        """页脚不得宣称算了一项从未产出的指标。
+
+        单足会话下 `min(每只脚的步数)` 取的就是那一只脚的步数，「有步数」于是被误读成
+        「跨足指标算得出来」。但 `symmetry` 要两只脚，缺一只时 `variability.analyse`
+        抛错、被吞掉，结果里根本不存在这个值 —— 而标注却是 `normal`。
+        每一项的可算性要绑到**它自己的产物在不在**。
+        """
+        series, _ = dual()
+        result = run_full_chain({"L": series["L"]}, sync_quality=SYNC)
+        assert result.variability is None
+        assert result.double_support is None
+        assert len(result.feet["L"].selected) > 0, "这只脚本该有中段步，否则测不到东西"
+
+        for metric in ("symmetry_index", "double_support_ratio"):
+            item = next(x for x in result.annotations if x.metric == metric)
+            assert item.grade == "uncomputable", f"{metric} 被判成 {item.grade}，但没有值"
+
+    def test_unaligned_feet_do_not_destroy_the_whole_report(self):
+        """两足时间轴对不齐与「缺一只脚」是同一类数据问题，处理方式该一样。
+
+        让 `DualFootError` 冒出去会让整次重算失败，而逐足的轨迹与参数其实都好好的。
+        """
+        series, _ = dual()
+        truncated = {"L": series["L"], "R": _truncate(series["R"])}
+        result = run_full_chain(truncated, sync_quality=SYNC)
+
+        assert result.dualfoot is None
+        assert result.diagnostics["dualfoot_applied"] is False
+        assert "unaligned_time_axis" in result.diagnostics["dualfoot_declined_reason"]
+        # 逐足产物照常。
+        for label in ("L", "R"):
+            assert result.feet[label].smooth_report is not None
+            assert result.feet[label].spatiotemporal is not None
 
     def test_no_feet_at_all_is_refused(self):
         with pytest.raises(ChainError, match="没有任何一只脚"):

@@ -274,37 +274,61 @@ class RecomputeQueue:
         return _task_from_row(row)
 
     def mark_done(self, key: str, *, result_path: str, now: float | None = None) -> None:
+        """标记完成。只对**正在运行**的任务生效，理由与 `defer` 相同。"""
         moment = time.time() if now is None else now
         with closing(self._connect()) as connection:
             connection.execute(
                 "UPDATE tasks SET state = ?, completed_at = ?, leased_until = 0, "
-                "last_error = '', result_path = ? WHERE key = ?",
-                (STATE_DONE, moment, result_path, key),
+                "last_error = '', result_path = ? WHERE key = ? AND state = ?",
+                (STATE_DONE, moment, result_path, key, STATE_RUNNING),
             )
             connection.commit()
 
     def defer(self, key: str, *, error: str, now: float | None = None) -> RecomputeTask:
-        """可重试的失败：加尝试次数、退避、放掉租约。超过上限则转 `failed`。"""
+        """可重试的失败：加尝试次数、退避、放掉租约。超过上限则转 `failed`。
+
+        整段在一个 `BEGIN IMMEDIATE` 里，且两条 UPDATE 都带 `state = 'running'` 谓词。
+        两者缺一不可，而缺了不会立刻出错：
+
+        * 没有事务，`SELECT attempts` 与 `UPDATE` 之间可以插进另一个 worker 的同一对
+          操作，丢掉一次计数 —— 一个必然失败的任务于是能跑超过 `max_attempts` 次；
+        * 没有状态谓词，一个**已经完成**的任务会被退回 `pending`。这条更糟：worker A
+          的租约超时（任务跑了 15 分钟以上）被 worker B 接手并完成，随后 A 才失败并
+          调用 `defer`，于是一份算好的结果被重新排队、重算、重写。
+
+        两条都只在租约超时且原 worker 仍活着时才可达，也就是「很少发生、发生时很难查」。
+        """
         moment = time.time() if now is None else now
         with closing(self._connect()) as connection:
-            row = connection.execute("SELECT attempts FROM tasks WHERE key = ?", (key,)).fetchone()
-            attempts = (row["attempts"] if row else 0) + 1
-            if attempts >= self.max_attempts:
-                connection.execute(
-                    "UPDATE tasks SET state = ?, attempts = ?, leased_until = 0, "
-                    "last_error = ? WHERE key = ?",
-                    (STATE_FAILED, attempts, f"attempts_exhausted: {error}", key),
-                )
-            else:
-                delay = min(DEFAULT_BACKOFF_BASE_S * (2 ** (attempts - 1)), DEFAULT_BACKOFF_CAP_S)
-                connection.execute(
-                    "UPDATE tasks SET state = ?, attempts = ?, next_attempt_at = ?, "
-                    "leased_until = 0, last_error = ? WHERE key = ?",
-                    (STATE_PENDING, attempts, moment + delay, error, key),
-                )
-            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT attempts FROM tasks WHERE key = ?", (key,)
+                ).fetchone()
+                attempts = (row["attempts"] if row else 0) + 1
+                if attempts >= self.max_attempts:
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, attempts = ?, leased_until = 0, "
+                        "last_error = ? WHERE key = ? AND state = ?",
+                        (STATE_FAILED, attempts, f"attempts_exhausted: {error}", key,
+                         STATE_RUNNING),
+                    )
+                else:
+                    delay = min(
+                        DEFAULT_BACKOFF_BASE_S * (2 ** (attempts - 1)), DEFAULT_BACKOFF_CAP_S
+                    )
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, attempts = ?, next_attempt_at = ?, "
+                        "leased_until = 0, last_error = ? WHERE key = ? AND state = ?",
+                        (STATE_PENDING, attempts, moment + delay, error, key, STATE_RUNNING),
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
         task = self.get(key)
-        assert task is not None
+        if task is None:
+            raise RecomputeRejected(f"任务 {key} 不存在，无法退避")
         return task
 
     def mark_failed(self, key: str, *, error: str) -> None:
@@ -379,9 +403,21 @@ class RecomputeRunner:
         self.algo_version = algo_version
 
     def result_path(self, task: RecomputeTask) -> Path:
-        """产出路径按 `会话 / 算法版本` 分层 —— 同一会话的两个算法版本各有各的结果，
-        互不覆盖（PRD G-08 可回溯重算）。"""
-        return self.output_root / task.session_id / f"{task.algo_version}.json"
+        """产出路径。**它的构成必须与幂等键一致**：会话 + 内容摘要 + 算法版本。
+
+        少一段就是一个静默跳过的洞。早先这里只有 `会话 / 算法版本`，于是同一会话
+        重新打包（内容变了、摘要变了）时：`enqueue` 按新键正确地建了新任务，而
+        `run_once` 的「结果已存在」短路看到的是**上一份内容**的结果文件，于是把新任务
+        标成 `done` —— 新数据一次也没被算过，产出里的 `archive_sha256` 还是旧的那个。
+
+        `upload.QueueEntry.archive_sha256` 存在的理由正是「包重打之后内容变了」，
+        所以这不是一个假想的场景。
+        """
+        return (
+            self.output_root
+            / task.session_id
+            / f"{task.algo_version}-{task.archive_sha256[:16]}.json"
+        )
 
     def run_once(
         self,
@@ -393,6 +429,21 @@ class RecomputeRunner:
         task = self.queue.lease(now=now)
         if task is None:
             return RecomputeOutcome(result="idle")
+
+        if task.algo_version != self.algo_version:
+            # 本执行器只会产出**它自己实现的那个版本**的结果。给一份用当前代码算出来的
+            # 数字贴上另一个版本号，是在伪造 G-08 要的那条可追溯链 —— 事后没有任何办法
+            # 分辨「标着 2.0.0 的结果」到底是不是 2.0.0 算的。
+            #
+            # 历史重算的正确做法是把对应版本的代码部署起来再跑，而不是让新代码冒充旧版本。
+            # 不可重试：换个时间再跑，版本还是对不上。
+            error = (
+                f"任务要的算法版本是 {task.algo_version}，本执行器实现的是 "
+                f"{self.algo_version} —— 重算历史要部署对应版本的代码，不是改标签。"
+            )
+            self.queue.mark_failed(task.key, error=error)
+            return RecomputeOutcome(result=STATE_FAILED, key=task.key,
+                                    session_id=task.session_id, detail=error)
 
         destination = self.result_path(task)
         if destination.exists():
@@ -423,8 +474,12 @@ class RecomputeRunner:
             return RecomputeOutcome(result=STATE_FAILED, key=task.key,
                                     session_id=task.session_id, detail=str(error))
         except (RecomputeUnavailable, MemoryError, OSError) as error:
-            self.queue.defer(task.key, error=str(error), now=now)
-            return RecomputeOutcome(result="deferred", key=task.key,
+            # `defer` 可能因为尝试次数用尽而把任务判成 `failed`。据实报它的**结果状态**
+            # 而不是一律报 `deferred` —— 后者会让调用方以为一个已经放弃的任务还会重试，
+            # 而「它还在重试」读起来很像「它还在处理中」。
+            deferred = self.queue.defer(task.key, error=str(error), now=now)
+            outcome = STATE_FAILED if deferred.state == STATE_FAILED else "deferred"
+            return RecomputeOutcome(result=outcome, key=task.key,
                                     session_id=task.session_id, detail=str(error))
         except Exception as error:  # noqa: BLE001 — 见下方注释
             # 未预期的异常按**不可重试**处理。反过来（当成可重试）会让一个确定性的

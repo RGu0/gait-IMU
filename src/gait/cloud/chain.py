@@ -40,7 +40,7 @@ from gait.config import AlgoConfig
 from gait.contracts import FootLabel, FootSeries, GaitCycle, NavResult
 from gait.core import quaternion as quat
 from gait.core import rts, stance_anchor
-from gait.core.dualfoot import DualFootReport, apply_distance_constraint
+from gait.core.dualfoot import DualFootError, DualFootReport, apply_distance_constraint
 from gait.core.eskf import run_ins, run_ins_with_history
 from gait.quality import annotate as quality
 
@@ -254,9 +254,19 @@ def _annotate_all(
                 )
             )
 
+    # 单足会话下 `min()` 取的是那一只脚的步数，于是「有步数」并不代表跨足指标算得出来。
+    # 每一项的可算性都要绑到**它自己的产物在不在**，而不是绑到一个步数：
+    # `double_support` 与 `symmetry`（在 `session_variability` 里）都要两只脚，缺一只时
+    # `variability.analyse` 会抛错、被 `_assemble` 吞掉，结果里根本不存在这个值。
+    # 绑错了的症状是页脚宣称算了一项从未产出的指标 —— 而 PRD §13 的「全量计算 + 质量
+    # 标注」正是为了让这种事不发生。
     cross_steps = min((len(item.selected) for item in feet.values()), default=0)
+    _cross_foot_computable = {
+        "double_support_ratio": double_support is not None,
+        "symmetry_index": session_variability is not None,
+    }
     for metric in _CROSS_FOOT_METRICS:
-        computable = double_support is not None if metric == "double_support_ratio" else cross_steps > 0
+        computable = _cross_foot_computable[metric]
         annotations.append(
             quality.annotate(
                 metric,
@@ -347,23 +357,35 @@ def run_full_chain(
 
     dualfoot_report: DualFootReport | None = None
     dualfoot_applied = False
+    declined_reason = ""
     if "L" in navigation and "R" in navigation:
-        constrained = apply_distance_constraint(navigation["L"], navigation["R"], cfg)
-        dualfoot_report = constrained.report
-        # 拟合顶到搜索边界时**不采用**这次修正。
-        #
-        # `dualfoot.py` 把 `hit_search_bound` 定义为"模型或数据有问题，不该被静静
-        # 截断"。低速档实测正是这种情况：差分航向拟合饱和在 ±0.02 rad/s，而把一个
-        # 饱和的（也就是被截断过的）估计值当作真值施加上去，会把已经被 RTS 修好的
-        # 轨迹重新推歪 —— 实测低速档步长误差从 0.46% 退回 1.52%。
-        #
-        # 报告照常保留：拒绝采用是一个需要被看见的决定，不是一次静默的跳过。
-        if constrained.report.hit_search_bound:
-            dualfoot_applied = False
+        try:
+            constrained = apply_distance_constraint(navigation["L"], navigation["R"], cfg)
+        except DualFootError as error:
+            # 两足时间轴对不齐（长度不等或时间戳不同）。这与「缺一只脚」是同一类
+            # **数据问题**，处理方式也该一样：跳过这一步，其余照常出。
+            #
+            # 让它冒出去会让整次重算失败，而逐足的轨迹、事件、时空参数其实都好好的 ——
+            # 为一个跨足修正丢掉一整份本可以出的报告，是把代价放错了地方。对齐是同步层
+            # （RAY-209）的职责，这里只如实记下它没做成。
+            constrained = None
+            declined_reason = f"unaligned_time_axis: {error}"
         else:
-            navigation["L"] = constrained.left
-            navigation["R"] = constrained.right
-            dualfoot_applied = True
+            dualfoot_report = constrained.report
+            # 拟合顶到搜索边界时**不采用**这次修正。
+            #
+            # `dualfoot.py` 把 `hit_search_bound` 定义为"模型或数据有问题，不该被静静
+            # 截断"。低速档实测正是这种情况：差分航向拟合饱和在 ±0.02 rad/s，而把一个
+            # 饱和的（也就是被截断过的）估计值当作真值施加上去，会把已经被 RTS 修好的
+            # 轨迹重新推歪 —— 实测低速档步长误差从 0.46% 退回 1.52%。
+            #
+            # 报告照常保留：拒绝采用是一个需要被看见的决定，不是一次静默的跳过。
+            if constrained.report.hit_search_bound:
+                declined_reason = "hit_search_bound"
+            else:
+                navigation["L"] = constrained.left
+                navigation["R"] = constrained.right
+                dualfoot_applied = True
 
     feet = {
         label: _analyse_foot(
@@ -375,11 +397,7 @@ def run_full_chain(
     diagnostics = {
         "stages": ["forward_eskf", "rts_smoothing", "stance_anchoring", "dualfoot_constraint"],
         "dualfoot_applied": dualfoot_applied,
-        "dualfoot_declined_reason": (
-            "hit_search_bound"
-            if dualfoot_report is not None and not dualfoot_applied
-            else ""
-        ),
+        "dualfoot_declined_reason": declined_reason,
     }
     return _assemble(
         quality.CHAIN_FULL, algo_version, feet, dualfoot_report,
