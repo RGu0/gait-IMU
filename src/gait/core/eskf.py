@@ -174,6 +174,42 @@ class FilterState:
         )
 
 
+@dataclass(frozen=True)
+class SegmentHistory:
+    """一个连续段的前向滤波逐样本历史。RTS 平滑（`core/rts.py`）的输入。
+
+    只存 `Φ` 与后验 `P`，不存先验 `P⁻`：段内 `dt` 恒定使 Q 是常量，后向递推里
+    `P⁻_{k+1} = Φ_{k+1} P_k Φ_{k+1}ᵀ + Q` 重算一遍即可 —— 少存三分之一的内存
+    （15×15×8 字节 × 每样本），且保证两处用的先验永远是同一个数。
+    """
+
+    #: 该段在整个序列里的半开区间。
+    start: int
+    end: int
+    #: `(m, 15, 15)`。`phi[k]` 把样本 `k-1` 的误差推进到样本 `k`；`phi[0]` 恒为单位阵，
+    #: 后向递推不会用到它。
+    phi: np.ndarray
+    #: `(m, 15, 15)`。每个样本**更新与重置之后**的后验协方差。
+    covariance: np.ndarray
+    #: `(m, 15)`。样本 `k` 上注入名义状态的修正量；无观测的样本为零。
+    #: 后向平滑要把"晚到的修正"回传给更早的样本，这正是被回传的那个量。
+    correction: np.ndarray
+    #: 该段的离散过程噪声 Q（段内 dt 恒定，Q 是常量）。
+    process_noise: np.ndarray
+
+
+@dataclass(frozen=True)
+class FilterHistory:
+    """整个会话的前向滤波历史，按段组织。段与段之间不平滑 —— 与 `run_ins` 的
+    跨段语义一致：空洞两侧的状态没有可信的动力学联系。"""
+
+    segments: tuple[SegmentHistory, ...]
+
+    @property
+    def samples(self) -> int:
+        return sum(item.end - item.start for item in self.segments)
+
+
 def _process_noise(cfg: AlgoConfig, dt: float) -> np.ndarray:
     """离散过程噪声 Q。整体设计 §5.6.3。
 
@@ -274,8 +310,14 @@ def _transition(rotation: np.ndarray, omega: np.ndarray, force: np.ndarray, cfg:
     return np.eye(STATE_DIM) + f * dt
 
 
-def _predict(state: FilterState, acc: np.ndarray, gyr: np.ndarray, workspace: _Workspace) -> FilterState:
-    """名义状态与协方差各推进一步。`acc`/`gyr` 是该区间起点的**原始**测量。"""
+def _predict(
+    state: FilterState, acc: np.ndarray, gyr: np.ndarray, workspace: _Workspace
+) -> tuple[FilterState, np.ndarray]:
+    """名义状态与协方差各推进一步。`acc`/`gyr` 是该区间起点的**原始**测量。
+
+    同时返回本步的转移矩阵 `Φ`：RTS 的后向递推需要它，而它在这里本来就已算出，
+    记录之外重算一遍等于把线性化点选错的机会开两次。
+    """
     dt = workspace.dt
     omega = gyr - state.gyro_bias
     force = acc - state.accel_bias
@@ -289,13 +331,16 @@ def _predict(state: FilterState, acc: np.ndarray, gyr: np.ndarray, workspace: _W
 
     transition = _transition(state.rotation, omega, force, workspace.cfg, dt)
     covariance = transition @ state.covariance @ transition.T + workspace.process_noise
-    return FilterState(
-        rotation=rotation_next,
-        velocity=state.velocity + acceleration * dt,
-        position=state.position + state.velocity * dt + 0.5 * acceleration * dt * dt,
-        gyro_bias=state.gyro_bias,
-        accel_bias=state.accel_bias,
-        covariance=covariance,
+    return (
+        FilterState(
+            rotation=rotation_next,
+            velocity=state.velocity + acceleration * dt,
+            position=state.position + state.velocity * dt + 0.5 * acceleration * dt * dt,
+            gyro_bias=state.gyro_bias,
+            accel_bias=state.accel_bias,
+            covariance=covariance,
+        ),
+        transition,
     )
 
 
@@ -306,7 +351,22 @@ def _update(
     noise: np.ndarray,
     identity: np.ndarray,
 ) -> FilterState:
-    """一次卡尔曼更新 + 误差注入 + 重置。
+    """`_update_with_correction` 的便捷形态，只要更新后的状态。"""
+    updated, _ = _update_with_correction(state, observation, jacobian, noise, identity)
+    return updated
+
+
+def _update_with_correction(
+    state: FilterState,
+    observation: np.ndarray,
+    jacobian: np.ndarray,
+    noise: np.ndarray,
+    identity: np.ndarray,
+) -> tuple[FilterState, np.ndarray]:
+    """一次卡尔曼更新 + 误差注入 + 重置，同时返回注入的修正量。
+
+    修正量单独返回是给 RTS 平滑用的：注入之后误差状态清零，"滤波器在这一步学到了
+    什么"只剩这个向量还记得。
 
     协方差用 Joseph 形式 `(I-KH)P(I-KH)ᵀ + KRKᵀ`。标准形式 `(I-KH)P` 在数值上会让 P
     慢慢失去对称与正定性，而 ZUPT 在 180 s 里要更新上万次 —— 那正是失对称会累积成
@@ -330,13 +390,16 @@ def _update(
     reset[THETA, THETA] = _EYE3 - _skew(0.5 * delta_theta)
     covariance = reset @ covariance @ reset.T
 
-    return FilterState(
-        rotation=rotation,
-        velocity=state.velocity + correction[VELOCITY],
-        position=state.position + correction[POSITION],
-        gyro_bias=state.gyro_bias + correction[GYRO_BIAS],
-        accel_bias=state.accel_bias + correction[ACCEL_BIAS],
-        covariance=0.5 * (covariance + covariance.T),
+    return (
+        FilterState(
+            rotation=rotation,
+            velocity=state.velocity + correction[VELOCITY],
+            position=state.position + correction[POSITION],
+            gyro_bias=state.gyro_bias + correction[GYRO_BIAS],
+            accel_bias=state.accel_bias + correction[ACCEL_BIAS],
+            covariance=0.5 * (covariance + covariance.T),
+        ),
+        correction,
     )
 
 
@@ -371,14 +434,23 @@ def _run_segment(
     state: FilterState,
     cfg: AlgoConfig,
     gravity: np.ndarray,
+    record: bool = False,
 ) -> tuple[dict[str, np.ndarray], FilterState]:
-    """一个连续段的前向滤波。返回逐样本的名义状态与段末状态。"""
+    """一个连续段的前向滤波。返回逐样本的名义状态与段末状态。
+
+    `record=True` 时额外记录 RTS 平滑所需的历史（`phi`/`p_post`/`d` 三个键）。
+    默认关闭：本地基础链不做平滑，逐样本存两个 15×15 矩阵（约 3.6 KB/样本）在
+    3 分钟会话上是 130 MB 量级 —— 那是云端重算才付得起、也才值得付的账。
+    """
     n = len(acc)
     rotations = np.empty((n, 3, 3))
     velocity = np.empty((n, 3))
     position = np.empty((n, 3))
     gyro_bias = np.empty((n, 3))
     accel_bias = np.empty((n, 3))
+    phi_history = np.empty((n, STATE_DIM, STATE_DIM)) if record else None
+    covariance_history = np.empty((n, STATE_DIM, STATE_DIM)) if record else None
+    correction_history = np.zeros((n, STATE_DIM)) if record else None
 
     height_reference = float(state.position[2])
     stance_heights: list[float] = []
@@ -391,7 +463,11 @@ def _run_segment(
 
     for index in range(n):
         if index > 0:
-            state = _predict(state, acc[index - 1], gyr[index - 1], workspace)
+            state, transition = _predict(state, acc[index - 1], gyr[index - 1], workspace)
+            if phi_history is not None:
+                phi_history[index] = transition
+        elif phi_history is not None:
+            phi_history[0] = workspace.identity
 
         is_stance = bool(zupt_flags[index])
         if is_stance and not was_stance:
@@ -406,13 +482,15 @@ def _run_segment(
         has_zaru = bool(zaru_flags[index])
         jacobian = workspace.jacobians.get((is_stance, has_zaru))
         if jacobian is not None:
-            state = _update(
+            state, correction = _update_with_correction(
                 state,
                 _residual(state, gyr[index], is_stance, has_zaru, height_reference, workspace),
                 jacobian,
                 workspace.noises[(is_stance, has_zaru, bool(degraded_flags[index]))],
                 workspace.identity,
             )
+            if correction_history is not None:
+                correction_history[index] = correction
         if is_stance:
             stance_heights.append(float(state.position[2]))
 
@@ -421,17 +499,21 @@ def _run_segment(
         position[index] = state.position
         gyro_bias[index] = state.gyro_bias
         accel_bias[index] = state.accel_bias
+        if covariance_history is not None:
+            covariance_history[index] = state.covariance
 
-    return (
-        {
-            "rotation": rotations,
-            "v": velocity,
-            "p": position,
-            "bg": gyro_bias,
-            "ba": accel_bias,
-        },
-        state,
-    )
+    output = {
+        "rotation": rotations,
+        "v": velocity,
+        "p": position,
+        "bg": gyro_bias,
+        "ba": accel_bias,
+    }
+    if record:
+        output["phi"] = phi_history
+        output["p_post"] = covariance_history
+        output["d"] = correction_history
+    return output, state
 
 
 def run_ins(
@@ -442,6 +524,12 @@ def run_ins(
     gravity: float = GRAVITY_STANDARD,
 ) -> NavResult:
     """契约 §4 的入口。整段会话前向滤波，返回 `NavResult`。
+
+    ## 与云端精算链的关系
+
+    本地基础链到此为止。云端完整链（RAY-227）从 `run_ins_with_history` 拿到同一次
+    前向滤波外加逐样本历史，再做 RTS 后向平滑（`core/rts.py`）—— 两条链共用这个
+    内核（整体设计 §0.2 的第 2 条取舍），差别只在是否保留历史与后续处理。
 
     ## 分段
 
@@ -459,9 +547,42 @@ def run_ins(
 
     ## 只做前向
 
-    RTS 后向平滑属 RAY-227（云端重算链）。PRD §6.1 的本地基础报告走的就是前向链，
-    两条链共用这个内核（整体设计 §0.2 的第 2 条取舍）。
+    PRD §6.1 的本地基础报告走的就是前向链；后向平滑只在云端链里发生，且发生在
+    `core/rts.py`，不在这里。
     """
+    navigation, _ = _run(series, cfg, alignment=alignment, gravity=gravity, record=False)
+    return navigation
+
+
+def run_ins_with_history(
+    series: FootSeries,
+    cfg: AlgoConfig | None = None,
+    *,
+    alignment: Alignment | None = None,
+    gravity: float = GRAVITY_STANDARD,
+) -> tuple[NavResult, FilterHistory]:
+    """与 `run_ins` 同一次前向滤波，额外返回 RTS 平滑所需的逐样本历史。
+
+    云端精算链（RAY-227）的入口。**不改变前向结果**：`NavResult` 与 `run_ins`
+    在数值上逐位相同 —— 记录历史是旁路，不是分叉。分叉意味着两条链的"前向部分"
+    可以悄悄漂开，那正是端云同构红线要防的事。
+
+    内存量级：每样本约 3.7 KB（两个 15×15 float64 + 一个 15 向量），200 Hz 下
+    3 分钟单足约 130 MB。这是云端进程的账，不要在采集端调它。
+    """
+    navigation, history = _run(series, cfg, alignment=alignment, gravity=gravity, record=True)
+    assert history is not None
+    return navigation, history
+
+
+def _run(
+    series: FootSeries,
+    cfg: AlgoConfig | None,
+    *,
+    alignment: Alignment | None,
+    gravity: float,
+    record: bool,
+) -> tuple[NavResult, FilterHistory | None]:
     cfg = cfg or AlgoConfig()
     if not isinstance(series, FootSeries):
         raise EskfError(f"series 必须是 FootSeries，收到 {type(series).__name__}")
@@ -489,6 +610,7 @@ def run_ins(
 
     state: FilterState | None = None
     initial_covariance: np.ndarray | None = None
+    histories: list[SegmentHistory] = []
     for start, end in series.segments:
         acc = series.acc[start:end]
         gyr = series.gyr[start:end]
@@ -506,7 +628,7 @@ def run_ins(
             covariance[POSITION, POSITION] = initial_covariance[POSITION, POSITION]
             state = replace(state, velocity=np.zeros(3), covariance=covariance)
 
-        segment, state = _run_segment(acc, gyr, dt, detection, state, cfg, gravity_n)
+        segment, state = _run_segment(acc, gyr, dt, detection, state, cfg, gravity_n, record=record)
         rotations[start:end] = segment["rotation"]
         velocity[start:end] = segment["v"]
         position[start:end] = segment["p"]
@@ -515,11 +637,22 @@ def run_ins(
         zupt[start:end] = detection.zupt
         degraded[start:end] = detection.degraded
         score[start:end] = detection.score
+        if record:
+            histories.append(
+                SegmentHistory(
+                    start=start,
+                    end=end,
+                    phi=segment["phi"],
+                    covariance=segment["p_post"],
+                    correction=segment["d"],
+                    process_noise=_process_noise(cfg, dt),
+                )
+            )
 
     # 循环里传的是旋转矩阵，到这里才一次性转成契约要求的四元数 —— 批量转换是
     # 向量化的，逐步转换不是。
     attitude = quat.from_matrix(rotations)
-    return NavResult(
+    navigation = NavResult(
         t=np.asarray(series.t, dtype=np.float64),
         q=attitude,
         v=velocity,
@@ -531,6 +664,7 @@ def run_ins(
         degraded=degraded,
         score=score,
     )
+    return navigation, FilterHistory(segments=tuple(histories)) if record else None
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
