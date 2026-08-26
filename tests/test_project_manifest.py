@@ -25,9 +25,10 @@ from pathlib import Path
 
 import pytest
 
-import gait
-
-REPO_ROOT = Path(gait.__file__).resolve().parents[2]
+#: 与 `tests/test_quality.py` 同一种推导 —— 一个目录里只该有一种
+#: 定位仓库根的做法。不经 `gait.__file__`：那要求包是可编辑安装的，而这里
+#: 读的是仓库文件，与包安装成什么样无关。
+REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / ".ai-project" / "project.yaml"
 DEV_SH = REPO_ROOT / "dev"
 DEV_PS1 = REPO_ROOT / "dev.ps1"
@@ -96,5 +97,12 @@ def test_the_declared_commands_use_the_two_entrypoints():
     的程序。
     """
     manifest = read(MANIFEST)
-    assert '["./dev", "setup"]' in manifest
-    assert '["pwsh", "-File", "dev.ps1", "setup"]' in manifest
+    # 用正则而不是精确字符串：后者是在断言 YAML 的排版，重排一次空格就会红，
+    # 而那时配置其实仍然是对的 —— 一个因为无关改动而红的守卫，下一个人的第一
+    # 反应是关掉它。
+    assert re.search(r'\[\s*"\./dev"\s*,\s*"setup"\s*\]', manifest), (
+        "清单的 default.setup 必须是 ./dev"
+    )
+    assert re.search(
+        r'\[\s*"pwsh"\s*,\s*"-File"\s*,\s*"dev\.ps1"\s*,\s*"setup"\s*\]', manifest
+    ), "清单的 windows.setup 必须是 pwsh -File dev.ps1"
