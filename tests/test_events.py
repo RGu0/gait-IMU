@@ -301,6 +301,39 @@ def test_double_support_lands_in_the_physiological_band():
     assert report.fraction == pytest.approx(0.20, abs=0.03)
 
 
+def test_double_support_needs_the_still_lead_gone_from_its_input():
+    """**这条测试把一个只写在测试辅助函数里的前提，变成一条会变红的断言。**
+
+    `dual_cycles()` 一直先剔静止前导再分段，所以模块的测试全绿；而模块文档里
+    一个字都没提这件事。RAY-213 的 V3′ 工装不走分段、直接喂 `segment_cycles()`
+    的输出，前导就跟着进来了 —— 读数被污染了 7~10 个百分点，而生理带宽本身才
+    10~25%（模块文档 §5）。
+
+    前导会被 ZUPT 检成一个秒级的支撑相，于是混进来一个秒级的"双支撑相位"。
+    产品路径喂的是 `segments.selected_cycles()` 的中段直行步，天然没有它。
+    """
+    quality = {"offset_estimate": 0.0, "determinate": True}
+    clean = dual_cycles()
+
+    spec = WalkSpec(duration_s=30.0, cadence=108.0, stance_ratio=0.60)
+    data = generate_dual_walk(spec)
+    contaminated = {}
+    for foot in ("L", "R"):
+        series, truth = data[foot]
+        # 与 `dual_cycles()` 唯一的差别：**不剔前导**。
+        stances = detect_stance(series.acc, series.gyr, series.fs, CFG).stances
+        contaminated[foot], _ = segment_cycles(
+            foot, series.t, series.acc, series.gyr, stances, position=truth.p
+        )
+
+    good = double_support(clean["L"], clean["R"], sync_quality=quality)
+    bad = double_support(contaminated["L"], contaminated["R"], sync_quality=quality)
+
+    assert 0.10 <= good.fraction <= 0.25          # 生理带内
+    assert bad.fraction > 0.25                    # 带外 —— 但只高出一点，不显得离谱
+    assert bad.fraction - good.fraction > 0.05    # 实测 7~10 pp
+
+
 def test_double_support_tracks_the_stance_ratio():
     """支撑相占比越大，双支撑期越长 —— 方向必须对。"""
     low = double_support(

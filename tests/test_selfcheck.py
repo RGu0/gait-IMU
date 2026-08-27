@@ -23,6 +23,7 @@ import pytest
 from gait.config import AlgoConfig, ConfigError
 from gait.core.zupt import detect_stance
 from gait.sync.selfcheck import (
+    REASON_BEYOND_PAIRING_RANGE,
     REASON_CADENCE,
     REASON_DRIFTING,
     REASON_OFFSET,
@@ -431,6 +432,115 @@ def test_too_few_stances_to_have_a_period_is_rejected():
         check([(0.0, 0.5)], [(0.3, 0.8)], CFG)
 
 
+# ── 相邻配对的适用范围（RAY-290）────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("delta_ms", [30, -30])
+def test_the_paired_difference_is_exactly_twice_delta_at_the_prd_tolerance_bound(delta_ms):
+    """**Δ = 30 ms 是 PRD §8 的容差上界，也是 RAY-213 报称相邻法失准的那一点。**
+
+    RAY-213 在 `validate/v3prime.py` 的模块文档里记下：相邻法在 Δ=10/20 ms 给出
+    +20.00/+40.00 ms（与 2Δ 分毫不差），而 Δ=30 ms 给出 **−128.87 ms** —— 失效
+    恰好落在被测范围里。那条记录是本模块被怀疑失准的全部依据。
+
+    在**本模块的输入**上它不成立：配对差在 30 ms 处精确等于 2Δ。RAY-213 遇到的
+    是它自己的输入（未分段的细化事件，第一个"相位"是 1.67 s 的静止前导）带来的
+    失效，不是 Δ 太大 —— 本模块由 `drop_still_lead()` 把那个前导剔掉了。
+
+    这条测试守的就是这个区别：它一旦变红，说明相邻配对的适用范围真的缩到了
+    PRD 容差上界之内，D3 主判据随即不能用。
+    """
+    left, right = dual()
+    delta = delta_ms / 1000.0
+    # 与 `check()` 同一条流水线：**先剔静止前导**。这一步不是可选的，见下一条测试。
+    left = drop_still_lead(left, CFG)
+    right = drop_still_lead(shift(right, delta), CFG)
+    support = double_support(
+        left, right, step_time=0.5 * float(np.median(stride_periods(left)))
+    )
+
+    # 右足事件推后 δ：右前那一类变长 δ、左前那一类变短 δ，故两类均值之差 = −2δ。
+    assert 1000.0 * support.leading_difference == pytest.approx(-2.0 * delta_ms, abs=1.0)
+    # 相邻法失效的**直接**征兆是排序序列不再左右交替。它必须一次都没发生。
+    assert support.same_foot_adjacencies == 0
+
+
+def test_the_paired_difference_needs_the_still_lead_dropped_first():
+    """**这条测试记录的是 RAY-213 那个 −128.87 ms 的真正来源。**
+
+    `double_support()` 自己不剔静止前导 —— `check()` 在调用它之前剔。直接拿未剔
+    前导的区间调它，前导那一个"相位"读数是**秒级**的（合成数据 1.67~2.23 s，
+    典型相位只有 110 ms），它落进哪一类，哪一类的均值就被它一个人拖走。
+
+    RAY-213 在 `validate/v3prime.py` 里看到的正是这个：那边的输入是未分段的细化
+    事件，前导还在里面。它记成了"Δ=30 ms 时相邻法失准"，但 Δ 不是原因 —— 剔掉
+    前导之后，同样的 Δ=30 ms 给出精确的 2Δ（上一条测试）。
+
+    这条测试把两者的差量钉住：谁要是把 `drop_still_lead()` 从 `check()` 里拿掉，
+    它会立刻变红，而不是等到某次真机实验读出一个说不通的数。
+    """
+    left, right = dual()
+    shifted = shift(right, 0.030)
+    step_time = 0.5 * float(np.median(stride_periods(left)))
+
+    contaminated = double_support(left, shifted, step_time=step_time)
+    clean = double_support(
+        drop_still_lead(left, CFG), drop_still_lead(shifted, CFG), step_time=step_time
+    )
+
+    assert 1000.0 * clean.leading_difference == pytest.approx(-60.0, abs=1.0)
+    # 前导污染的量级：几十毫秒，与被测效应同量级 —— 所以它不会显得离谱，只会显得错。
+    assert abs(1000.0 * (contaminated.leading_difference - clean.leading_difference)) > 5.0
+
+
+def test_the_pairing_premise_holds_across_the_whole_working_range():
+    """左右交替这个前提，在整个工作区间里必须一次都不被打破。
+
+    工作区间的上界是 `selfcheck_offset_warn_s`（50 ms）—— 超过它这次采集已经被
+    标为同步可疑。实测在它的 4 倍处仍然完好。
+    """
+    left, right = dual()
+    left = drop_still_lead(left, CFG)
+    step_time = 0.5 * float(np.median(stride_periods(left)))
+    for delta_ms in (0, 10, 30, 50, 100, 200):
+        shifted = drop_still_lead(shift(right, delta_ms / 1000.0), CFG)
+        support = double_support(left, shifted, step_time=step_time)
+        assert support.same_foot_adjacencies == 0, f"Δ={delta_ms} ms 处交替已被打破"
+
+
+@pytest.mark.parametrize("cadence", [108.0, 140.0, 160.0])
+def test_an_offset_beyond_the_pairing_range_is_refused_not_fabricated(cadence):
+    """**这条测试守的是一个曾经会被安静编造出来的数字。**
+
+    相邻配对在 |Δ| 逼近一个步时时失效。RAY-290 实测：步频 140 步/分、Δ=500 ms
+    时，本模块曾经报 `determinate=True`、offset=−357 ms —— 与真值差 857 ms，
+    只标了一个 `cross_foot_offset`，读起来和一次寻常的超标一模一样。
+
+    那正是模块文档 §5 拒绝做的事：估不出来就得说估不出来。
+    """
+    left, right = dual(cadence=cadence)
+    step_time = 0.5 * float(np.median(stride_periods(left)))
+    quality = check(left, shift(right, 1.2 * step_time), CFG)
+
+    assert not quality.determinate
+    assert quality.offset_estimate is None
+    assert REASON_BEYOND_PAIRING_RANGE in quality.reasons
+    assert quality.flagged  # 拒绝给数字，但绝不沉默
+
+
+def test_the_pairing_limit_leaves_room_above_the_warning_threshold():
+    """闸门必须**只**拦超范围的，不能碰正常工作区间。
+
+    50 ms（告警阈值）处仍须给出精确估计 —— 闸门落到那里，同步自检就废了。
+    """
+    left, right = dual()
+    quality = check(left, shift(right, 0.050), CFG)
+
+    assert quality.determinate
+    assert -1000.0 * quality.offset_estimate == pytest.approx(50.0, abs=1.0)
+    assert REASON_BEYOND_PAIRING_RANGE not in quality.reasons
+
+
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
 
@@ -447,6 +557,24 @@ def test_a_still_lead_factor_of_one_or_less_is_rejected():
     """取 1 或更小会把典型长度的支撑相当成静止前导剔掉。"""
     with pytest.raises(ConfigError, match="selfcheck_still_lead_factor"):
         replace(AlgoConfig(), selfcheck_still_lead_factor=1.0)
+
+
+def test_a_pairing_limit_at_or_beyond_one_step_time_is_rejected():
+    """失效点实测就在一个步时上。闸门设在失效之后就不再拦任何东西。"""
+    with pytest.raises(ConfigError, match="selfcheck_offset_pairing_limit_fraction"):
+        replace(AlgoConfig(), selfcheck_offset_pairing_limit_fraction=1.0)
+
+
+def test_the_pairing_limit_sits_above_the_offset_warning_threshold():
+    """闸门必须高于告警阈值，否则每一次被标的会话都会连估计一起丢掉。
+
+    以最快的合成步频（160 步/分，步时 375 ms）折算：0.5 × 375 = 187.5 ms，
+    是 50 ms 告警阈值的 3.75 倍。
+    """
+    fastest_step_time = 0.5 * (120.0 / 160.0)
+    assert CFG.selfcheck_offset_pairing_limit_fraction * fastest_step_time > (
+        CFG.selfcheck_offset_warn_s
+    )
 
 
 def test_fewer_than_two_required_phases_is_rejected():
