@@ -411,3 +411,40 @@ def test_clock_gate_accepts_a_fine_clock():
 
     # 真实的 macOS/Linux 时钟是纳秒级；这条同时守着"探测函数本身能跑"。
     assert cli.require_adequate_clock(200.0, echo=lambda *_: None) < 0.0005
+
+
+def test_replay_preserves_capture_metadata(tmp_path):
+    """复算不得丢掉采集元数据 —— `replay` 会整份重写 trial.json。
+
+    `foot_assignment` 尤其要紧：它是判断偏差**方向**可不可信的依据（左右足按扫描
+    顺序定时，Δ 与所有偏差可能整体反号）。它活在 npz 里而不是只活在 json 里，
+    正是为了经得起复算。
+    """
+    from gait.cli.v3prime import main
+
+    trial_dir = _fake_capture(tmp_path, delta=0.013)
+    # 夹具模拟 live 落盘：把元数据一并写进 npz。
+    data = dict(np.load(trial_dir / "arrivals.npz", allow_pickle=False))
+    data["foot_assignment"] = np.asarray("explicit_mac")
+    data["captured_utc"] = np.asarray("2026-08-27T00:00:00+00:00")
+    np.savez(trial_dir / "arrivals.npz", **data)
+
+    assert main(["replay", "--trial-dir", str(trial_dir)]) == 0
+    payload = json.loads((trial_dir / "trial.json").read_text(encoding="utf-8"))
+    assert payload["foot_assignment"] == "explicit_mac"
+    assert payload["captured_utc"] == "2026-08-27T00:00:00+00:00"
+
+
+def test_missing_foot_assignment_is_none_not_guessed(tmp_path, capsys):
+    """没记录左右足来源的数据显示为"未记录"，不被猜成 scan_order。
+
+    猜一个默认值会让"这份数据没记"与"这份数据记了扫描顺序"看起来一样，而两者
+    对偏差方向的可信度含义不同。
+    """
+    from gait.cli.v3prime import main
+
+    trial_dir = _fake_capture(tmp_path, delta=0.013)  # 夹具不写元数据
+    assert main(["replay", "--trial-dir", str(trial_dir)]) == 0
+    payload = json.loads((trial_dir / "trial.json").read_text(encoding="utf-8"))
+    assert payload["foot_assignment"] is None
+    assert "未记录" in capsys.readouterr().out

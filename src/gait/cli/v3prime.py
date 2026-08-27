@@ -68,7 +68,13 @@ from gait.sync.anchor import FootSignal, measure_offsets
 from gait.sync.selfcheck import check as selfcheck
 from gait.sync.selfcheck import stance_spans
 from gait.sync.timebase import build_timebase
-from gait.validate.v3prime import V3PrimeError, Verdict, evaluate_trial
+from gait.validate.v3prime import (
+    NEGLIGIBLE_MEDIAN_S,
+    NEGLIGIBLE_P90_S,
+    V3PrimeError,
+    Verdict,
+    evaluate_trial,
+)
 
 __all__ = ["analyze_trial", "main"]
 
@@ -210,6 +216,18 @@ def analyze_trial(
 
 
 async def _connect(count: int, mac_filters: list[str] | None, timeout: float, echo):
+    """扫描并选出 `count` 台设备，**返回顺序即左右足顺序**（第一台为左足）。
+
+    这个顺序是有后果的：Δ 定义为「左 − 右」，`MetricBias.bias` 的符号、报告里
+    每一处「偏差把读数推向哪一边」都建立在它上面。给了 `--mac` 时顺序由参数定；
+    没给时只能取扫描顺序，而扫描顺序取决于广播时机，**同两台设备两次跑可能相反**。
+
+    所以没给 `--mac` 时不静静地用扫描顺序：把选中的地址回显出来，并在报告里标
+    `foot_assignment: "scan_order"`。|Δ| 判据不受影响（取绝对值），但偏差方向会
+    整体反号，而那正是三选一决策要读的东西。
+
+    重扫 4 次：模块广播有间隔，一次扫不全是常态，不是故障。
+    """
     found: list[DiscoveredDevice] = []
     for attempt in range(4):
         found = await scan(timeout=timeout)
@@ -231,6 +249,13 @@ async def _connect(count: int, mac_filters: list[str] | None, timeout: float, ec
             selected.append(matches[0])
     else:
         selected = found[:count]
+        echo(
+            "⚠️ 未指定 --mac：左右足按扫描顺序定 —— "
+            f"左足={selected[0].address if selected else 'n/a'}、"
+            f"右足={selected[1].address if len(selected) > 1 else 'n/a'}。"
+            "与实际佩戴不符会让 Δ 与所有偏差整体反号（|Δ| 判据取绝对值，不受影响）。"
+            "请核对，或用 --mac 显式指定。"
+        )
     if len(selected) < count:
         raise HarnessError(
             f"需要 {count} 台设备，只扫描到 {len(selected)} 台。确认模块已按键开机。"
@@ -319,6 +344,9 @@ async def _run_live(
     left, right = captures
     echo("")
     echo(f"采集完成：L {len(left.arrival)} 样本 / R {len(right.arrival)} 样本")
+    # 采集元数据与样本存在一起：`trial.json` 是派生物，`replay` 会整份重写它，
+    # 而"左右足是怎么定的""什么时候采的"这两件事一旦只活在 json 里，复算一次
+    # 就没了 —— 偏差方向可不可信正是靠前者判断。
     np.savez(
         out_dir / ARRIVALS_FILENAME,
         **_capture_arrays(left, "left"),
@@ -327,8 +355,12 @@ async def _run_live(
         nominal_fs=np.asarray(nominal_fs),
         left_device=np.asarray(left.device_id),
         right_device=np.asarray(right.device_id),
+        foot_assignment=np.asarray("explicit_mac" if mac_filters else "scan_order"),
+        captured_utc=np.asarray(datetime.now(UTC).isoformat()),
     )
-    return analyze_trial(label, left, right, nominal_fs, cfg)
+    # 走与 `replay` 完全相同的读取路径，好让两条路的产出逐字段一致 —— 现场看到的
+    # 报告与事后复算出来的报告不一致，是最难查的那种不一致。
+    return load_trial_dir(out_dir, cfg)
 
 
 def _capture_arrays(capture: FootCapture, prefix: str) -> dict[str, np.ndarray]:
@@ -384,15 +416,28 @@ def load_trial_dir(path: Path, cfg: AlgoConfig | None = None) -> dict[str, Any]:
                 gyro=[tuple(row) for row in data[f"{prefix}_gyro"]],
             )
         )
-    return analyze_trial(
+    payload = analyze_trial(
         str(data["label"]), captures[0], captures[1], float(data["nominal_fs"]), cfg
     )
+    for key in ("foot_assignment", "captured_utc"):
+        # 缺席不补默认值：一份没记录左右足来源的旧数据，与一份记着 "scan_order"
+        # 的数据不是一回事，前者应当显示为"未记录"而不是被猜成后者。
+        payload[key] = str(data[key]) if key in data.files else None
+    return payload
 
 
 def _echo_trial(payload: dict[str, Any], echo=print) -> None:
     offset = payload["anchor"]["offset"]
     echo("")
     echo(f"== 趟次 {payload['label']} ==")
+    assignment = payload.get("foot_assignment")
+    if assignment == "scan_order":
+        echo(
+            "⚠️ 左右足按扫描顺序定（未用 --mac）：若与实际佩戴相反，"
+            "Δ 与所有偏差整体反号。|Δ| 判据不受影响。"
+        )
+    elif assignment is None:
+        echo("左右足来源未记录（早于本字段的数据）：偏差方向请自行核对。")
     echo(f"对碰 {offset['count']} 次，其中降级（削顶/未插值）{offset['degraded_pairs']} 次")
     if offset["count"]:
         echo(
@@ -457,9 +502,14 @@ def _verdict(paths: list[Path], cfg: AlgoConfig, echo=print) -> dict[str, Any]:
     verdict = Verdict(deltas=all_deltas, trials=len(trials), taps=int(all_deltas.size))
     echo("")
     echo(f"== V3′ 汇总：{verdict.trials} 趟 / {verdict.taps} 次对碰 ==")
+    # 判据从常量取，不在这里重写一遍数字：`validate/v3prime.py` 的模块文档说
+    # 「判据只有一处家」，而一个写死在输出串里的 5.50 会让现场读到的门槛与
+    # `Verdict.negligible` 真正执行的那个悄悄分家。
     echo(
-        f"|Δ| 中位 {verdict.median_abs * 1e3:.2f} ms（判据 < 5.50）"
-        f" | 90 分位 {verdict.p90_abs * 1e3:.2f} ms（判据 < 10.00）"
+        f"|Δ| 中位 {verdict.median_abs * 1e3:.2f} ms"
+        f"（判据 < {NEGLIGIBLE_MEDIAN_S * 1e3:.2f}）"
+        f" | 90 分位 {verdict.p90_abs * 1e3:.2f} ms"
+        f"（判据 < {NEGLIGIBLE_P90_S * 1e3:.2f}）"
         f" | 最大 {verdict.max_abs * 1e3:.2f} ms"
     )
     echo(f"结论：{verdict.decision}")
@@ -513,7 +563,6 @@ def main(argv: list[str] | None = None) -> int:
                     cfg=cfg,
                 )
             )
-            payload["captured_utc"] = datetime.now(UTC).isoformat()
             _write(trial_dir / TRIAL_FILENAME, payload)
             _echo_trial(payload)
             print(f"趟次已写入 {trial_dir / TRIAL_FILENAME}")
