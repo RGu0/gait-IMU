@@ -62,6 +62,7 @@ from typing import Self
 
 from wt901 import OutputMode, WT901Device
 from wt901.device import DEFAULT_QUEUE_SIZE
+from wt901.recording import Recording, read_recording
 from wt901.transport.base import Transport
 from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
@@ -74,9 +75,12 @@ from gait.io.session import RAW_FILENAMES, raw_path
 __all__ = [
     "CaptureError",
     "CaptureStatus",
+    "RecoveryReport",
     "SessionCapture",
     "payload_equal",
+    "recover_recording",
     "replay_raw_frames",
+    "replay_recording",
     "replay_session_foot",
 ]
 
@@ -242,8 +246,8 @@ async def replay_raw_frames(
     所以迭代正常结束后检查 `stats.dropped_samples`，非零即抛。消费者中途 `break`
     不算 —— 那是它自己不要了。要处理慢下游可以调大 `queue_size`。
     """
-    path = Path(path)
-    transport = ReplayTransport.from_file(path, speed=speed)
+    recording = read_recording(Path(path))
+    transport = ReplayTransport(recording, speed=speed)
     device = WT901Device(transport, queue_size=queue_size, output_mode=OutputMode.MOTION)
     await device.open()
 
@@ -298,3 +302,99 @@ def payload_equal(left: Iterable[RawFrame], right: Iterable[RawFrame]) -> bool:
         and (a.ang_raw == b.ang_raw).all()
         for a, b in zip(left_list, right_list, strict=True)
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryReport:
+    """一份可能被崩溃截断的录制，救回了什么。
+
+    `truncated` 为真即表示**有数据没了，而且丢了多少无从得知** —— 残行本身就是
+    坏的。所以它不是「小瑕疵」，是「这次会话不完整」的证据，必须一路传到会话
+    元数据里去（见 `orchestration.LinkOutcome.recording_truncated`）。
+    """
+
+    path: Path
+    truncated: bool
+    chunks_recovered: int
+
+    @property
+    def complete(self) -> bool:
+        return not self.truncated
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "path": str(self.path),
+            "truncated": self.truncated,
+            "chunks_recovered": self.chunks_recovered,
+        }
+
+
+def recover_recording(path: Path) -> tuple[Recording, RecoveryReport]:
+    """读一份**可能被崩溃截断**的录制，救回末行之前的全部数据。
+
+    进程被 `kill -9`、掉电、或写到一半被打断时，文件的最后一行必然是残行。
+    严格解析会让此前全部完好的数据一起失效 —— 真机上一份 30 分钟 200 Hz 的录制
+    截断后，前 633 行完好却一行都取不出来（WT901 RAY-280 的起因就是本仓库报的
+    这个复现）。
+
+    ## 为什么这里明写 `tolerate_truncated_tail=True`，而不改上游默认
+
+    上游默认严格是对的：静默容忍会把「这份文件坏了」变成一个没人注意到的事实。
+    容忍要由**知道自己在读一份崩溃残留**的调用方明写出来 —— 也就是这里。
+
+    但容忍**不等于**当没事发生：`RecoveryReport.truncated` 必须被消费。只救数据
+    不报截断，就正好落回上游想避免的那个坑，只是换了个位置。
+
+    ## 只容忍末行，这个边界是准确的而不是保守的
+
+    上游的实现只容忍**最后一行的 JSON 解析失败**。中间行损坏说明文件被改过或
+    拼接过，与崩溃无关，照旧拒绝；末行若能解析出 JSON 但时刻倒退、hex 非法，
+    那是损坏不是截断，同样拒绝。
+
+    依据是这个格式的一条性质：数据行形如 ``{"hex":"…","t":…}``，它的任何真前缀
+    都不是合法 JSON。所以「末行解析不了」恰好等价于「末行被截断」。
+    """
+    path = Path(path)
+    recording = read_recording(path, tolerate_truncated_tail=True)
+    return recording, RecoveryReport(
+        path=path,
+        truncated=recording.truncated,
+        chunks_recovered=len(recording.chunks),
+    )
+
+
+async def replay_recording(
+    recording: Recording,
+    *,
+    speed: float | None = None,
+    queue_size: int = DEFAULT_QUEUE_SIZE,
+) -> AsyncIterator[RawFrame]:
+    """把一份**已经读进来的**录制喂给下游，产出契约 `RawFrame`。
+
+    与 `replay_raw_frames` 的唯一区别是入参已是 `Recording` —— 崩溃恢复要先读
+    一次才知道有没有截断，不该为了回放再读第二次。语义（含 `t_host` 是回放时刻、
+    丢样本检查）完全相同。
+    """
+    transport = ReplayTransport(recording, speed=speed)
+    device = WT901Device(transport, queue_size=queue_size, output_mode=OutputMode.MOTION)
+    await device.open()
+
+    async def _close_when_fed() -> None:
+        await transport.wait_exhausted()
+        await device.close()
+
+    closer = asyncio.ensure_future(_close_when_fed())
+    try:
+        async for sample in device.samples():
+            yield to_raw_frame(sample)
+    finally:
+        closer.cancel()
+        await device.close()
+
+    dropped = device.stats.dropped_samples
+    if dropped:
+        raise CaptureError(
+            f"回放丢了 {dropped} 个样本：喂入快过消费，样本队列（{queue_size}）"
+            "满后丢弃了最旧的样本。这份回放与实时结果不再一致 —— "
+            "调大 queue_size，或用 speed=1.0 按原速回放。"
+        )

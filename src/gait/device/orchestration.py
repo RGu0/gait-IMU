@@ -173,6 +173,16 @@ class LinkOutcome:
     battery_after: Battery | None = None
     temperature_after_c: float | None = None
     recording_error: str | None = None
+    recording_truncated: bool = False
+    """这一路的录制文件末行是残行（崩溃截断），已救回其余部分。
+
+    与 `recording_error` 是**两回事**：那个是写盘当场就失败了，这个是写盘一直
+    正常、进程被 `kill -9` 或掉电打断。后者在采集时**没有任何迹象**，只有事后
+    读文件才看得见 —— 所以它必须从 `capture.RecoveryReport` 一路传到这里，
+    否则「有数据没了」这件事就停在读取那一步，进不了会话元数据。
+
+    丢了多少无从得知：残行本身就是坏的。能确定的只有「有东西没了」。
+    """
 
     def __post_init__(self) -> None:
         _check_label(self.foot)
@@ -186,6 +196,7 @@ class LinkOutcome:
             self.disconnected_at is None
             and self.reconnects == 0
             and self.recording_error is None
+            and not self.recording_truncated
         )
 
     @property
@@ -207,6 +218,7 @@ class LinkOutcome:
             "battery_after": _battery_entry(self.battery_after),
             "temperature_after_c": self.temperature_after_c,
             "recording_error": self.recording_error,
+            "recording_truncated": self.recording_truncated,
             "clean": self.clean,
         }
 
@@ -262,6 +274,11 @@ def summarize_session(links: tuple[LinkOutcome, ...]) -> SessionOutcome:
             )
         if link.recording_error is not None:
             problems.append(f"{side}原始数据落盘失败：{link.recording_error}")
+        if link.recording_truncated:
+            problems.append(
+                f"{side}的录制被崩溃截断：末行残行之前的数据已救回，"
+                "但丢了多少无从得知（残行本身就是坏的）。"
+            )
     return SessionOutcome(
         complete=not problems, links=tuple(links), problems=tuple(problems)
     )
