@@ -465,6 +465,83 @@ def test_剔掉标点不会放过真正的比较(tmp_path, label, source):
     assert offences > 0, label
 
 
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "等值比较数字后赋出等级",
+            'export function H(n) { const g = n === 0 ? "uncomputable" : "normal"; return g; }',
+        ),
+        (
+            "数字写在左边",
+            'export function H(n) { return 0 === n ? "uncomputable" : "normal"; }',
+        ),
+        ("不等号", 'export function H(n) { return n !== 0 ? "normal" : "uncomputable"; }'),
+        (
+            "负数哨兵",
+            'export function H(n) { return n === -1 ? "uncomputable" : "normal"; }',
+        ),
+        (
+            "藏在 JSX 属性里",
+            'export const T = ({n}) => <MetricTile grade={n === 0 ? "uncomputable" : "normal"} />;',
+        ),
+    ],
+)
+def test_the_check_catches_a_grade_derived_from_an_equality_with_a_number(
+    tmp_path, label, source
+):
+    """「等于某个数就判某一级」与「小于某个数就判某一级」是同一件事。RAY-266。
+
+    第 2 条只认尖括号，`===` 里一个都没有，所以这一整类此前是**漏检**而不是取舍 ——
+    检查器文档列的三条「抓不到」里没有它。
+
+    最后一条是这条规则**必须跑在原始行上**的理由：`_JSX_TAG` 的 `[^<>]*` 能跨过整个
+    标签（`===` 里没有尖括号），剔完标点那一行会整个变空，一处货真价实的复算就此隐形。
+    """
+    offences, _ = run_check_against(make_fake_repo(tmp_path, source + "\n"))
+
+    assert offences > 0, label
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "跟等级字面量比是在读等级，不是算等级",
+            'export const toneOf = (g) => g === "low" ? 1 : 0;',
+        ),
+        (
+            "标识符里的数字不是字面量",
+            'export function H(foo2, bar) { return foo2 === bar ? "low" : "normal"; }',
+        ),
+        ("赋值不是比较", 'export function H() { const n = 0; return badge("low", n); }'),
+        ("有等值有数字但没有等级字面量", "export const isEmpty = (i) => i.length === 0;"),
+    ],
+)
+def test_the_equality_rule_needs_both_a_number_and_a_grade(tmp_path, label, source):
+    """**只测「新写法被拦」会让一个把 `===` 直接塞进 `_RELATIONAL` 的实现也全绿。**
+
+    而那个实现会拦下第一条 —— 按已经收到的 grade 分支渲染，正是这条红线希望的用法。
+    判别依据是**比较的另一侧是什么**：跟数字比是在拿量算等级，跟等级字面量比是在读
+    等级。
+    """
+    offences, _ = run_check_against(make_fake_repo(tmp_path, source + "\n"))
+
+    assert offences == 0, label
+
+
+def test_the_equality_rule_is_additive_not_a_replacement(tmp_path):
+    """原提案是用「等值 + 数字」**替换**关系运算符那一条。那样会丢覆盖。
+
+    两侧都是变量的关系比较（`x < y`）没有任何数字字面量，替换之后就拦不住了 ——
+    而它现在拦得住。所以新规则必须是**追加**，这一条钉住这件事。
+    """
+    source = 'export function H(x, y) { return x < y ? "low" : "normal"; }'
+    offences, _ = run_check_against(make_fake_repo(tmp_path, source + "\n"))
+
+    assert offences > 0
+
+
 def test_the_check_ignores_comments(tmp_path):
     root = make_fake_repo(
         tmp_path,

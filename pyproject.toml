@@ -25,8 +25,11 @@ dependencies = [
 # 而锁文件的全部意义就是排除这种可能。换版本 = 改这里的 rev + 重新 uv lock，
 # 是一次显式的、会进 diff 的动作。
 #
-# 12b0f002 = "RAY-189 [dual-device-200hz] 双设备 200 Hz 实测并定论"。
-wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "12b0f002d6b89c97896c823b4b07b3de09dd3fd3" }
+# 9ccb834c = WT901#16 "RAY-241 [algorithm-mode] 6 轴/9 轴算法切换（0x24）纳入具名配置"。
+# 换上它是为了拿到 AlgorithmMode / set_algorithm / read_algorithm —— 在此之前
+# PRD §6.1 序列里的「6 轴」只能走通用 write(0x24, 1)，把「1 表示 6 轴」这条
+# 反直觉的设备知识留在本仓库（RAY-242）。
+wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "9ccb834c82f9e38e2318e2e6967b38405c7d0350" }
 
 [dependency-groups]
 dev = [
