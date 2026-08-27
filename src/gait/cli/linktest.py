@@ -188,6 +188,22 @@ class DeviceRun:
     stats: dict[str, int] = field(default_factory=dict)
     recording_path: str | None = None
     recording_error: str | None = None
+    rssi_at_scan: int | None = None
+    """**扫描期**的信号强度（dBm），来自广播包，连接建立**之前**测得。
+
+    名字里的 `at_scan` 是刻意的：这个量只反映按下开始那一刻的摆位，**不是**
+    30 min 的链路质量曲线。想画曲线的人看到字段名就该停下 —— 说明会被跳过，
+    名字不会。
+
+    连接期的 RSSI 本仓库**不采集**：那是一次独立的 BLE 操作，要和 200 包/秒的
+    notify 抢同一条链路，为了测链路好不好反而往链路上加负载。而运行期真正要的
+    「有没有丢样本」由到达率直接测得，RSSI 只是它的代理量。
+
+    它的用处是**部署时的摆位核查**（V2 定出的约束：主机置于 4 米通道中点、
+    链路 ≤ 2.5 m）—— 在连接之前就能读到，正好用在「要不要换个位置再开始」上。
+
+    回放模式没有扫描阶段，此处为 ``None``。扫不到 RSSI 也是 ``None``，不算失败。
+    """
     integrity: IntegrityReport | None = None
     worst_window_loss: float | None = None
     """最差 30 s 窗的缺失率。只报数，不参与判定 —— 阈值属 PRD §17.1。"""
@@ -223,6 +239,7 @@ class DeviceRun:
             "device_stats": self.stats,
             "recording": self.recording_path,
             "recording_error": self.recording_error,
+            "rssi_at_scan": self.rssi_at_scan,
             "loss_rate": self.loss_rate,
             "worst_window_loss": self.worst_window_loss,
             "integrity": integrity,
@@ -475,6 +492,7 @@ async def _connect_live(
             raise
         run = DeviceRun(device_id=device.device_id)
         run.recording_path = str(recording_path)
+        run.rssi_at_scan = discovered.rssi
         connected.append((device, run, writer))
         echo(f"已连接 {discovered.name} {discovered.address}")
     return connected
@@ -894,6 +912,16 @@ def _clock_line(clock: dict[str, Any]) -> str:
     )
 
 
+def _rssi_cell(device: dict[str, Any]) -> str:
+    """报告里的扫描期 RSSI 单元格。
+
+    缺失写「—」而不是 0：0 dBm 是一个**极强**的信号，把「没测到」渲染成它会
+    让读者得出正好相反的结论。历史报告没有这个字段，`.get` 同样落到「—」。
+    """
+    value = device.get("rssi_at_scan")
+    return "—" if value is None else f"{value} dBm"
+
+
 def _markdown(report: dict[str, Any]) -> str:
     env = report["environment"]
     lines = [
@@ -942,14 +970,15 @@ def _markdown(report: dict[str, Any]) -> str:
     lines += ["", "## 各设备", ""]
     lines.append(
         "| 设备 | 样本 | 时长 s | 缺失率 | 最差 30s 窗 | 最差秒丢失 | 空洞数 | "
-        "resync | 队列溢出 | 电量前→后 |"
+        "resync | 队列溢出 | 电量前→后 | 扫描期 RSSI |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for dev in report["devices"]:
         integ = dev["integrity"]
         if integ is None:
             lines.append(
-                f"| {dev['device_id']} | {dev['samples']} | — | 样本不足 | | | | | | |"
+                f"| {dev['device_id']} | {dev['samples']} | — | 样本不足 "
+                f"| | | | | | | {_rssi_cell(dev)} |"
             )
             continue
         loss = dev["loss_rate"]
@@ -964,7 +993,8 @@ def _markdown(report: dict[str, Any]) -> str:
             f"| {loss:.3%} | {dev['worst_window_loss']:.2%} "
             f"| {integ['worst_second_loss']} | {len(integ['gaps'])} "
             f"| {dev['device_stats'].get('resync_count', '—')} "
-            f"| {dev['device_stats'].get('dropped_samples', '—')} | {battery} |"
+            f"| {dev['device_stats'].get('dropped_samples', '—')} | {battery} "
+            f"| {_rssi_cell(dev)} |"
         )
     verdict = report["verdict"]
     lines += ["", "## 判定", ""]
