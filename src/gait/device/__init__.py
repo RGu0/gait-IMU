@@ -7,10 +7,14 @@ Modules, and the Issue that delivers each::
     binding.py     F1.1-1.2 left/right foot binding, persistence, session
                    admission, re-pairing
                    -> RAY-196
-    ble.py         F1.3 dual-device concurrent connect, config push
+    ble.py         F1.3 the fixed config sequence and its readback checks
                    -> RAY-197
     capture.py     F1.4 session-level record orchestration and replay bridge
                    -> RAY-198
+    orchestration.py
+                   F1.3 session admission (battery gate), link outcome and
+                   session completeness, closing telemetry
+                   -> RAY-197
     recorder.py    F1.4 hot-path-safe threaded writer under capture.py
                    -> RAY-198
 

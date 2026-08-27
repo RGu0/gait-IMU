@@ -17,6 +17,7 @@ from wt901.protocol.registers import Register
 
 from gait.device.ble import (
     BANDWIDTH_42HZ,
+    MOTION_OUTPUT,
     StreamConfig,
     configure_streaming,
     read_battery_at_low_rate,
@@ -39,6 +40,7 @@ class FakeDeviceTransport(Transport):
             0x03: 0x06,
             0x1F: 0x04,
             0x24: 0,
+            0x96: 0,
             _POWER: 400,
         }
         self.commands: list[tuple[int, int]] = []
@@ -105,19 +107,22 @@ def test_full_sequence_applies_and_verifies() -> None:
         assert applied.verified, applied.mismatches
         assert applied.bandwidth_readback == BANDWIDTH_42HZ
         assert applied.algorithm_readback == AlgorithmMode.SIX_AXIS
+        assert applied.output_mode_readback == MOTION_OUTPUT
         assert applied.rate_readback == 0x0B
         await device.close()
 
     asyncio.run(scenario())
 
-    # PRD 的三项都写到了设备上。
+    # 适配文档 §3.1 的 ②③④⑤ 都写到了设备上（①⑦ 由 wt901 的原子写事务自带）。
     assert transport.registers[int(Register.BANDWIDTH)] == BANDWIDTH_42HZ
     assert transport.registers[int(Register.ALGORITHM)] == AlgorithmMode.SIX_AXIS
+    assert transport.registers[int(Register.DISPLACEMENT_OUTPUT)] == MOTION_OUTPUT
     assert transport.registers[int(Register.RRATE)] == 0x0B
-    # 速率最后写（否则 200 Hz 下带宽/算法没法回读校验）。
+    # 速率最后写（否则 200 Hz 下其余项没法回读校验）。
     assert _config_writes(transport) == [
         (int(Register.BANDWIDTH), BANDWIDTH_42HZ),
         (int(Register.ALGORITHM), AlgorithmMode.SIX_AXIS),
+        (int(Register.DISPLACEMENT_OUTPUT), MOTION_OUTPUT),
         (int(Register.RRATE), 0x0B),
     ]
 
@@ -287,3 +292,46 @@ def test_read_battery_at_low_rate_returns_none_on_timeout_not_raise() -> None:
         await device.close()
 
     asyncio.run(scenario())
+
+
+def test_a_device_left_in_displacement_mode_is_caught_not_parsed() -> None:
+    """⑤ 真正防的东西：模块残留 0x96 = 1 时必须被拦下。
+
+    位移帧与运动帧**复用同一个标志位且字节布局无法区分**（wt901 `OutputMode`
+    文档）。写不进去而没人发现，采到的就是一份看着正常、数值全错的数据 ——
+    这是「静默给出错误结果」，不是「报错停下」。所以写完必须回读。
+    """
+    transport = FakeDeviceTransport()
+    # 设备停在位移输出模式，且拒绝这次写入（固件忽略/写失败）。
+    transport.registers[int(Register.DISPLACEMENT_OUTPUT)] = 1
+    transport.reject_writes.add(int(Register.DISPLACEMENT_OUTPUT))
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        assert not applied.verified
+        assert applied.output_mode_readback == 1
+        assert any("位移输出模式" in m for m in applied.mismatches)
+        # 其余项不受连坐。
+        assert applied.bandwidth_readback == BANDWIDTH_42HZ
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_output_mode_readback_reaches_the_config_snapshot() -> None:
+    """回读值必须进 config_snapshot，否则「这次会话是运动数据模式」只是假设。
+
+    下一个人拿到一份被静默解析错的历史数据时，靠它才能判断当时 0x96 是几。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> dict:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        await device.close()
+        return applied.snapshot()
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["output_mode_readback"] == MOTION_OUTPUT
+    assert snapshot["requested"]["output_mode"] == MOTION_OUTPUT
