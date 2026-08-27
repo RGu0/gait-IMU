@@ -23,7 +23,7 @@ RAY-196 交付绑定语义时，wt901 还给不出任何可跨主机持久化的
 
 ### 但不能拿它当已证实的 MAC 显示给用户
 
-`MAC_LAYOUT_EXTERNALLY_CONFIRMED` 就是这条状态。它为假时，这个值可以当键用、
+`is_layout_confirmed()` 回答这条。它为假时，这个值可以当键用、
 可以存进会话元数据，**不该**摆到界面上让操作者与系统蓝牙面板对照 —— 对不上时
 他会以为设备坏了，而实际是排布还没验。
 
@@ -39,7 +39,11 @@ RAY-196 交付绑定语义时，wt901 还给不出任何可跨主机持久化的
 
 **它记的是推导，不是「验证过没有」**：外部证实只是去掉一条保留、不改变任何值，
 所以不该让已有绑定失效。证实之后要动的是
-`MAC_LAYOUT_EXTERNALLY_CONFIRMED`，不是 `MAC_PROVENANCE`。
+`CONFIRMED_DERIVATIONS`（把被证实的那个推导标识加进去），不是 `MAC_PROVENANCE`。
+
+**证实状态按推导索引，不是一个全局布尔。** 一个布尔只描述得了当前那一个推导，
+于是「旧推导被推翻 → 新推导被证实 → 布尔翻真」这条路径会让旧记录读成已证实。
+见 `CONFIRMED_DERIVATIONS`。
 
 ## 全零应答的防护在上游，这里不重复
 
@@ -55,9 +59,10 @@ from typing import Final, Protocol
 from gait.device.binding import DeviceIdentity
 
 __all__ = [
-    "MAC_LAYOUT_EXTERNALLY_CONFIRMED",
+    "CONFIRMED_DERIVATIONS",
     "MAC_PROVENANCE",
     "IdentitySource",
+    "is_layout_confirmed",
     "mac_identity",
     "provenance_note",
     "read_device_identity",
@@ -70,15 +75,31 @@ __all__ = [
 #: 得到显示顺序。日期是上游做出该推断的日子，用来把「哪一次推断」钉死。
 MAC_PROVENANCE: Final[str] = "wt901-read-mac/le-reversed/2026-08-27"
 
-#: 该排布是否已被**外部**证实（拿另一台主机显示的 MAC 比对过）。
+#: 已被**外部**证实过的推导，按推导标识索引。
 #:
-#: **目前为假。** 证实的方法上游写明了：在 Windows / Linux / Android 主机上看
-#: 一眼同一台设备的 MAC。做完之后把这里改成 `True` 并附证据 —— **不要动**
-#: `MAC_PROVENANCE`：证实不改变任何值，改了反而会让所有已有绑定被误报成需重建。
+#: **目前为空** —— 还没人拿另一台主机显示的 MAC 比对过。
 #:
-#: 它为假时，这个值可以当绑定键、可以进会话元数据，但**不该显示给用户去与别处
-#: 的 MAC 对照**。
-MAC_LAYOUT_EXTERNALLY_CONFIRMED: Final[bool] = False
+#: ## 为什么是一个集合而不是一个布尔
+#:
+#: 「证实过没有」是**推导**的属性，而同时可能存在不止一个推导：一条记录用的
+#: 可能是当前这个，也可能是某个已被取代的旧的。一个裸布尔只描述得了当前那一个，
+#: 于是这条路径会出错：
+#:
+#: 1. 排布 X（未证实）→ 若干绑定用 X 建立；
+#: 2. 真机比对发现对不上 → 上游改排布 → 推导变成 Y；
+#: 3. Y 经比对证实 → 有人把那个布尔翻成 `True`。
+#:
+#: 此刻拿一条 `provenance = X` 的旧记录去问，得到「已证实」—— 而 X 恰恰是被推翻
+#: 的那个。按推导索引就不会：X 从不曾进过这个集合。
+#:
+#: 而这条路径正是真机验证计划会走的那条，不是假想。
+#:
+#: ## 怎么加进来
+#:
+#: 比对通过后把**那次比对所验证的推导标识**加进来，并附证据。**不要动**
+#: `MAC_PROVENANCE` 的取值 —— 证实不改变任何值，改了会让所有已有绑定被误报成
+#: 需重建。
+CONFIRMED_DERIVATIONS: Final[frozenset[str]] = frozenset()
 
 
 class IdentitySource(Protocol):
@@ -114,20 +135,35 @@ async def read_device_identity(device: IdentitySource) -> DeviceIdentity:
     return mac_identity(await device.telemetry.read_mac())
 
 
+def is_layout_confirmed(provenance: str) -> bool:
+    """**这个推导**被外部证实过没有。
+
+    入参是记录自己的 `provenance`，不是「当前推导」—— 一条旧记录在任何时刻都
+    该拿自己的推导得到正确答案。见 `CONFIRMED_DERIVATIONS` 的说明。
+
+    `PROVENANCE_UNKNOWN`（1.0 格式的历史绑定）自然得 `False`：来源都不知道，
+    谈不上证实过。
+    """
+    if not isinstance(provenance, str):
+        raise TypeError(f"provenance 必须是 str，收到 {type(provenance).__name__}")
+    return provenance in CONFIRMED_DERIVATIONS
+
+
 def provenance_note() -> dict[str, object]:
     """进会话元数据的一条记录：这次用的身份是怎么来的、验证到哪一步。
 
     存在的理由是事后可追溯：一份历史会话若用的是后来被推翻的排布，只有这条能
     让人认出来。
     """
+    confirmed = is_layout_confirmed(MAC_PROVENANCE)
     return {
         "provenance": MAC_PROVENANCE,
-        "layout_externally_confirmed": MAC_LAYOUT_EXTERNALLY_CONFIRMED,
-        "caveat": (
+        "layout_externally_confirmed": confirmed,
+        "caveat": None
+        if confirmed
+        else (
             "字节排布由两台真机的应答推断（四种可能排布里只有一种让两台都得到"
             "合法 BLE 随机静态地址），尚未与另一主机显示的 MAC 比对。"
             "可作绑定键；未经证实前不要显示给用户去与别处的 MAC 对照。"
-        )
-        if not MAC_LAYOUT_EXTERNALLY_CONFIRMED
-        else None,
+        ),
     }
