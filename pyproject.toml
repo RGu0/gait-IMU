@@ -25,11 +25,16 @@ dependencies = [
 # 而锁文件的全部意义就是排除这种可能。换版本 = 改这里的 rev + 重新 uv lock，
 # 是一次显式的、会进 diff 的动作。
 #
-# 9ccb834c = WT901#16 "RAY-241 [algorithm-mode] 6 轴/9 轴算法切换（0x24）纳入具名配置"。
-# 换上它是为了拿到 AlgorithmMode / set_algorithm / read_algorithm —— 在此之前
-# PRD §6.1 序列里的「6 轴」只能走通用 write(0x24, 1)，把「1 表示 6 轴」这条
-# 反直觉的设备知识留在本仓库（RAY-242）。
-wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "9ccb834c82f9e38e2318e2e6967b38405c7d0350" }
+# ad98ceab = WT901#19 "RAY-291 [mounting] 安装方向（0x23）纳入具名配置"。
+# 相对上一钉（9ccb834c）带进三件，都是本仓库开的上游 Issue：
+#
+#   RAY-279  Telemetry.read_mac() / DeviceInfo.mac / Register.MAC
+#            —— 可跨主机持久化的设备身份，RAY-196 的绑定键等的就是它。
+#   RAY-280  read_recording(..., tolerate_truncated_tail=True) / Recording.truncated
+#            —— 崩溃截断的录制不再整份失效，RAY-198 的 crash-recovery 等的是它。
+#   RAY-291  Mounting / Settings.mounting / set_mounting / read_mounting
+#            —— 本 scope 用的就是这一件，补上配置序列的第 ⑥ 步。
+wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "ad98ceab981503a9b82ac6881b09cae64d96842d" }
 
 [dependency-groups]
 dev = [

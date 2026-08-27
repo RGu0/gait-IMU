@@ -17,6 +17,17 @@ wt901 现已提供 `AlgorithmMode` 与 `RegisterAccess.set_algorithm`（RAY-241�
 `UnsupportedRegisterError` **当场拒绝**，而不是写进设备后靠回读才发现。写入后
 仍然回读校验，不盲信。
 
+## 安装方向（0x23）：写一个可能本来就对的值，理由与 0x96 同源
+
+适配文档 §3.1 的 ⑥ 是 `FF AA 23 00 00`（水平）。它多半是幂等的 —— 但**上游明说
+没核实过 0 是不是出厂默认**：手册没写，也没人读过一台出厂状态设备的 `0x23`。
+
+正因为不确定，这一步更不能省。它的价值不在于改变什么，而在于让「一份配置快照
+完全决定设备状态」成立；省掉它就等于依赖设备残留的配置。
+
+失败同样是安静的：装反了只是让姿态解算的重力轴对不上，数据一直偏，而链路、
+速率、丢包这些可观测量**全部正常**。所以写完照样回读。
+
 ## 输出内容（0x96）为什么写一个「默认值」还要回读
 
 适配文档 §3.1 的 ⑤ 是 `FF AA 96 00 00`，注释写着「默认值，**显式设置以确保
@@ -55,6 +66,7 @@ from dataclasses import asdict, dataclass
 from wt901 import (
     AlgorithmMode,
     Battery,
+    Mounting,
     Register,
     ReturnRate,
     TransportTimeoutError,
@@ -86,6 +98,12 @@ class StreamConfig:
     rate: int = int(ReturnRate.HZ_200)
     bandwidth: int = BANDWIDTH_42HZ
     algorithm: AlgorithmMode = AlgorithmMode.SIX_AXIS
+    mounting: Mounting = Mounting.HORIZONTAL
+    """安装方向（`0x23`）。适配文档 §3.1 的 ⑥ 要求的就是水平。
+
+    **它是不是出厂默认，上游明说没核实过** —— 手册没写，也没人读过一台出厂状态
+    设备的 `0x23`。正因为不确定，这一步更不能省：见模块文档。
+    """
     output_mode: int = MOTION_OUTPUT
     """位移输出开关（`0x96`）。**0 = 运动数据**（加速度/角速度/角度）。
 
@@ -109,6 +127,7 @@ class AppliedConfig:
     requested: StreamConfig
     bandwidth_readback: int | None
     algorithm_readback: int | None
+    mounting_readback: int | None
     output_mode_readback: int | None
     #: 200 Hz 下预期读不到，为 ``None``；它不算 mismatch。
     rate_readback: int | None
@@ -124,6 +143,7 @@ class AppliedConfig:
             "requested": asdict(self.requested),
             "bandwidth_readback": self.bandwidth_readback,
             "algorithm_readback": self.algorithm_readback,
+            "mounting_readback": self.mounting_readback,
             "output_mode_readback": self.output_mode_readback,
             "rate_readback": self.rate_readback,
             "mismatches": list(self.mismatches),
@@ -165,6 +185,7 @@ async def configure_streaming(
     await registers.write(Register.BANDWIDTH, config.bandwidth)
     await registers.set_algorithm(config.algorithm)
     await registers.write(Register.DISPLACEMENT_OUTPUT, config.output_mode)
+    await registers.set_mounting(config.mounting)
 
     bandwidth_readback = await _read_back(
         device, Register.BANDWIDTH, "bandwidth", mismatches
@@ -180,6 +201,15 @@ async def configure_streaming(
         mismatches.append(
             f"algorithm: 写 {int(config.algorithm)}（{config.algorithm.name}），"
             f"读回 {algorithm_readback}"
+        )
+    mounting_readback = await _read_back(
+        device, Register.MOUNTING, "mounting", mismatches
+    )
+    if mounting_readback is not None and mounting_readback != int(config.mounting):
+        mismatches.append(
+            f"mounting: 写 {int(config.mounting)}（{config.mounting.name}），"
+            f"读回 {mounting_readback}。装反只会让姿态解算的重力轴对不上 —— "
+            "链路、速率、丢包全部正常，数据一直偏。"
         )
     output_mode_readback = await _read_back(
         device, Register.DISPLACEMENT_OUTPUT, "output_mode", mismatches
@@ -208,6 +238,7 @@ async def configure_streaming(
         requested=config,
         bandwidth_readback=bandwidth_readback,
         algorithm_readback=algorithm_readback,
+        mounting_readback=mounting_readback,
         output_mode_readback=output_mode_readback,
         rate_readback=rate_readback,
         mismatches=tuple(mismatches),
