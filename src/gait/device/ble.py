@@ -17,6 +17,21 @@ wt901 现已提供 `AlgorithmMode` 与 `RegisterAccess.set_algorithm`（RAY-241�
 `UnsupportedRegisterError` **当场拒绝**，而不是写进设备后靠回读才发现。写入后
 仍然回读校验，不盲信。
 
+## 输出内容（0x96）为什么写一个「默认值」还要回读
+
+适配文档 §3.1 的 ⑤ 是 `FF AA 96 00 00`，注释写着「默认值，**显式设置以确保
+状态确定**」。写默认值看起来是冗余的，删掉它的诱惑很大 —— 但这一项写错的后果
+**不报错**：
+
+wt901 的 `OutputMode` 文档写明，寄存器 `0x96` 置 1 后位移帧**复用同一个标志位
+且字节布局无法区分**，「解析方必须自带这个上下文」。所以模块若残留 `0x96 = 1`，
+`0x61` 帧会被当成运动数据解析，得到一份看着正常、数值全错的数据。
+
+而模块的配置固化在 flash、又会被别处用过，所以「反正是默认值」这个假设不成立。
+写它是为了让状态确定；**回读**它是因为写了没生效同样没有迹象；把回读值放进
+`config_snapshot` 是为了让「本次会话确实处于运动数据模式」成为可追溯事实 ——
+否则下一个人拿到历史数据，无从判断当时 `0x96` 是几。
+
 ## 带宽 0x03（42 Hz）为什么绕过 Bandwidth 枚举
 
 wt901 的枚举只登记真机核实过的档位（20/256 Hz），`set_bandwidth` 会拒绝 0x03。
@@ -49,6 +64,7 @@ from wt901 import (
 
 __all__ = [
     "BANDWIDTH_42HZ",
+    "MOTION_OUTPUT",
     "AppliedConfig",
     "StreamConfig",
     "configure_streaming",
@@ -58,6 +74,10 @@ __all__ = [
 #: 手册 §4.2 带宽档位表的 42 Hz 编码。尚未在真机核实（见模块 docstring）。
 BANDWIDTH_42HZ = 0x03
 
+#: `Register.DISPLACEMENT_OUTPUT`（`0x96`）取 0 = 输出运动数据。
+#: 取 1 是位移输出，而位移帧与运动帧**无法从字节上区分** —— 见模块文档。
+MOTION_OUTPUT = 0
+
 
 @dataclass(frozen=True, slots=True)
 class StreamConfig:
@@ -66,6 +86,12 @@ class StreamConfig:
     rate: int = int(ReturnRate.HZ_200)
     bandwidth: int = BANDWIDTH_42HZ
     algorithm: AlgorithmMode = AlgorithmMode.SIX_AXIS
+    output_mode: int = MOTION_OUTPUT
+    """位移输出开关（`0x96`）。**0 = 运动数据**（加速度/角速度/角度）。
+
+    适配文档 §3.1 的 ⑤ 把它列进固定序列并注明「默认值，**显式设置以确保状态
+    确定**」。写默认值看似冗余，但见模块文档 —— 这一项写错的后果是**静默的**。
+    """
 
 
 #: `configure_streaming` 的默认参数。冻结 dataclass 的单例在多次调用间共享安全，
@@ -83,6 +109,7 @@ class AppliedConfig:
     requested: StreamConfig
     bandwidth_readback: int | None
     algorithm_readback: int | None
+    output_mode_readback: int | None
     #: 200 Hz 下预期读不到，为 ``None``；它不算 mismatch。
     rate_readback: int | None
     mismatches: tuple[str, ...]
@@ -97,6 +124,7 @@ class AppliedConfig:
             "requested": asdict(self.requested),
             "bandwidth_readback": self.bandwidth_readback,
             "algorithm_readback": self.algorithm_readback,
+            "output_mode_readback": self.output_mode_readback,
             "rate_readback": self.rate_readback,
             "mismatches": list(self.mismatches),
             "verified": self.verified,
@@ -136,6 +164,7 @@ async def configure_streaming(
 
     await registers.write(Register.BANDWIDTH, config.bandwidth)
     await registers.set_algorithm(config.algorithm)
+    await registers.write(Register.DISPLACEMENT_OUTPUT, config.output_mode)
 
     bandwidth_readback = await _read_back(
         device, Register.BANDWIDTH, "bandwidth", mismatches
@@ -151,6 +180,15 @@ async def configure_streaming(
         mismatches.append(
             f"algorithm: 写 {int(config.algorithm)}（{config.algorithm.name}），"
             f"读回 {algorithm_readback}"
+        )
+    output_mode_readback = await _read_back(
+        device, Register.DISPLACEMENT_OUTPUT, "output_mode", mismatches
+    )
+    if output_mode_readback is not None and output_mode_readback != config.output_mode:
+        mismatches.append(
+            f"output_mode: 写 {config.output_mode}，读回 {output_mode_readback}。"
+            "非 0 表示设备在位移输出模式，而位移帧与运动帧字节布局无法区分 —— "
+            "继续采集会得到一份被静默解析错的数据。"
         )
 
     await registers.set_output_rate(config.rate)
@@ -170,6 +208,7 @@ async def configure_streaming(
         requested=config,
         bandwidth_readback=bandwidth_readback,
         algorithm_readback=algorithm_readback,
+        output_mode_readback=output_mode_readback,
         rate_readback=rate_readback,
         mismatches=tuple(mismatches),
     )
