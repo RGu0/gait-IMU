@@ -66,6 +66,7 @@ from typing import Any
 
 import numpy as np
 from wt901 import (
+    AlgorithmMode,
     Battery,
     BleTransport,
     DiscoveredDevice,
@@ -79,8 +80,6 @@ from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
 from gait.device.ble import (
-    ALGORITHM_NINE_AXIS,
-    ALGORITHM_SIX_AXIS,
     AppliedConfig,
     StreamConfig,
     configure_streaming,
@@ -1036,7 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
     config = StreamConfig(
         rate=int(_RATE_BY_HZ[args.rate]),
         bandwidth=default_bandwidth if args.bandwidth is None else args.bandwidth,
-        algorithm=ALGORITHM_NINE_AXIS if args.nine_axis else ALGORITHM_SIX_AXIS,
+        algorithm=AlgorithmMode.NINE_AXIS if args.nine_axis else AlgorithmMode.SIX_AXIS,
     )
 
     out_dir = args.out or Path(

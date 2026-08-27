@@ -10,12 +10,12 @@ from __future__ import annotations
 import asyncio
 import struct
 
-from wt901 import Transport, WT901Device
+import pytest
+from wt901 import AlgorithmMode, Transport, WT901Device
+from wt901.errors import UnsupportedRegisterError
 from wt901.protocol.registers import Register
 
 from gait.device.ble import (
-    ALGORITHM_REGISTER,
-    ALGORITHM_SIX_AXIS,
     BANDWIDTH_42HZ,
     StreamConfig,
     configure_streaming,
@@ -104,7 +104,7 @@ def test_full_sequence_applies_and_verifies() -> None:
         applied = await configure_streaming(device, StreamConfig())
         assert applied.verified, applied.mismatches
         assert applied.bandwidth_readback == BANDWIDTH_42HZ
-        assert applied.algorithm_readback == ALGORITHM_SIX_AXIS
+        assert applied.algorithm_readback == AlgorithmMode.SIX_AXIS
         assert applied.rate_readback == 0x0B
         await device.close()
 
@@ -112,12 +112,12 @@ def test_full_sequence_applies_and_verifies() -> None:
 
     # PRD 的三项都写到了设备上。
     assert transport.registers[int(Register.BANDWIDTH)] == BANDWIDTH_42HZ
-    assert transport.registers[ALGORITHM_REGISTER] == ALGORITHM_SIX_AXIS
+    assert transport.registers[int(Register.ALGORITHM)] == AlgorithmMode.SIX_AXIS
     assert transport.registers[int(Register.RRATE)] == 0x0B
     # 速率最后写（否则 200 Hz 下带宽/算法没法回读校验）。
     assert _config_writes(transport) == [
         (int(Register.BANDWIDTH), BANDWIDTH_42HZ),
-        (ALGORITHM_REGISTER, ALGORITHM_SIX_AXIS),
+        (int(Register.ALGORITHM), AlgorithmMode.SIX_AXIS),
         (int(Register.RRATE), 0x0B),
     ]
 
@@ -141,9 +141,12 @@ def test_every_config_write_is_unlocked_then_saved() -> None:
 
 
 def test_silently_rejected_write_is_reported_not_trusted() -> None:
-    """固件不认 0x24 时（RAY-242 的最坏情形），回读校验必须把它暴露出来。"""
+    """固件收下写入却没生效时，回读校验必须把它暴露出来。
+
+    具名 API 挡得住「取值写错」，挡不住「设备静默忽略」—— 后者只有回读看得见。
+    """
     transport = FakeDeviceTransport()
-    transport.reject_writes.add(ALGORITHM_REGISTER)
+    transport.reject_writes.add(int(Register.ALGORITHM))
 
     async def scenario() -> None:
         device = await _connect(transport)
@@ -153,6 +156,33 @@ def test_silently_rejected_write_is_reported_not_trusted() -> None:
         # 其余项不受连坐：带宽照常校验通过。
         assert applied.bandwidth_readback == BANDWIDTH_42HZ
         await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_unregistered_algorithm_value_never_reaches_the_device() -> None:
+    """手册没登记的取值必须在写出去之前被拒，而不是靠回读发现。
+
+    这是换用具名 API（RAY-242）真正买到的东西。走通用 `write(0x24, v)` 时任何
+    整数都会被原样写进设备：设备不报错，只是进入未文档化的状态，而「姿态数据
+    不对但连接正常」是最难定位的一类故障。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        try:
+            with pytest.raises(UnsupportedRegisterError):
+                await configure_streaming(device, StreamConfig(algorithm=2))
+            # 关键断言：设备侧的算法寄存器仍是出厂值，一个字节都没写出去。
+            assert transport.registers[int(Register.ALGORITHM)] == 0
+            assert not [
+                command
+                for command in transport.commands
+                if command[0] == int(Register.ALGORITHM)
+            ]
+        finally:
+            await device.close()
 
     asyncio.run(scenario())
 
@@ -184,7 +214,7 @@ def test_bandwidth_readback_timeout_is_reported_as_mismatch_not_raised() -> None
         assert not applied.verified
         assert any("bandwidth" in m and "超时" in m for m in applied.mismatches)
         # 算法项不受连坐。
-        assert applied.algorithm_readback == ALGORITHM_SIX_AXIS
+        assert applied.algorithm_readback == AlgorithmMode.SIX_AXIS
         await device.close()
 
     asyncio.run(scenario())
@@ -192,7 +222,7 @@ def test_bandwidth_readback_timeout_is_reported_as_mismatch_not_raised() -> None
 
 def test_algorithm_readback_timeout_is_reported_as_mismatch_not_raised() -> None:
     transport = FakeDeviceTransport()
-    transport.mute_reads.add(ALGORITHM_REGISTER)
+    transport.mute_reads.add(int(Register.ALGORITHM))
 
     async def scenario() -> None:
         device = await _connect(transport)

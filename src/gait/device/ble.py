@@ -5,12 +5,17 @@
 wt901（`wt901.scan` / `WT901Device.connect`），不在此重复；MAC 绑定左右、
 重连策略等完整交付仍归 RAY-196/197。
 
-## 寄存器 0x24（算法选择）为什么用裸地址
+## 算法选择（6 轴）走 wt901 的具名 API
 
-PRD 要求配置序列含「6 轴」，wt901 没有具名入口（RAY-242 记录了这个缺口），
-但 `RegisterAccess.write` 接受任意寄存器地址，解锁→写→保存的时序与间隔由它
-保证。0x24 的取值来自《WT9011DCL-BT50 设备手册摘要》§4.2：0 = 9 轴，1 = 6 轴。
-写入后回读校验，不盲信。
+PRD 要求配置序列含「6 轴」。这一项曾经只能走 `RegisterAccess.write(0x24, 1)`，
+把「1 表示 6 轴相对航向」这条设备知识留在本仓库 —— 而它反直觉（值大的 1 反而
+是轴少的那个），写反了不报错，只会让航向退化成依赖磁力计的绝对航向，在机构
+室内金属环境下悄悄劣化。
+
+wt901 现已提供 `AlgorithmMode` 与 `RegisterAccess.set_algorithm`（RAY-241，
+本仓库钉住的 rev 已含），所以这里改用具名 API：取值不在手册登记的两档内会被
+`UnsupportedRegisterError` **当场拒绝**，而不是写进设备后靠回读才发现。写入后
+仍然回读校验，不盲信。
 
 ## 带宽 0x03（42 Hz）为什么绕过 Bandwidth 枚举
 
@@ -33,6 +38,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from wt901 import (
+    AlgorithmMode,
     Battery,
     Register,
     ReturnRate,
@@ -42,20 +48,12 @@ from wt901 import (
 )
 
 __all__ = [
-    "ALGORITHM_NINE_AXIS",
-    "ALGORITHM_REGISTER",
-    "ALGORITHM_SIX_AXIS",
     "BANDWIDTH_42HZ",
     "AppliedConfig",
     "StreamConfig",
     "configure_streaming",
     "read_battery_at_low_rate",
 ]
-
-#: 算法选择寄存器。wt901 的 `Register` 枚举没有它（RAY-242），地址来自手册 §4.3。
-ALGORITHM_REGISTER = 0x24
-ALGORITHM_NINE_AXIS = 0
-ALGORITHM_SIX_AXIS = 1
 
 #: 手册 §4.2 带宽档位表的 42 Hz 编码。尚未在真机核实（见模块 docstring）。
 BANDWIDTH_42HZ = 0x03
@@ -67,7 +65,7 @@ class StreamConfig:
 
     rate: int = int(ReturnRate.HZ_200)
     bandwidth: int = BANDWIDTH_42HZ
-    algorithm: int = ALGORITHM_SIX_AXIS
+    algorithm: AlgorithmMode = AlgorithmMode.SIX_AXIS
 
 
 #: `configure_streaming` 的默认参数。冻结 dataclass 的单例在多次调用间共享安全，
@@ -137,7 +135,7 @@ async def configure_streaming(
     mismatches: list[str] = []
 
     await registers.write(Register.BANDWIDTH, config.bandwidth)
-    await registers.write(ALGORITHM_REGISTER, config.algorithm)
+    await registers.set_algorithm(config.algorithm)
 
     bandwidth_readback = await _read_back(
         device, Register.BANDWIDTH, "bandwidth", mismatches
@@ -147,11 +145,12 @@ async def configure_streaming(
             f"bandwidth: 写 0x{config.bandwidth:02X}，读回 0x{bandwidth_readback:02X}"
         )
     algorithm_readback = await _read_back(
-        device, ALGORITHM_REGISTER, "algorithm", mismatches
+        device, Register.ALGORITHM, "algorithm", mismatches
     )
-    if algorithm_readback is not None and algorithm_readback != config.algorithm:
+    if algorithm_readback is not None and algorithm_readback != int(config.algorithm):
         mismatches.append(
-            f"algorithm: 写 {config.algorithm}，读回 {algorithm_readback}"
+            f"algorithm: 写 {int(config.algorithm)}（{config.algorithm.name}），"
+            f"读回 {algorithm_readback}"
         )
 
     await registers.set_output_rate(config.rate)
