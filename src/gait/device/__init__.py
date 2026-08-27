@@ -9,8 +9,12 @@ Modules, and the Issue that delivers each::
                    -> RAY-196
     ble.py         F1.3 the fixed config sequence and its readback checks
                    -> RAY-197
-    capture.py     F1.4 session-level record orchestration and replay bridge
+    capture.py     F1.4 session-level record orchestration, replay bridge and
+                   crash-truncation recovery
                    -> RAY-198
+    identity.py    F1.1 device-reported MAC as the binding key, with the
+                   derivation recorded alongside it
+                   -> RAY-302
     orchestration.py
                    F1.3 session admission (battery gate), link outcome and
                    session completeness, closing telemetry
@@ -32,14 +36,18 @@ name substring, sorts by RSSI descending and puts unknown-RSSI devices last,
 which is the whole of RAY-196's scan requirement. Wrapping it would add a layer
 that only forwards.
 
-**binding.py does not read device identity; it consumes one.** wt901 has no
-cross-host-persistable identity yet -- `DiscoveredDevice.address` is a
-CoreBluetooth UUID on macOS and its own docstring forbids persisting it. The
-manual's answer is register `0x66` (device-reported MAC), which wt901 does not
-expose (WT901 RAY-279, blocked on real-device evidence for the response byte
-layout). So identity is injected, and each stored identity carries its `kind` --
-otherwise a later change of identity source is indistinguishable from "this is a
-different device".
+**binding.py does not read device identity; it consumes one.** That injection
+point is now filled by `identity.py` (WT901 RAY-279 landed `read_mac()`), but
+the seam stays: binding logic must not depend on where the key came from.
+
+Each stored identity carries two things beyond its value. `kind` distinguishes
+*which* identity (mac / serial / platform-address) -- a later change of source
+would otherwise be indistinguishable from "this is a different device".
+`provenance` distinguishes *which derivation within that kind*, because the MAC
+byte layout is **inferred, not externally confirmed**: if it is ever overturned,
+the same device yields a different value under the same `kind`. See
+`identity.py` for the evidence and for how to record a confirmation without
+invalidating existing bindings.
 
 **ble.py and recorder.py currently hold RAY-200's minimal subset, not the full
 RAY-197/198 delivery.** ble.py has `configure_streaming` (the fixed PRD §6.1
