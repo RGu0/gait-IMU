@@ -141,7 +141,7 @@ class TestPersistenceAcrossMachines:
     def test_an_unknown_version_is_refused_not_reinterpreted(self, tmp_path: Path):
         payload = BOUND.snapshot() | {"version": "0.9"}
         binding_path(tmp_path).write_text(json.dumps(payload), encoding="utf-8")
-        with pytest.raises(BindingError, match="只认识"):
+        with pytest.raises(BindingError, match="读得了"):
             read_binding(tmp_path)
 
     def test_the_written_file_records_the_kind_not_just_the_value(
