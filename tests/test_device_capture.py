@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 from pathlib import Path
 
 import pytest
 from wt901 import WT901Device
+from wt901.recording import read_recording
 from wt901.transport.memory import MemoryTransport
 
 from gait.contracts import SessionMeta
@@ -292,17 +294,48 @@ class TestLiveReplayEquivalence:
     def test_t_host_is_replay_time_not_capture_time(self, session):
         """这条是刻意钉住一个**限制**而不是一个能力。
 
-        回放产出的 t_host 是回放那一刻的时钟。任何从 t_host 算出来的指标
-        （到达率、空洞、缺失率）在回放数据上都不成立 —— cli/linktest.py 在回放
-        模式下把 timing_valid 置 False 就是同一条口径。反过来的假设不会报错：
-        算出来的到达率看着完全正常，只是描述的是回放机器的调度。
+        回放产出的 t_host 是回放那一刻的钟。任何从 t_host 算出来的指标（到达率、
+        空洞、缺失率）在回放数据上都不成立 —— cli/linktest.py 在回放模式下把
+        timing_valid 置 False 就是同一条口径。反过来的假设不会报错：算出来的
+        到达率看着完全正常，只是描述的是回放机器的调度。
+
+        断言写成「不早于回放开始时刻」而不是「与实时那批不相等」：后者依赖时钟
+        分辨率 —— Windows + Python 3.12 的 time.monotonic() 粒度是 15.6 ms，
+        六帧全落进同一个 tick，两边就真的相等了（CI 上实测撞到过）。
         """
         root, session_id = session
-        live = self._live(FRAMES)
-        replayed = self._replayed(root, session_id, FRAMES)
+        path = self._record(root, session_id, FRAMES)
+        recorded_t = [
+            chunk.t for chunk in read_recording(path).chunks
+        ]
 
-        assert payload_equal(live, replayed)
-        assert [f.t_host for f in live] != [f.t_host for f in replayed]
+        async def scenario() -> tuple[float, list]:
+            t0 = time.monotonic()
+            frames = [f async for f in replay_raw_frames(path)]
+            return t0, frames
+
+        started_at, replayed = asyncio.run(scenario())
+
+        assert replayed, "回放没产出样本，下面的断言会空转"
+        # 每一帧的 t_host 都不早于回放开始 —— 也就是现打的，不是从文件里搬来的。
+        assert min(f.t_host for f in replayed) >= started_at
+        # 而录制里的 t 从 0 起算（相对第一帧），结构上就不可能是 t_host。
+        assert max(recorded_t) < started_at
+
+    @staticmethod
+    def _record(root: Path, session_id: str, frames: list[bytes]) -> Path:
+        async def scenario() -> None:
+            with SessionCapture(root, session_id) as capture:
+                inner = MemoryTransport(device_id="dev-L")
+                recording = capture.wrap("L", inner)
+                await recording.connect()
+                for frame in frames:
+                    inner.feed(frame)
+                await recording.disconnect()
+
+        asyncio.run(scenario())
+        return raw_path(root, session_id, "L")
+
 
 
 class TestReplayNeverLosesSamplesSilently:
