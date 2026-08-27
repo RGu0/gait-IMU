@@ -478,6 +478,10 @@ def test_剔掉标点不会放过真正的比较(tmp_path, label, source):
         ),
         ("不等号", 'export function H(n) { return n !== 0 ? "normal" : "uncomputable"; }'),
         (
+            "负数哨兵",
+            'export function H(n) { return n === -1 ? "uncomputable" : "normal"; }',
+        ),
+        (
             "藏在 JSX 属性里",
             'export const T = ({n}) => <MetricTile grade={n === 0 ? "uncomputable" : "normal"} />;',
         ),
