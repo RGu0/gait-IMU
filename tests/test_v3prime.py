@@ -18,8 +18,10 @@ import pytest
 
 from gait.analysis.events import segment_cycles
 from gait.config import AlgoConfig
+from gait.contracts import GaitCycle
 from gait.core.zupt import detect_stance
 from gait.sync.anchor import AnchorEvent, AnchorPair, AnchorReport, ImpactPeak
+from gait.sync.selfcheck import drop_still_lead, stance_spans
 from gait.sync.timebase import SyncReport
 from gait.validate.synthetic import WalkSpec, generate_dual_walk
 from gait.validate.v3prime import (
@@ -67,14 +69,22 @@ def _anchor_report(deltas, *, aligned: float | None = None) -> AnchorReport:
 
 
 def _cycles(spec: WalkSpec | None = None):
-    """一对双足步态周期。`position=None`：跨足时序量只依赖事件时刻。"""
+    """一对双足步态周期。`position=None`：跨足时序量只依赖事件时刻。
+
+    **剔静止前导，且在细化之前剔** —— 与 `cli/v3prime.py::_cycles()` 同一条路径。
+    这个辅助函数一度不剔，于是整个文件都在一份被污染的数据上跑：占比读数高 7~10 pp、
+    Δ=30 ms 一档的相位结构被前导带得翻转（RAY-296）。测试的前提与工装的前提必须
+    是同一个，否则测试守不住工装。
+    """
     data = generate_dual_walk(spec or WalkSpec(duration_s=24.0))
     out = {}
     for foot in ("L", "R"):
         series = data[foot][0]
         stance = detect_stance(series.acc, series.gyr, series.fs, CFG)
+        kept = len(drop_still_lead(stance_spans(series.t, stance.stances), CFG))
+        stances = stance.stances[len(stance.stances) - kept :]
         cycles, _ = segment_cycles(
-            series.label, series.t, series.acc, series.gyr, stance.stances,
+            series.label, series.t, series.acc, series.gyr, stances,
             position=None, cfg=CFG,
         )
         out[foot] = cycles
@@ -236,12 +246,17 @@ def test_metric_bias_sign_says_which_way_the_reading_moved():
 # --- 配对双支撑差：对 Δ 敏感，且知道自己什么时候不可比 ------------------------
 
 
-@pytest.mark.parametrize("injected", [0.005, 0.010, 0.020, 0.050])
+@pytest.mark.parametrize("injected", [0.005, 0.010, 0.020, 0.030, 0.050])
 def test_paired_double_support_bias_equals_twice_delta(injected):
     """恒定 Δ 下配对差的偏差**精确等于 2Δ**（RAY-211/263 的机制）。
 
     这是双支撑期里真正承载同步偏差的量 —— 与它并列输出的 `fraction`（产品口径）
-    对 Δ 几乎免疫，见下一条。
+    对 Δ 极其迟钝，见下一条。
+
+    **0.030 这一档是 RAY-296 补的，而它此前独缺不是巧合。** Δ=30 ms 是 PRD §8 的
+    容差上界，也正是当时唯一读不出 2Δ 的那一档（报 `comparable: false`）。成因是
+    `_cycles()` 当时不剔静止前导 —— 剔掉之后它和其余档位一样精确。少了这一档，
+    "工装在容差上界处读不出偏差"这件事就没有任何测试会说出来。
     """
     left, right = _cycles()
     trial = evaluate_trial(
@@ -254,33 +269,72 @@ def test_paired_double_support_bias_equals_twice_delta(injected):
 
 
 def test_double_support_fraction_is_nearly_blind_to_offset():
-    """产品口径（均值/占比）对恒定 Δ 几乎免疫 —— 一类相位 +Δ、另一类 −Δ，均值抵消。
+    """产品口径（均值/占比）对恒定 Δ **极其迟钝，但不是完全免疫**。
 
     这条测试的用途是**防止误读**：V3′ 若只报这个口径，会得出「双支撑期不受同步
     误差影响」的错误结论，而配对口径同时显示 40 ms 的偏差。
+
+    残余不是噪声，有闭式：一类相位 +Δ、另一类 −Δ，求均值时按**个数之差**留下
+    `Δ·(n_右前 − n_左前) / N`（`sync/selfcheck.py` 模块文档 §3）。这里断言的是那个
+    闭式，而不是一个凑出来的绝对界 —— RAY-296 之前这里断言 `< 1e-4`，而那个"几乎
+    正好是零"是**静止前导污染出来的假象**，不是免疫性的证据。真实的残余比它大一个
+    数量级，却依然比配对口径迟钝约 74 倍，结论不变而理由是真的。
     """
     left, right = _cycles()
+    biased = shift_cycles(left, -0.020)
     trial = evaluate_trial(
-        "T", _anchor_report([0.020] * 8), shift_cycles(left, -0.020), right,
-        sync_quality=QUALITY,
+        "T", _anchor_report([0.020] * 8), biased, right, sync_quality=QUALITY,
     )
     fraction = next(m for m in trial.metrics if m.name == "double_support_fraction")
     paired = next(m for m in trial.metrics if m.name == "double_support_leading_difference")
-    assert abs(fraction.bias) < 1e-4
+
     assert abs(paired.bias) == pytest.approx(0.040, abs=1e-6)
+
+    n_left, n_right, _ = paired_double_support(biased, right).structure
+    step_time = float(np.median([c.stride_time for c in right])) / 2.0
+    # 符号：`bias = host − corrected`，而 corrected 的残余为零，所以 bias 就是主机
+    # 时基那一侧的残余。类别按「先离地的是哪只脚」分，左前那类变短 Δ、右前变长 Δ，
+    # 故留下 `Δ·(n_左前 − n_右前) / N`。实测与它符合到 13 位有效数字。
+    predicted = 0.020 * (n_left - n_right) / (n_left + n_right) / step_time
+    assert fraction.bias == pytest.approx(predicted, abs=2e-5)
+    # 结论不变：迟钝，但要说得出迟钝多少 —— 实测 74 倍，闸门取 50 倍留余量。
+    assert abs(fraction.bias) < abs(paired.bias / step_time) / 50
+
+
+def _cycle(foot, ic, to, idx=0):
+    """一条只有时刻是真的 `GaitCycle` —— 跨足时序量只看时刻，其余字段取合法值。"""
+    stance = to - ic
+    return GaitCycle(
+        foot=foot, idx=idx, t_ic=ic, t_to=to, t_ic_next=ic + 2.0,
+        stride_length=1.3, stride_time=2.0, gait_speed=0.65,
+        stance_time=stance, swing_time=2.0 - stance,
+        stance_ratio=100.0 * stance / 2.0, toe_clearance=0.05,
+        strike_angle=20.0, valid=True, confidence="normal",
+    )
 
 
 def test_structure_change_reports_nan_with_a_reason_not_a_wrong_number():
     """相位结构在校正下改变时，两次读数不是同一个量 —— 必须报 nan 并说明原因。
 
-    实测触发点：合成步态的两足事件落在同一采样网格上，校正的浮点回程（1 ulp）
-    就能翻转包含判定。真机上两足各有时间轴，罕见 —— 但「罕见」不是「不会」，
-    而给一个错数比给 nan 危险得多：nan 会被追问，错数会被引用。
+    **触发方式是手工构造的，这一点是有意的。** RAY-296 之前这条靠的是一个浮点巧合：
+    合成步态的两足事件落在同一采样网格上，而输入里残留的静止前导让包含判定对校正的
+    1 ulp 回程敏感。前导剔掉之后那个巧合不再发生，这条测试就跟着变绿了 —— 它守的
+    机制却一点没被验证过。
+
+    所以这里直接造一个**包含型翻转**：左足支撑区间在校正后落进右足区间内部，于是
+    这一相位从"正常配对"变成"被剔除的包含型"，结构三元组随之改变。机制与数据脱钩，
+    不再依赖任何巧合。
     """
-    left, right = _cycles()
+    # 右足固定；左足在主机时基下与右足部分重叠，校正（−0.5 s）后被完全包含。
+    right = [_cycle("R", 0.0, 1.0, 0), _cycle("R", 2.0, 3.0, 1), _cycle("R", 4.0, 5.0, 2)]
+    left = [_cycle("L", 0.7, 1.3, 0), _cycle("L", 2.7, 3.3, 1), _cycle("L", 3.8, 4.5, 2)]
+
+    host = paired_double_support(left, right)
+    fixed = paired_double_support(shift_cycles(left, 0.5), right)
+    assert host.structure != fixed.structure  # 前提自检：确实造出了结构变化
+
     trial = evaluate_trial(
-        "T", _anchor_report([0.030] * 8), shift_cycles(left, -0.030), right,
-        sync_quality=QUALITY,
+        "T", _anchor_report([0.5] * 8), left, right, sync_quality=QUALITY,
     )
     paired = next(m for m in trial.metrics if m.name == "double_support_leading_difference")
     assert not paired.comparable

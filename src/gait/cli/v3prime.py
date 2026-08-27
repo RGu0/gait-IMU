@@ -66,7 +66,7 @@ from gait.device.ble import StreamConfig, configure_streaming
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.anchor import FootSignal, measure_offsets
 from gait.sync.selfcheck import check as selfcheck
-from gait.sync.selfcheck import stance_spans
+from gait.sync.selfcheck import drop_still_lead, stance_spans
 from gait.sync.timebase import build_timebase
 from gait.validate.v3prime import (
     NEGLIGIBLE_MEDIAN_S,
@@ -154,15 +154,40 @@ def _cycles(capture: FootCapture, foot: FootLabel, nominal_fs: float, cfg: AlgoC
 
     时间轴用 `build_timebase` 的输出而不是原始到达时刻：实测采样率与标称差几百
     ppm，几十秒累积下来就是几十毫秒，与被测效应同量级。
+
+    ## 静止前导必须在**细化之前**剔掉
+
+    RAY-202 的初始对准需要一段静止前导，而 ZUPT 会把它检成一个很长的支撑相。它不是
+    一步：留着它，`analysis/events.py::double_support()` 会把它当作一个寻常的双支撑
+    相位，以一个**秒级**读数混进均值（典型相位只有约 110 ms）。实测双支撑期占比因此
+    从 20.5% 读成 30.5% —— **污染 7~10 个百分点，而生理带宽本身才 10~25%**（RAY-296）。
+
+    剔的时机是要紧的。判据是"支撑相比典型值长得离谱"（`selfcheck_still_lead_factor`，
+    默认 2.5 倍），而 `refine_stance_edges` 把两端各推出约 50 ms —— 它把**典型支撑相
+    拉长的比例比前导大**，于是比值被压低。实测同一份数据：
+
+    | 边界 | 前导 | 典型 | 比值 |
+    | --- | --- | --- | --- |
+    | ZUPT（细化前） | 1615 ms | 565 ms | **2.86** ✓ |
+    | 细化后 | 1670 ms | 670 ms | **2.49** ✗ 差一点点就跌破 2.5 |
+
+    也就是说，同一条判据在细化后就**不再认得出前导**。所以这里在 ZUPT 边界上剔 ——
+    那也正是 `sync/selfcheck.py` 与 `tests/test_events.py::dual_cycles()` 用它的地方。
+
+    返回的是**剔过前导的**支撑相索引，好让 `analyze_trial()` 的两条产出路径
+    （selfcheck 与指标偏差）确定地看到同一批步。此前它们各走各的前提：selfcheck 那
+    一路干净（`check()` 自己会剔），指标那一路带着前导 —— 同一次采集两种口径。
     """
     arrival, accel, gyro = capture.arrays()
     timebase = build_timebase(arrival, nominal_fs, cfg)
     stance = detect_stance(accel, gyro, timebase.report.fs, cfg)
+    kept = len(drop_still_lead(stance_spans(timebase.t, stance.stances), cfg))
+    stances = stance.stances[len(stance.stances) - kept :]
     # `FootLabel` 是 Literal["L", "R"]，不是可实例化的类型 —— 直接传字面量。
     cycles, _edges = segment_cycles(
-        foot, timebase.t, accel, gyro, stance.stances, position=None, cfg=cfg
+        foot, timebase.t, accel, gyro, stances, position=None, cfg=cfg
     )
-    return cycles, timebase, stance
+    return cycles, timebase, stances
 
 
 def analyze_trial(
@@ -191,11 +216,11 @@ def analyze_trial(
     }
 
     try:
-        left_cycles, left_tb, left_stance = _cycles(left, "L", nominal_fs, cfg)
-        right_cycles, right_tb, right_stance = _cycles(right, "R", nominal_fs, cfg)
+        left_cycles, left_tb, left_stances = _cycles(left, "L", nominal_fs, cfg)
+        right_cycles, right_tb, right_stances = _cycles(right, "R", nominal_fs, cfg)
         quality = selfcheck(
-            stance_spans(left_tb.t, left_stance.stances),
-            stance_spans(right_tb.t, right_stance.stances),
+            stance_spans(left_tb.t, left_stances),
+            stance_spans(right_tb.t, right_stances),
             cfg,
         )
         trial = evaluate_trial(
