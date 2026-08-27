@@ -36,6 +36,10 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 1.8（RAY-290 `selfcheck-pairing-premise`）：`AlgoConfig` 增加相邻配对的适用
+#: 范围参数。它把 `sync/selfcheck.py` 一直隐含依赖的前提（|Δ| 远小于步时）变成
+#: 一个显式的、可复现的数 —— 前提留在脑子里，下一个人把它用在别处就会踩中。
+#:
 #: 1.7（RAY-212 `anchor-tool`）：`AlgoConfig` 增加物理对碰锚点的三个检测参数。
 #: 锚点是工程模式实验室工具，但参数仍走 `AlgoConfig` —— 复现性契约（PRD §6.1）
 #: 不区分产品与实验：RAY-213 的实验结论同样要能凭元数据复现。
@@ -58,7 +62,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.7"
+CONFIG_VERSION: Final[str] = "1.8"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -356,6 +360,19 @@ class AlgoConfig:
     #: 前导会被 ZUPT 检成一个很长的支撑相。它不是一步 —— 留着它会把整个左右配对
     #: 错开一位，配对双支撑差随即失去意义。
     selfcheck_still_lead_factor: float = 2.5
+    #: 估计出的 |offset| 超过步时的这个比例，就判为**超出相邻配对的适用范围**，
+    #: 不给估计（仍然标注）。
+    #:
+    #: `double_support()` 按「起点排序后取相邻对」配相位。这个配法成立的前提是
+    #: 排序后的序列左右交替，而交替在 |Δ| 逼近**一个步时**时才被打破 —— 那时一只
+    #: 脚的触地会越过另一只脚的触地，真正的配对对象不再相邻，被跳过的相位不是随机
+    #: 的几个，配对差整个跳掉。
+    #:
+    #: 实测失效点恰在一个步时上（步频 108/140/160 步/分，步时 555/429/375 ms，
+    #: 失效分别落在 500~600 / 400~450 / 350~400 ms），失效后误差达 750~1111 ms。
+    #: 取 0.5 留了**两倍**余量。另一侧的余量更大：它是 `selfcheck_offset_warn_s`
+    #: （50 ms）的 5.5 倍、PRD §8 容差上界（30 ms）的 9 倍，正常工作区间碰不到它。
+    selfcheck_offset_pairing_limit_fraction: float = 0.5
 
     version: str = CONFIG_VERSION
 
@@ -407,6 +424,7 @@ class AlgoConfig:
             "selfcheck_offset_consistency_s",
             "selfcheck_offset_warn_s",
             "selfcheck_still_lead_factor",
+            "selfcheck_offset_pairing_limit_fraction",
         ):
             _positive(getattr(self, name), name)
         if self.selfcheck_min_phases < 2:
@@ -419,6 +437,13 @@ class AlgoConfig:
                 f"selfcheck_still_lead_factor 必须大于 1，收到 "
                 f"{self.selfcheck_still_lead_factor}。"
                 "取 1 或更小会把典型长度的支撑相当成静止前导剔掉。"
+            )
+        if self.selfcheck_offset_pairing_limit_fraction >= 1.0:
+            raise ConfigError(
+                f"selfcheck_offset_pairing_limit_fraction 必须小于 1，收到 "
+                f"{self.selfcheck_offset_pairing_limit_fraction}。"
+                "相邻配对的失效点实测就在一个步时上，取 1 或更大等于把闸门设在"
+                "失效之后，闸门就不再拦任何东西。"
             )
         if self.integrity_gap_samples < 1:
             raise ConfigError(
