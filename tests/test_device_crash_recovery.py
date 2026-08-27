@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import signal
 import struct
 import subprocess
 import sys
@@ -61,14 +59,18 @@ def killed_recording(tmp_path: Path) -> Path:
         assert proc.stdout is not None
         assert proc.stdout.readline().strip() == "ready"
         # 让它写够几百行再杀，确保「救回来的部分」不是空的。
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             if path.exists() and len(path.read_text().splitlines()) > 200:
                 break
             time.sleep(0.05)
-        os.kill(proc.pid, signal.SIGKILL)
     finally:
-        proc.wait(timeout=10)
+        # kill() 而不是 os.kill(SIGKILL)：后者是 POSIX-only，而 Windows 正是
+        # 交付平台，这条测试更该在那儿跑。Popen.kill() 在 Windows 上走
+        # TerminateProcess，同样是不可捕获的立即终止 —— 对本测试等价。
+        # 放进 finally：上面任一断言失败都不能把子进程漏在外面。
+        proc.kill()
+        proc.wait(timeout=30)
         if proc.stdout:
             proc.stdout.close()
         if proc.stderr:
