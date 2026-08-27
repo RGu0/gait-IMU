@@ -6,7 +6,9 @@ Modules, and the Issue that delivers each::
                    -> RAY-195
     ble.py         F1.1-1.3 scan, dual-device concurrent connect, config push
                    -> RAY-196, RAY-197
-    recorder.py    F1.4 raw frames to disk as the receive callback's first action
+    capture.py     F1.4 session-level record orchestration and replay bridge
+                   -> RAY-198
+    recorder.py    F1.4 hot-path-safe threaded writer under capture.py
                    -> RAY-198
 
 **There is no protocol.py, and there should not be one.** RAY-193's R2 adopted
