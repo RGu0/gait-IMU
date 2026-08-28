@@ -9,12 +9,16 @@
 这个闭式不符，那么不是管线错了，就是那条依据错了，两者都必须当场知道。
 """
 
+import asyncio
+import dataclasses
+import inspect
 import json
 import math
 from dataclasses import replace
 
 import numpy as np
 import pytest
+from wt901.models import ImuSample, Vec3
 
 from gait.analysis.events import segment_cycles
 from gait.config import AlgoConfig
@@ -364,6 +368,100 @@ def test_paired_support_with_no_overlap_is_nan_not_zero():
     paired = paired_double_support(left, far)
     assert math.isnan(paired.difference)
     assert paired.left_phases == 0 or paired.right_phases == 0
+
+
+# --- live 路径的 API 契约：不需要硬件就能验 -----------------------------------
+
+
+def test_live_path_api_contract():
+    """`live` 用到的每个外部符号都必须存在且签名兼容。
+
+    **这条测试的由来是一次真实事故。** `StreamConfig(rate_hz=...)` 与
+    `device.stream()` 两处都是凭印象写的 API：前者的字段其实叫 `rate`（`ReturnRate`
+    的值），后者的方法其实叫 `samples()`。`live` 需要两台真硬件、CI 覆盖不到，于是
+    错误一直等到受试者与设备都就位时才暴露，代价是一次上机。
+
+    而这些调用**根本不需要硬件就能验** —— 字段名、方法名、签名全是静态的。它们不该
+    靠上机来发现。这条测试的价值不在于修好那两处（那只是还债），而在于挡住下一个：
+    wt901 或 `device/ble.py` 再改接口时，这里会红，而不是等到现场。
+    """
+    from wt901 import ReturnRate, WT901Device
+
+    from gait.device.ble import StreamConfig, configure_streaming
+
+
+    # 取样：是 samples() 不是 stream()，且必须是异步生成器（`_consume` 用 `async for`）。
+    assert inspect.isasyncgenfunction(WT901Device.samples), "device.samples() 必须是异步生成器"
+    assert not hasattr(WT901Device, "stream"), "接口已变：出现了 stream()，请复核 _consume"
+
+    # 流配置：字段名是 rate（ReturnRate 的值），不是 rate_hz。
+    fields = {f.name for f in dataclasses.fields(StreamConfig)}
+    assert {"rate", "bandwidth", "algorithm"} <= fields, f"StreamConfig 字段变了：{fields}"
+    StreamConfig(rate=int(ReturnRate.HZ_200))  # 关键字与取值都必须被接受
+
+    # 下发：按位置传 (device, config)，所以验的是"能接住两个位置参数"，不是参数名。
+    assert len(inspect.signature(configure_streaming).parameters) >= 2
+
+
+def test_consume_reads_through_the_real_sampling_api():
+    """把 `_consume` 真的跑一遍 —— 上一条只验了库这一侧，管不住我们的调用点。
+
+    `test_live_path_api_contract` 断言的是 `WT901Device.samples` 存在、`stream`
+    不存在。那挡得住 wt901 改接口，**挡不住有人在 `_consume` 里再写一次
+    `device.stream()`** —— 库没变，那条断言照样绿。所以这里拿一个假设备把调用点
+    执行一遍：写错方法名就是 `AttributeError`，当场红。
+    """
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class _FakeDevice:
+        """只实现 `samples()`。**故意不实现 `stream()`** —— 写错就 AttributeError。"""
+
+        def __init__(self, samples):
+            self._samples = samples
+
+        async def samples(self):
+            for sample in self._samples:
+                yield sample
+
+    def _sample(t: float) -> ImuSample:
+        return ImuSample(
+            device_id="fake", t_host=t, seq=0,
+            accel=Vec3(1.0, 2.0, 3.0), gyro=Vec3(4.0, 5.0, 6.0),
+            euler=Vec3(0.0, 0.0, 0.0), raw=b"",
+        )
+
+    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+    # 与 `tests/test_device_ble.py` 同一个写法：本仓库不引 pytest-asyncio。
+    asyncio.run(_consume(_FakeDevice([_sample(0.0), _sample(0.005)]), capture))
+
+    assert capture.arrival == [0.0, 0.005]
+    assert capture.accel == [(1.0, 2.0, 3.0), (1.0, 2.0, 3.0)]
+    assert capture.gyro == [(4.0, 5.0, 6.0), (4.0, 5.0, 6.0)]
+
+
+@pytest.mark.parametrize(("fs", "expected"), [(200.0, 11), (100.0, 9), (50.0, 8)])
+def test_stream_config_maps_rate_to_the_device_register(fs, expected):
+    """映射到器件寄存器值，不是把赫兹数直接写下去。
+
+    这条同时执行到 `StreamConfig(...)` 的**构造**：字段名写错（例如写回当年的
+    `rate_hz`）在这里就是 `TypeError`，不必等上机。
+    """
+    from gait.cli.v3prime import _stream_config
+
+    assert _stream_config(fs).rate == expected
+
+
+def test_unsupported_rate_fails_loudly_instead_of_snapping():
+    """**取最近一档是最坏的处置。**
+
+    采集会照着一个与 `--nominal-fs` 不同的速率跑完，而分析正是用 `--nominal-fs`
+    回推包内时刻的 —— 两者不一致不会报错，只会让整趟的时间轴系统性地错。
+    宁可当场停在配置阶段。
+    """
+    from gait.cli.v3prime import HarnessError, _stream_config
+
+    with pytest.raises(HarnessError, match="不支持"):
+        _stream_config(150.0)
 
 
 # --- CLI：不需要硬件的那几条路径 ---------------------------------------------
