@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from wt901 import BleTransport, DiscoveredDevice, WT901Device, scan
+from wt901 import BleTransport, DiscoveredDevice, ReturnRate, WT901Device, scan
 from wt901.transport.recording import RecordingTransport
 
 from gait.analysis.events import segment_cycles
@@ -137,6 +137,36 @@ def require_adequate_clock(nominal_fs: float, echo=print) -> float:
             "约 15.6 ms）。"
         )
     return resolution
+
+
+def _stream_config(nominal_fs: float) -> StreamConfig:
+    """标称采样率 → 下发给器件的 `StreamConfig`。
+
+    **这是一个函数而不是 `_run_live` 里的一行，为的是让它可测。** 原先那一行写的是
+    `StreamConfig(rate_hz=nominal_fs)` —— 一个不存在的字段名（真名是 `rate`，取
+    `ReturnRate` 的值）。它藏在只有真硬件才走得到的 `_run_live` 里，于是没有任何
+    测试碰得到它，错误一直等到上机才暴露。抽成函数之后，构造这件事在 CI 里就被
+    执行到了。
+
+    器件只支持离散的几档。不支持的值**当场失败**，不去找最近的一档：采集会照着
+    一个与分析假设不同的速率跑完，而 `--nominal-fs` 正是分析用来回推包内时刻的
+    那个数 —— 两者不一致不会报错，只会让整趟数据的时间轴系统性地错。
+    """
+    table = {
+        10.0: ReturnRate.HZ_10,
+        20.0: ReturnRate.HZ_20,
+        50.0: ReturnRate.HZ_50,
+        100.0: ReturnRate.HZ_100,
+        200.0: ReturnRate.HZ_200,
+    }
+    rate = table.get(float(nominal_fs))
+    if rate is None:
+        raise HarnessError(
+            f"器件不支持 {nominal_fs} Hz。可选：{sorted(table)}。"
+            "本工装不替你取最近的一档 —— 采集速率与 --nominal-fs 不一致时"
+            "没有任何东西会报错，只会让整趟的时间轴系统性地错。"
+        )
+    return StreamConfig(rate=int(rate))
 
 
 def _foot_signal(capture: FootCapture) -> FootSignal:
@@ -336,8 +366,9 @@ async def _run_live(
             )
             echo(f"{foot} 足已连接：{discovered.name} {discovered.address}")
 
+        stream_config = _stream_config(nominal_fs)
         for device, capture in zip(devices, captures, strict=True):
-            applied = await configure_streaming(device, StreamConfig(rate_hz=nominal_fs))
+            applied = await configure_streaming(device, stream_config)
             if not applied.verified:
                 raise HarnessError(
                     f"{capture.device_id} 配置校验失败：{applied.mismatches}。中止本趟。"
@@ -399,7 +430,7 @@ def _capture_arrays(capture: FootCapture, prefix: str) -> dict[str, np.ndarray]:
 
 async def _consume(device: WT901Device, capture: FootCapture) -> None:
     """把样本收进内存。`t_host` 由 wt901 在通知回调里取，两台同源同钟。"""
-    async for sample in device.stream():
+    async for sample in device.samples():
         capture.arrival.append(sample.t_host)
         capture.accel.append((sample.accel.x, sample.accel.y, sample.accel.z))
         capture.gyro.append((sample.gyro.x, sample.gyro.y, sample.gyro.z))
