@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from wt901 import BleTransport, DiscoveredDevice, WT901Device, scan
+from wt901 import BleTransport, DiscoveredDevice, ReturnRate, WT901Device, scan
 from wt901.transport.recording import RecordingTransport
 
 from gait.analysis.events import segment_cycles
@@ -65,6 +65,7 @@ from gait.core.zupt import detect_stance
 from gait.device.ble import StreamConfig, configure_streaming
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.anchor import FootSignal, measure_offsets
+from gait.sync.integrity import assess
 from gait.sync.selfcheck import check as selfcheck
 from gait.sync.selfcheck import stance_spans
 from gait.sync.timebase import build_timebase
@@ -139,6 +140,30 @@ def require_adequate_clock(nominal_fs: float, echo=print) -> float:
     return resolution
 
 
+def _return_rate(nominal_fs: float) -> int:
+    """标称采样率 → 器件的 `ReturnRate` 寄存器值。
+
+    器件只支持离散的几档。不支持的值**当场失败**，不去找最近的一档：采集会
+    照着一个与分析假设不同的速率跑完，而 `--nominal-fs` 正是分析用来回推包内
+    时刻的那个数 —— 两者不一致不会报错，只会让整趟数据的时间轴系统性地错。
+    """
+    table = {
+        10.0: ReturnRate.HZ_10,
+        20.0: ReturnRate.HZ_20,
+        50.0: ReturnRate.HZ_50,
+        100.0: ReturnRate.HZ_100,
+        200.0: ReturnRate.HZ_200,
+    }
+    rate = table.get(float(nominal_fs))
+    if rate is None:
+        raise HarnessError(
+            f"器件不支持 {nominal_fs} Hz。可选：{sorted(table)}。"
+            "本工装不替你取最近的一档 —— 采集速率与 --nominal-fs 不一致时"
+            "没有任何东西会报错，只会让整趟的时间轴系统性地错。"
+        )
+    return int(rate)
+
+
 def _foot_signal(capture: FootCapture) -> FootSignal:
     """采集结果 → 锚点检测的输入。模值对模块姿态不变，见 `sync.anchor` 模块文档。"""
     arrival, accel, _ = capture.arrays()
@@ -171,6 +196,7 @@ def analyze_trial(
     right: FootCapture,
     nominal_fs: float,
     cfg: AlgoConfig | None = None,
+    tap_window: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """一趟的完整评估。`live` 与 `replay` 共用这一条路径。
 
@@ -179,16 +205,63 @@ def analyze_trial(
     Δ 本身就是 V3′ 最主要的产出，不该因为步行段没采好而整趟作废。
     """
     cfg = cfg or AlgoConfig()
+    # 只在对碰段取锚点：步行段的足跟着地同样超阈值，不限窗会把左右两次不相关的
+    # 着地配成一对（实测假 Δ = −223 ms，而同趟对碰段内真 Δ 全在 ±8 ms）。
     anchor = measure_offsets(
-        _foot_signal(left), _foot_signal(right), nominal_fs, cfg, coarse_align=False
+        _foot_signal(left),
+        _foot_signal(right),
+        nominal_fs,
+        cfg,
+        coarse_align=False,
+        window=tap_window,
     )
+    # 时基不稳就不该拿这一趟的 Δ 去支撑任何结论：`t_host = offset + index/fs`，
+    # fs 错几个百分点，几万个样本累积下来就是秒级的时刻误差 —— 那时"跨足偏差"
+    # 量到的是两条各自跑偏的时间轴之差，不是链路的固有延迟差。
+    #
+    # 判据直接用 `SyncReport.stable`（RAY-209 的验收标准：分窗采样率相对离散度
+    # < 0.1%），不另发明阈值。仍然把锚点结果留在报告里 —— 它是诊断链路的材料，
+    # 只是不进判定。
+    # 数据完整性与时基稳定性一起判：前者说明"丢了多少"，后者说明"时间轴还能不能
+    # 用一条直线描述"。两者都过才算这一趟可信。
+    #
+    # 用 `integrity.assess` 的现成分级（RAY-210），不另发明阈值 —— `unusable` 是
+    # 那个模块自己定义的"不可用"。实测教训：模块静止时缺失率 0.1%，而受试者
+    # 手持对碰并走动时掉到 3.6%~10.2%（等级 unusable），**同一对硬件、相隔几分钟**。
+    # 所以链路必须在运动条件下验，静态达标说明不了问题。
+    left_integrity = assess(np.asarray(left.arrival, dtype=np.float64), nominal_fs, cfg)
+    right_integrity = assess(np.asarray(right.arrival, dtype=np.float64), nominal_fs, cfg)
+    usable = left_integrity.grade != "unusable" and right_integrity.grade != "unusable"
+    trustworthy = anchor.left_sync.stable and anchor.right_sync.stable and usable
     payload: dict[str, Any] = {
         "label": label,
         "nominal_fs": nominal_fs,
         "anchor": anchor.snapshot(),
         "left_device": left.device_id,
         "right_device": right.device_id,
+        "timebase_trustworthy": trustworthy,
+        "tap_window": list(tap_window) if tap_window else None,
+        "integrity": {
+            "left": left_integrity.snapshot(),
+            "right": right_integrity.snapshot(),
+        },
     }
+    if not trustworthy:
+        payload["timebase_note"] = (
+            f"这一趟不可信：左足数据完整性 {left_integrity.grade}"
+            f"（丢失 {left_integrity.lost_samples}，{len(left_integrity.gaps)} 处空洞），"
+            f"右足 {right_integrity.grade}"
+            f"（丢失 {right_integrity.lost_samples}，{len(right_integrity.gaps)} 处空洞）；"
+            f"时基稳定性 左={anchor.left_sync.stable} 右={anchor.right_sync.stable}。"
+            "丢包会让实测采样率偏低（RAY-210：1% 丢包 ≈ −1% 采样率），时间轴随之跑偏，"
+            "此时的 Δ 量的是两条各自跑偏的轴之差，不是链路固有延迟差。"
+            "Δ 只可用于诊断，不得计入 V3′ 判定。"
+        )
+
+    if not trustworthy:
+        payload["trial"] = None
+        payload["metrics_error"] = "时基不可信，未计算指标偏差（见 timebase_note）"
+        return payload
 
     try:
         left_cycles, left_tb, left_stance = _cycles(left, "L", nominal_fs, cfg)
@@ -282,6 +355,7 @@ async def _run_live(
     对碰段量到的 Δ 就不是步行段的 Δ 了（模块文档"一趟的结构"）。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    loop = asyncio.get_running_loop()
     selected = await _connect(2, mac_filters, scan_timeout, echo)
 
     devices: list[WT901Device] = []
@@ -311,23 +385,35 @@ async def _run_live(
             )
             echo(f"{foot} 足已连接：{discovered.name} {discovered.address}")
 
+        stream_config = StreamConfig(rate=_return_rate(nominal_fs))
         for device, capture in zip(devices, captures, strict=True):
-            applied = await configure_streaming(device, StreamConfig(rate_hz=nominal_fs))
+            applied = await configure_streaming(device, stream_config)
             if not applied.verified:
                 raise HarnessError(
                     f"{capture.device_id} 配置校验失败：{applied.mismatches}。中止本趟。"
                 )
         echo(f"两台均已配置 {nominal_fs:.0f} Hz")
 
+        # 采集起点必须在消费者启动**之前**取：连接与配置期间设备已在产出样本
+        # （按上一轮固化的速率），它们积压在 wt901 的队列里等着被读。不划这条线
+        # 就会把配置阶段的残留当成采集数据 —— 实测后果是 arrival 跨度比名义时长
+        # 多出 5.5 s，回归据此把实测采样率读成 191/178 Hz（真值 198），残差 p95
+        # 涨到 0.5~1.3 s，整趟被判 unusable。链路本身当时是好的。
+        #
+        # `loop.time()` 与 `ImuSample.t_host` 同源：CPython 的事件循环时钟就是
+        # `time.monotonic`（`cli/linktest.py` 依赖的也是这一点）。
+        started = loop.time()
         consumers = [
-            asyncio.ensure_future(_consume(device, capture))
+            asyncio.ensure_future(_consume(device, capture, started))
             for device, capture in zip(devices, captures, strict=True)
         ]
         try:
             echo("")
             echo(f"▶ 对碰段（{tap_seconds:.0f} s）：两模块外壳干脆对碰 {taps} 次，")
             echo("  间隔至少半秒、不要打成节拍器，力道以不削顶为宜。")
+            tap_start = loop.time()
             await _countdown(tap_seconds, echo)
+            tap_stop = loop.time()
             echo("")
             echo(f"▶ 步行段（{walk_seconds:.0f} s）：按 T-01 定时步行（4 m 往返）。")
             await _countdown(walk_seconds, echo)
@@ -357,6 +443,7 @@ async def _run_live(
         right_device=np.asarray(right.device_id),
         foot_assignment=np.asarray("explicit_mac" if mac_filters else "scan_order"),
         captured_utc=np.asarray(datetime.now(UTC).isoformat()),
+        tap_window=np.asarray([tap_start, tap_stop]),
     )
     # 走与 `replay` 完全相同的读取路径，好让两条路的产出逐字段一致 —— 现场看到的
     # 报告与事后复算出来的报告不一致，是最难查的那种不一致。
@@ -372,9 +459,15 @@ def _capture_arrays(capture: FootCapture, prefix: str) -> dict[str, np.ndarray]:
     }
 
 
-async def _consume(device: WT901Device, capture: FootCapture) -> None:
-    """把样本收进内存。`t_host` 由 wt901 在通知回调里取，两台同源同钟。"""
-    async for sample in device.stream():
+async def _consume(device: WT901Device, capture: FootCapture, started: float) -> None:
+    """把样本收进内存。`t_host` 由 wt901 在通知回调里取，两台同源同钟。
+
+    早于 `started` 的样本一律丢弃：那是连接与配置阶段积压在队列里的残留，混进来
+    会让时基回归得到一个明显偏低的采样率（见 `_run_live` 里划定 `started` 的注释）。
+    """
+    async for sample in device.samples():
+        if sample.t_host < started:
+            continue
         capture.arrival.append(sample.t_host)
         capture.accel.append((sample.accel.x, sample.accel.y, sample.accel.z))
         capture.gyro.append((sample.gyro.x, sample.gyro.y, sample.gyro.z))
@@ -416,8 +509,13 @@ def load_trial_dir(path: Path, cfg: AlgoConfig | None = None) -> dict[str, Any]:
                 gyro=[tuple(row) for row in data[f"{prefix}_gyro"]],
             )
         )
+    window = None
+    if "tap_window" in data.files:
+        lo, hi = (float(v) for v in data["tap_window"])
+        window = (lo, hi)
     payload = analyze_trial(
-        str(data["label"]), captures[0], captures[1], float(data["nominal_fs"]), cfg
+        str(data["label"]), captures[0], captures[1], float(data["nominal_fs"]), cfg,
+        tap_window=window,
     )
     for key in ("foot_assignment", "captured_utc"):
         # 缺席不补默认值：一份没记录左右足来源的旧数据，与一份记着 "scan_order"
@@ -430,6 +528,19 @@ def _echo_trial(payload: dict[str, Any], echo=print) -> None:
     offset = payload["anchor"]["offset"]
     echo("")
     echo(f"== 趟次 {payload['label']} ==")
+    if payload.get("timebase_trustworthy") is False:
+        echo("")
+        echo("❌ 这一趟不计入 V3′ 判定：" + payload.get("timebase_note", ""))
+        for side, key in (("左", "left_sync"), ("右", "right_sync")):
+            s = payload["anchor"][key]
+            echo(
+                f"   {side}足时基：实测 {s['fs']:.2f} Hz（{s['fs_deviation_ppm']:+.0f} ppm）"
+                f" stable={s['stable']}"
+                f" 残差 p95={s['residual_p95'] * 1e3:.1f} ms"
+                f" max={s['residual_max'] * 1e3:.1f} ms"
+                f"（BLE 抖动本该是几毫秒量级）"
+            )
+        echo("")
     assignment = payload.get("foot_assignment")
     if assignment == "scan_order":
         echo(
@@ -489,14 +600,22 @@ def _verdict(paths: list[Path], cfg: AlgoConfig, echo=print) -> dict[str, Any]:
     """汇总多趟，按 R1 判据给三选一结论。"""
     trials = []
     payloads = []
+    skipped: list[str] = []
     for path in paths:
         payload = json.loads((path / TRIAL_FILENAME).read_text(encoding="utf-8"))
         payloads.append(payload)
+        if payload.get("timebase_trustworthy") is False:
+            # 静默丢弃会让"5 人 × 3 趟"这句话变成谎话 —— 被排除的趟次必须
+            # 出现在汇总里，否则样本量看起来永远是满的。
+            skipped.append(f"{payload['label']}（时基不稳）")
+            continue
         deltas = [pair["delta_s"] for pair in payload["anchor"]["pairs"]]
         if not deltas:
-            echo(f"跳过 {path}：没有配对到对碰")
+            skipped.append(f"{payload['label']}（无配对对碰）")
             continue
         trials.append((payload["label"], np.asarray(deltas, dtype=np.float64)))
+    if skipped:
+        echo(f"已排除 {len(skipped)} 趟：{'、'.join(skipped)}")
 
     all_deltas = np.concatenate([d for _, d in trials]) if trials else np.zeros(0)
     verdict = Verdict(deltas=all_deltas, trials=len(trials), taps=int(all_deltas.size))

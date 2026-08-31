@@ -539,11 +539,19 @@ def measure_offsets(
     cfg: AlgoConfig | None = None,
     *,
     coarse_align: bool = False,
+    window: tuple[float, float] | None = None,
 ) -> AnchorReport:
     """完整流水线：双侧时基构建 → 冲击峰检测 →（可选粗对齐）→ 配对 → 偏移统计。
 
     这是 CLI 与 RAY-213 的唯一入口。时基构建用与产品流程完全相同的
     `build_timebase` —— 锚点量的就是它的偏差，被测者与测量尺必须是同一把。
+
+    `window`（主机时基下的 `(起, 止)`）把锚点候选限制在这段时间内。**采集里同时
+    含对碰段与步行段时必须给**：足跟着地的冲击同样超过阈值（实测 3~6.7 g，与轻碰
+    重叠），不限定窗口就会把左右两次不相关的着地硬配成一对 —— 实测产生过一个
+    −223 ms 的假 Δ，而同一趟对碰段内的真 Δ 全在 ±8 ms。
+    形状上两者可分（对碰宽 1~3 样本，着地 5~13），但那是启发式；调用方本来就知道
+    对碰段是哪一段，用它比猜可靠。
 
     `coarse_align=True` 用于两侧时间轴零点不一致的输入（各自归零的录制文件）：
     先用 `coarse_alignment` 估出零点差并平移左侧，再配对。代价与含义见该函数
@@ -553,6 +561,11 @@ def measure_offsets(
     cfg = cfg or AlgoConfig()
     left_events, left_sync = _events(left, nominal_fs, cfg)
     right_events, right_sync = _events(right, nominal_fs, cfg)
+    if window is not None:
+        # 时基仍用**整段**数据拟合（样本越多回归越稳），只有锚点候选被限制在窗内。
+        start, stop = window
+        left_events = [e for e in left_events if start <= e.t_host <= stop]
+        right_events = [e for e in right_events if start <= e.t_host <= stop]
     alignment: float | None = None
     if coarse_align:
         alignment = coarse_alignment(left_events, right_events, cfg)

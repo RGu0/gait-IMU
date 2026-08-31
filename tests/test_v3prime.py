@@ -9,6 +9,7 @@
 这个闭式不符，那么不是管线错了，就是那条依据错了，两者都必须当场知道。
 """
 
+import dataclasses
 import json
 import math
 from dataclasses import replace
@@ -448,3 +449,147 @@ def test_missing_foot_assignment_is_none_not_guessed(tmp_path, capsys):
     payload = json.loads((trial_dir / "trial.json").read_text(encoding="utf-8"))
     assert payload["foot_assignment"] is None
     assert "未记录" in capsys.readouterr().out
+
+
+# --- live 路径的接口契约（无硬件可验，防的是"上机才发现调错 API"）-----------
+
+
+def test_live_path_api_contract():
+    """`live` 用到的每个外部符号都必须存在且签名兼容。
+
+    这条测试的由来是一次真实事故：`StreamConfig(rate_hz=...)` 与
+    `device.stream()` 两处都是凭印象写的 API，而 `live` 需要硬件、CI 覆盖不到，
+    于是错误一直等到受试者与两台模块都就位时才暴露，代价是一次上机。
+
+    这些调用**不需要硬件也能验**：字段名、方法名、签名都是静态的。所以它们不该
+    靠上机来发现。
+    """
+    import inspect
+
+    from wt901 import BleTransport, ReturnRate, WT901Device, scan
+    from wt901.models import ImuSample, Vec3
+    from wt901.transport.recording import RecordingTransport
+
+    from gait.device.ble import StreamConfig, configure_streaming
+    from gait.device.recorder import ThreadedRecordingWriter
+
+    # 取样：是 samples() 不是 stream()，且必须是异步生成器（`async for` 用它）。
+    assert inspect.isasyncgenfunction(WT901Device.samples), "device.samples() 必须是异步生成器"
+    assert not hasattr(WT901Device, "stream"), "接口已变：出现了 stream()，请复核 _consume"
+
+    # 流配置：字段名是 rate（ReturnRate 值），不是 rate_hz。
+    fields = {f.name for f in dataclasses.fields(StreamConfig)}
+    assert {"rate", "bandwidth", "algorithm"} <= fields, f"StreamConfig 字段变了：{fields}"
+    StreamConfig(rate=int(ReturnRate.HZ_200))  # 关键字与取值都必须被接受
+
+    # 下发：按位置传 (device, config)，所以验的是"能接住两个位置参数"，不是参数名。
+    assert len(inspect.signature(configure_streaming).parameters) >= 2
+
+    # 样本字段：`_consume` 逐样本取这三项。
+    sample_fields = {f.name for f in dataclasses.fields(ImuSample)}
+    assert {"t_host", "accel", "gyro"} <= sample_fields, sample_fields
+    assert {f.name for f in dataclasses.fields(Vec3)} >= {"x", "y", "z"}
+
+    # 连接与落盘链路的构造签名。
+    # scan 与 writer 走关键字，验名字；两个 transport 走位置，只验能接住几个。
+    assert "timeout" in inspect.signature(scan).parameters
+    assert len(inspect.signature(BleTransport.__init__).parameters) >= 2  # self + 目标设备
+    assert len(inspect.signature(RecordingTransport.__init__).parameters) >= 3  # self + 传输 + writer
+    writer_params = inspect.signature(ThreadedRecordingWriter.__init__).parameters
+    assert {"path", "device_id", "note"} <= set(writer_params), list(writer_params)
+
+
+@pytest.mark.parametrize(("fs", "expected"), [(200.0, 11), (100.0, 9), (50.0, 8)])
+def test_return_rate_maps_supported_rates(fs, expected):
+    from gait.cli.v3prime import _return_rate
+
+    assert _return_rate(fs) == expected
+
+
+def test_unsupported_rate_fails_loudly_instead_of_snapping():
+    """器件不支持的速率当场失败，不取最近的一档。
+
+    取最近一档会让采集速率与 `--nominal-fs` 悄悄不一致 —— 没有任何东西会报错，
+    只会让整趟数据的时间轴系统性地错。
+    """
+    from gait.cli.v3prime import HarnessError, _return_rate
+
+    with pytest.raises(HarnessError, match="不支持"):
+        _return_rate(150.0)
+
+
+# --- 时基不可信的趟次不得进入判定 --------------------------------------------
+
+
+def _mark_unstable(trial_dir):
+    """把一趟的 trial.json 改成"时基不稳"，模拟丢包严重的链路。"""
+    path = trial_dir / "trial.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["timebase_trustworthy"] = False
+    payload["timebase_note"] = "测试注入"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_unstable_timebase_trial_is_excluded_from_verdict(tmp_path, capsys):
+    """时基不稳的趟次必须被排除，且**排除本身要出现在输出里**。
+
+    静默丢弃会让「5 人 × 3 趟」变成谎话：样本量看起来永远是满的，而判定其实
+    只用了其中几趟。
+    """
+    from gait.cli.v3prime import main
+
+    good = _fake_capture(tmp_path / "g", delta=0.013)
+    bad = _fake_capture(tmp_path / "b", delta=0.013)
+    main(["replay", "--trial-dir", str(good)])
+    main(["replay", "--trial-dir", str(bad)])
+    _mark_unstable(bad)
+
+    out_path = tmp_path / "verdict.json"
+    assert main(["verdict", "--trials", str(good), str(bad), "--out", str(out_path)]) == 0
+    summary = json.loads(out_path.read_text(encoding="utf-8"))
+    assert summary["verdict"]["trials"] == 1  # 只有好的那一趟进了判定
+    text = capsys.readouterr().out
+    assert "已排除 1 趟" in text and "时基不稳" in text
+
+
+def test_untrustworthy_timebase_blocks_metric_bias(tmp_path):
+    """时基不可信时不算指标偏差 —— 校正量本身就来自那条跑偏的时间轴。"""
+    from gait.cli.v3prime import load_trial_dir
+
+    trial_dir = _fake_capture(tmp_path, delta=0.013)
+    payload = load_trial_dir(trial_dir)
+    # 合成夹具的链路是干净的，应当判为可信 —— 这条同时守着「别把好数据也拒了」。
+    assert payload["timebase_trustworthy"] is True
+    assert payload["trial"] is not None
+
+
+def test_consume_discards_pre_capture_backlog():
+    """早于采集起点的样本必须丢弃 —— 它们是配置阶段积压在队列里的残留。
+
+    这条测试的由来是一次真实采集：没有这道过滤时，arrival 跨度比名义采集时长
+    多出 5.5 s，时基回归据此把实测采样率读成 191/178 Hz（真值 198），残差 p95
+    涨到 0.5~1.3 s，整趟被判 unusable —— 而同一时段 linktest 测得链路缺失率
+    只有 0.02%，链路本身是好的。
+    """
+    import asyncio
+
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class FakeVec:
+        x = y = z = 1.0
+
+    class FakeSample:
+        def __init__(self, t):
+            self.t_host = t
+            self.accel = self.gyro = FakeVec()
+
+    class FakeDevice:
+        async def samples(self):
+            # 前三个是积压（早于 started=100.0），后两个是真正的采集样本。
+            for t in (97.5, 98.0, 99.9, 100.1, 100.2):
+                yield FakeSample(t)
+
+    capture = FootCapture(foot="L", device_id="x", arrival=[], accel=[], gyro=[])
+    asyncio.run(_consume(FakeDevice(), capture, 100.0))
+    assert capture.arrival == [100.1, 100.2]
+    assert len(capture.accel) == 2 and len(capture.gyro) == 2
