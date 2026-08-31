@@ -33,6 +33,7 @@ from gait.cli.linktest import (
     DeviceRun,
     _consume,
     _finalize,
+    _rssi_cell,
     _verdict,
     analyze_recordings,
     host_clock_resolution,
@@ -691,3 +692,88 @@ def test_verdict_flags_recording_error_alongside_integrity_problems() -> None:
 
     assert not verdict["pass"]
     assert any("写盘失败" in problem for problem in verdict["problems"])
+
+
+
+class TestScanRssi:
+    """RAY-199 `scan-rssi`：扫描期 RSSI 进报告，且名字说清它是哪一刻的。"""
+
+    def test_the_field_is_named_with_its_moment(self) -> None:
+        # 不叫 rssi —— 说明会被跳过，名字不会。将来想画 30 min 链路曲线的人
+        # 看到 at_scan 就该停下。
+        keys = DeviceRun(device_id="dev").snapshot()
+        assert "rssi_at_scan" in keys
+        assert "rssi" not in keys
+
+    def test_scan_rssi_reaches_the_report(self) -> None:
+        run = DeviceRun(device_id="dev")
+        run.rssi_at_scan = -42
+        assert run.snapshot()["rssi_at_scan"] == -42
+
+    def test_absent_rssi_is_none_not_zero(self) -> None:
+        # 0 dBm 是极强信号；把「没测到」记成 0 会让读者得出相反结论。
+        assert DeviceRun(device_id="dev").snapshot()["rssi_at_scan"] is None
+
+    def test_the_markdown_cell_renders_missing_as_a_dash(self) -> None:
+        assert _rssi_cell({"rssi_at_scan": None}) == "—"
+        assert _rssi_cell({"rssi_at_scan": -42}) == "-42 dBm"
+
+    def test_a_historical_report_without_the_field_still_renders(self) -> None:
+        # 新增字段不能让旧 report.json 渲染不出来。
+        assert _rssi_cell({}) == "—"
+
+    def test_replay_runs_have_no_scan_rssi(self, tmp_path: Path) -> None:
+        # 回放没有扫描阶段，该字段必须是 None 而不是上一轮的残值。
+        path = tmp_path / "a.jsonl"
+        _write_synthetic_recording(path, chunks=20)
+        report = _run(tmp_path / "out", [path], speed=None)
+
+        assert report["devices"][0]["rssi_at_scan"] is None
+        # 且报告仍渲染得出来。
+        assert "扫描期 RSSI" in (tmp_path / "out" / "report.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_live_path_records_what_scan_reported(self, tmp_path: Path) -> None:
+        """接线测试：扫描结果里的 rssi 要真的落到 DeviceRun 上。
+
+        上面几条只证明字段存在且渲染正确；把 `discovered.rssi` 接过去的是
+        `_connect_live` 里的一行，漏掉它上面全部会照常通过而报告里永远是「—」。
+        """
+        from gait.cli import linktest as mod
+
+        class _FakeTransport:
+            def __init__(self, discovered: object) -> None:
+                self.device_id = getattr(discovered, "address", "x")
+
+        class _FakeDevice:
+            def __init__(self, transport: object) -> None:
+                self.device_id = "fake"
+
+            async def open(self) -> None:
+                return None
+
+        async def fake_scan(timeout: float, **_: object) -> list[object]:
+            return [_FakeDiscovered("A")]
+
+        async def scenario() -> list:
+            saved = (mod.scan, mod.BleTransport, mod.WT901Device)
+            mod.scan, mod.BleTransport, mod.WT901Device = (  # type: ignore[assignment]
+                fake_scan,
+                _FakeTransport,
+                _FakeDevice,
+            )
+            try:
+                return await mod._connect_live(
+                    1, None, 1.0, tmp_path, "t", lambda *_: None
+                )
+            finally:
+                mod.scan, mod.BleTransport, mod.WT901Device = saved  # type: ignore[assignment]
+
+        connected = asyncio.run(scenario())
+        try:
+            _device, run, _writer = connected[0]
+            assert run.rssi_at_scan == -40, "扫描报的 rssi 没接到 DeviceRun 上"
+        finally:
+            for _d, _r, writer in connected:
+                writer.close()

@@ -90,6 +90,48 @@ stride 只长 2% 时，周期差是 2.23%、稳稳在闸门之内，而估计出
 真恒定的一律读 0.0，漂移的最小也有 35.0 —— 中间的空当足够宽。所以可估性由这个一致性
 判据决定；stride 周期差降为**报告出去的不对称指标**（PRD §8 要的那个），不再当闸门。
 
+## 六、相邻配对的适用范围：|Δ| 必须远小于步时
+
+`double_support()` 把两足的支撑区间**按起点排序后取相邻对**来配相位，同足相邻就
+跳过。这个配法有一个前提，而这个前提在 RAY-211 交付时只存在于作者脑子里：
+
+> **排序后的序列必须左右交替。**
+
+交替是被 |Δ| 打破的，而打破它需要 |Δ| 逼近**一个步时** —— 一只脚的触地要越过另一只
+脚的触地，两者相隔正好一个步时。在那之前，平移一只脚只是让每个重叠区一类变长、
+另一类变短，相邻关系一个都不动。实测（RAY-290）：
+
+| 步频 | 步时 | Δ=30 ms | Δ=100 | Δ=300 | 失效点 | 失效后误差 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 108 | 556 ms | 0.00 | 0.00 | 0.00 | 500~600 ms | −1111 ms |
+| 140 | 429 ms | 0.00 | 0.00 | 0.00 | 400~450 ms | −857 ms |
+| 160 | 375 ms | 0.00 | 0.00 | 0.00 | 350~400 ms | −750 ms |
+
+（表内为估计误差，ms。严重不对称步态 0.72 对 0.60 同样全档 0.00。）
+
+所以**在本模块的工作区间里这个配法是精确的**。失效点在 375~556 ms，而：
+
+* PRD §8 的容差上界是 30 ms —— 失效点是它的 **12.5~18.5 倍**；
+* `selfcheck_offset_warn_s` 是 50 ms —— 失效点是它的 **7.5~11.1 倍**。
+
+也就是说，一次会话早在逼近失效点之前很久就已经被标为同步可疑了。
+RAY-213 在 `validate/v3prime.py` 遇到的相邻法失效不适用于这里：那里的输入是
+**未分段**的细化事件，第一个"相位"是 1.67 s 的静止前导（本模块由
+`drop_still_lead()` 剔除），而不是 Δ 太大。
+
+前提写在这里还不够 —— 它必须**在运行时被守住**，否则同步真的坏到几百毫秒时，
+本模块会安安静静地给出一个编造的数字（实测 determinate=True、只标
+`cross_foot_offset`、读数差着 750 ms）。那正是 §5 拒绝做的事。所以
+`check()` 在 |估计| 超过 `selfcheck_offset_pairing_limit_fraction × 步时` 时
+改判**不可估**，理由 `offset_beyond_pairing_range`。
+
+代价是一个真实的、大于半个步时的 offset 也拿不到精确数字了。这是有意的：那种
+会话已经彻底失同步（10 倍于告警阈值），此时"标注它坏了"是可交付的结论，而
+"坏了 500 ms"与"坏了 −357 ms"之间的区别，本模块没有能力分辨。
+
+序列**是否**真的交替，作为观测量报出去（`DoubleSupport.same_foot_adjacencies`），
+但不当闸门：真机上偶尔漏检一个支撑相是常态，那会合法地产生同足相邻。
+
 ## 不拦截
 
 PRD §8：「不拦截，进 `sync_quality`」。本模块只标注，且标注进的是会话与跨足指标 ——
@@ -117,6 +159,8 @@ REASON_OFFSET: Final[str] = "cross_foot_offset"
 REASON_CADENCE: Final[str] = "cadence_mismatch"
 REASON_DRIFTING: Final[str] = "offset_not_constant"
 REASON_TOO_FEW_PHASES: Final[str] = "too_few_double_support_phases"
+#: 估计值超出相邻配对的适用范围（|Δ| 逼近一个步时）。见模块文档 §6。
+REASON_BEYOND_PAIRING_RANGE: Final[str] = "offset_beyond_pairing_range"
 
 
 class SelfCheckError(ValueError):
@@ -145,6 +189,13 @@ class DoubleSupport:
     phases: int
     #: 其中读数为负的个数。**它是观测，不是告警** —— 正常快走就会出现。
     negative_phases: int
+    #: 排序后同足相邻、因而被跳过的次数。**它是观测，不是闸门** —— 真机上偶尔
+    #: 漏检一个支撑相就会合法地产生一次，拿它拦会误伤。它的用处是让"左右交替
+    #: 这个前提到底成立没有"在报告里可查（模块文档 §6）。正常数据实测恒为 0。
+    #:
+    #: 不给默认值：它是**观测结果**，不是可选装饰。给了默认值，将来新增的构造点
+    #: 会静默地读作"交替从未被打破"，而那正是本字段要拆穿的那种沉默。
+    same_foot_adjacencies: int
 
     @property
     def leading_difference(self) -> float:
@@ -196,6 +247,7 @@ class SyncQuality:
             "offset_consistency": self.offset_consistency,
             "within_foot_stance_difference": self.within_foot_stance_difference,
             "double_support_phases": self.double_support.phases,
+            "same_foot_adjacencies": self.double_support.same_foot_adjacencies,
             "version": self.version,
         }
 
@@ -213,6 +265,7 @@ class SyncQuality:
                 "fraction": self.double_support.fraction,
                 "phases": self.double_support.phases,
                 "negative_phases": self.double_support.negative_phases,
+                "same_foot_adjacencies": self.double_support.same_foot_adjacencies,
             },
             "determinate": self.determinate,
             "flagged": self.flagged,
@@ -271,16 +324,30 @@ def double_support(left: list[Span], right: list[Span], step_time: float) -> Dou
 
     `b0 - a1`：前一足的离地时刻减后一足的触地时刻。正值表示两足同时着地（重叠），
     负值表示中间有腾空。**负值在 ZUPT 边界下是常态**，见模块文档 §2。
+
+    ## 两个前提，调用方必须自己满足
+
+    1. **静止前导已剔除**（`drop_still_lead()`）。本函数不剔。前导那一个"相位"
+       读数是秒级的，而典型相位只有 100 ms 出头 —— 它落进哪一类，哪一类的均值
+       就被它一个人拖走。实测 Δ=30 ms 时，带着前导读 −48.2 ms、剔掉读 −60.0 ms。
+       `check()` 已经先剔再调；直接调本函数的人要自己剔。
+    2. **|Δ| 远小于步时**，否则排序后的序列不再左右交替（模块文档 §6）。
+       `same_foot_adjacencies` 报出交替被打破了几次，正常数据恒为 0。
+
+    RAY-213 记录的"相邻法在 Δ=30 ms 失准"来自前提 1 没满足，不是前提 2 —— 见
+    `tests/test_selfcheck.py::test_the_paired_difference_needs_the_still_lead_dropped_first`。
     """
     tagged = sorted(
         [(start, stop, "L") for start, stop in left] + [(start, stop, "R") for start, stop in right]
     )
     lead_left: list[float] = []
     lead_right: list[float] = []
+    same_foot = 0
     for (_, stop0, foot0), (start1, _, foot1) in pairwise(tagged):
         if foot0 == foot1:
             # 同一只脚连着两个支撑相 —— 另一只脚在这中间没有被检出。跳过而不是
             # 拿它凑数：配对差的前提是两类相位来自同一个交替序列。
+            same_foot += 1
             continue
         (lead_left if foot0 == "L" else lead_right).append(stop0 - start1)
 
@@ -292,6 +359,7 @@ def double_support(left: list[Span], right: list[Span], step_time: float) -> Dou
         fraction=float(both.mean() / step_time) if both.size and step_time > 0 else float("nan"),
         phases=int(both.size),
         negative_phases=int((both < 0).sum()),
+        same_foot_adjacencies=same_foot,
     )
 
 
@@ -367,7 +435,15 @@ def check(left: list[Span], right: list[Span], cfg: AlgoConfig | None = None) ->
         reasons.append(REASON_DRIFTING)
     else:
         offset = _raw_offset(left, right)
-        if offset is not None and abs(offset) > cfg.selfcheck_offset_warn_s:
+        # 相邻配对只在 |Δ| 远小于步时时成立（模块文档 §6）。超出适用范围时读数
+        # 已经不是 offset 了 —— 实测差着 750~1111 ms，却照样 determinate。
+        # 拒绝给数字，与 §5 对"相位在漂"的处置同一条原则：**估不出来就说估不出来**。
+        pairing_limit = cfg.selfcheck_offset_pairing_limit_fraction * 0.5 * mean_period
+        if offset is not None and abs(offset) >= pairing_limit:
+            determinate = False
+            offset = None
+            reasons.append(REASON_BEYOND_PAIRING_RANGE)
+        elif offset is not None and abs(offset) > cfg.selfcheck_offset_warn_s:
             reasons.append(REASON_OFFSET)
 
     # 节律不对称单独标注。它**不影响可估性** —— 一个恒定 offset 在不对称步态上照样

@@ -11,12 +11,13 @@ import asyncio
 import struct
 
 import pytest
-from wt901 import AlgorithmMode, Transport, WT901Device
+from wt901 import AlgorithmMode, Mounting, Transport, WT901Device
 from wt901.errors import UnsupportedRegisterError
 from wt901.protocol.registers import Register
 
 from gait.device.ble import (
     BANDWIDTH_42HZ,
+    MOTION_OUTPUT,
     StreamConfig,
     configure_streaming,
     read_battery_at_low_rate,
@@ -39,6 +40,8 @@ class FakeDeviceTransport(Transport):
             0x03: 0x06,
             0x1F: 0x04,
             0x24: 0,
+            0x23: 0,
+            0x96: 0,
             _POWER: 400,
         }
         self.commands: list[tuple[int, int]] = []
@@ -105,19 +108,26 @@ def test_full_sequence_applies_and_verifies() -> None:
         assert applied.verified, applied.mismatches
         assert applied.bandwidth_readback == BANDWIDTH_42HZ
         assert applied.algorithm_readback == AlgorithmMode.SIX_AXIS
+        assert applied.mounting_readback == Mounting.HORIZONTAL
+        assert applied.output_mode_readback == MOTION_OUTPUT
         assert applied.rate_readback == 0x0B
         await device.close()
 
     asyncio.run(scenario())
 
-    # PRD 的三项都写到了设备上。
+    # 适配文档 §3.1 的 ②③④⑤⑥ 都写到了设备上（①⑦ 由 wt901 的原子写事务自带）。
     assert transport.registers[int(Register.BANDWIDTH)] == BANDWIDTH_42HZ
     assert transport.registers[int(Register.ALGORITHM)] == AlgorithmMode.SIX_AXIS
+    assert transport.registers[int(Register.MOUNTING)] == Mounting.HORIZONTAL
+    assert transport.registers[int(Register.DISPLACEMENT_OUTPUT)] == MOTION_OUTPUT
     assert transport.registers[int(Register.RRATE)] == 0x0B
-    # 速率最后写（否则 200 Hz 下带宽/算法没法回读校验）。
+    # 顺序即适配文档 §3.1 的 ③④⑤⑥，只把速率（②）挪到最后 ——
+    # 200 Hz 下寄存器读指令来不及回复，先提速率其余项就没法回读校验了。
     assert _config_writes(transport) == [
         (int(Register.BANDWIDTH), BANDWIDTH_42HZ),
         (int(Register.ALGORITHM), AlgorithmMode.SIX_AXIS),
+        (int(Register.DISPLACEMENT_OUTPUT), MOTION_OUTPUT),
+        (int(Register.MOUNTING), Mounting.HORIZONTAL),
         (int(Register.RRATE), 0x0B),
     ]
 
@@ -285,5 +295,110 @@ def test_read_battery_at_low_rate_returns_none_on_timeout_not_raise() -> None:
         battery = await read_battery_at_low_rate(device)
         assert battery is None
         await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_device_left_in_displacement_mode_is_caught_not_parsed() -> None:
+    """⑤ 真正防的东西：模块残留 0x96 = 1 时必须被拦下。
+
+    位移帧与运动帧**复用同一个标志位且字节布局无法区分**（wt901 `OutputMode`
+    文档）。写不进去而没人发现，采到的就是一份看着正常、数值全错的数据 ——
+    这是「静默给出错误结果」，不是「报错停下」。所以写完必须回读。
+    """
+    transport = FakeDeviceTransport()
+    # 设备停在位移输出模式，且拒绝这次写入（固件忽略/写失败）。
+    transport.registers[int(Register.DISPLACEMENT_OUTPUT)] = 1
+    transport.reject_writes.add(int(Register.DISPLACEMENT_OUTPUT))
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        assert not applied.verified
+        assert applied.output_mode_readback == 1
+        assert any("位移输出模式" in m for m in applied.mismatches)
+        # 其余项不受连坐。
+        assert applied.bandwidth_readback == BANDWIDTH_42HZ
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_output_mode_readback_reaches_the_config_snapshot() -> None:
+    """回读值必须进 config_snapshot，否则「这次会话是运动数据模式」只是假设。
+
+    下一个人拿到一份被静默解析错的历史数据时，靠它才能判断当时 0x96 是几。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> dict:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        await device.close()
+        return applied.snapshot()
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["output_mode_readback"] == MOTION_OUTPUT
+    assert snapshot["requested"]["output_mode"] == MOTION_OUTPUT
+
+
+def test_a_device_mounted_vertically_is_caught_not_silently_wrong() -> None:
+    """⑥ 防的东西：写不进去时必须被拦下。
+
+    装反的表现是**姿态解算的重力轴对不上，数据一直偏**，而链路、速率、丢包这些
+    可观测量全部正常 —— 没有任何一个指标会告诉你出了事。只能靠回读。
+    """
+    transport = FakeDeviceTransport()
+    transport.registers[int(Register.MOUNTING)] = int(Mounting.VERTICAL)
+    transport.reject_writes.add(int(Register.MOUNTING))
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        assert not applied.verified
+        assert applied.mounting_readback == int(Mounting.VERTICAL)
+        assert any("mounting" in m and "重力轴" in m for m in applied.mismatches)
+        # 其余项不受连坐。
+        assert applied.output_mode_readback == MOTION_OUTPUT
+        await device.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_mounting_readback_reaches_the_config_snapshot() -> None:
+    """与 0x96 同一条理由：让「这次会话按水平安装解算」成为可追溯事实。
+
+    上游明说没核实过 0 是不是出厂默认，所以「反正是默认值」这个假设不成立 ——
+    快照里必须有它，否则事后无从判断当时 0x23 是几。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> dict:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig())
+        await device.close()
+        return applied.snapshot()
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["mounting_readback"] == int(Mounting.HORIZONTAL)
+    assert snapshot["requested"]["mounting"] == int(Mounting.HORIZONTAL)
+
+
+def test_an_unregistered_mounting_value_never_reaches_the_device() -> None:
+    """具名 API 的价值：未登记取值在写出去之前被拒。
+
+    与 RAY-242 的算法模式同一条 —— 通用 write 会把任何整数原样写进设备。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        try:
+            with pytest.raises(UnsupportedRegisterError):
+                await configure_streaming(device, StreamConfig(mounting=7))
+            assert transport.registers[int(Register.MOUNTING)] == 0
+            assert not [c for c in transport.commands if c[0] == int(Register.MOUNTING)]
+        finally:
+            await device.close()
 
     asyncio.run(scenario())

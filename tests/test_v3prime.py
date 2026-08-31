@@ -9,18 +9,23 @@
 这个闭式不符，那么不是管线错了，就是那条依据错了，两者都必须当场知道。
 """
 
+import asyncio
 import dataclasses
+import inspect
 import json
 import math
 from dataclasses import replace
 
 import numpy as np
 import pytest
+from wt901.models import ImuSample, Vec3
 
 from gait.analysis.events import segment_cycles
 from gait.config import AlgoConfig
+from gait.contracts import GaitCycle
 from gait.core.zupt import detect_stance
 from gait.sync.anchor import AnchorEvent, AnchorPair, AnchorReport, ImpactPeak
+from gait.sync.selfcheck import drop_still_lead, stance_spans
 from gait.sync.timebase import SyncReport
 from gait.validate.synthetic import WalkSpec, generate_dual_walk
 from gait.validate.v3prime import (
@@ -68,14 +73,22 @@ def _anchor_report(deltas, *, aligned: float | None = None) -> AnchorReport:
 
 
 def _cycles(spec: WalkSpec | None = None):
-    """一对双足步态周期。`position=None`：跨足时序量只依赖事件时刻。"""
+    """一对双足步态周期。`position=None`：跨足时序量只依赖事件时刻。
+
+    **剔静止前导，且在细化之前剔** —— 与 `cli/v3prime.py::_cycles()` 同一条路径。
+    这个辅助函数一度不剔，于是整个文件都在一份被污染的数据上跑：占比读数高 7~10 pp、
+    Δ=30 ms 一档的相位结构被前导带得翻转（RAY-296）。测试的前提与工装的前提必须
+    是同一个，否则测试守不住工装。
+    """
     data = generate_dual_walk(spec or WalkSpec(duration_s=24.0))
     out = {}
     for foot in ("L", "R"):
         series = data[foot][0]
         stance = detect_stance(series.acc, series.gyr, series.fs, CFG)
+        kept = len(drop_still_lead(stance_spans(series.t, stance.stances), CFG))
+        stances = stance.stances[len(stance.stances) - kept :]
         cycles, _ = segment_cycles(
-            series.label, series.t, series.acc, series.gyr, stance.stances,
+            series.label, series.t, series.acc, series.gyr, stances,
             position=None, cfg=CFG,
         )
         out[foot] = cycles
@@ -237,12 +250,17 @@ def test_metric_bias_sign_says_which_way_the_reading_moved():
 # --- 配对双支撑差：对 Δ 敏感，且知道自己什么时候不可比 ------------------------
 
 
-@pytest.mark.parametrize("injected", [0.005, 0.010, 0.020, 0.050])
+@pytest.mark.parametrize("injected", [0.005, 0.010, 0.020, 0.030, 0.050])
 def test_paired_double_support_bias_equals_twice_delta(injected):
     """恒定 Δ 下配对差的偏差**精确等于 2Δ**（RAY-211/263 的机制）。
 
     这是双支撑期里真正承载同步偏差的量 —— 与它并列输出的 `fraction`（产品口径）
-    对 Δ 几乎免疫，见下一条。
+    对 Δ 极其迟钝，见下一条。
+
+    **0.030 这一档是 RAY-296 补的，而它此前独缺不是巧合。** Δ=30 ms 是 PRD §8 的
+    容差上界，也正是当时唯一读不出 2Δ 的那一档（报 `comparable: false`）。成因是
+    `_cycles()` 当时不剔静止前导 —— 剔掉之后它和其余档位一样精确。少了这一档，
+    "工装在容差上界处读不出偏差"这件事就没有任何测试会说出来。
     """
     left, right = _cycles()
     trial = evaluate_trial(
@@ -255,33 +273,72 @@ def test_paired_double_support_bias_equals_twice_delta(injected):
 
 
 def test_double_support_fraction_is_nearly_blind_to_offset():
-    """产品口径（均值/占比）对恒定 Δ 几乎免疫 —— 一类相位 +Δ、另一类 −Δ，均值抵消。
+    """产品口径（均值/占比）对恒定 Δ **极其迟钝，但不是完全免疫**。
 
     这条测试的用途是**防止误读**：V3′ 若只报这个口径，会得出「双支撑期不受同步
     误差影响」的错误结论，而配对口径同时显示 40 ms 的偏差。
+
+    残余不是噪声，有闭式：一类相位 +Δ、另一类 −Δ，求均值时按**个数之差**留下
+    `Δ·(n_右前 − n_左前) / N`（`sync/selfcheck.py` 模块文档 §3）。这里断言的是那个
+    闭式，而不是一个凑出来的绝对界 —— RAY-296 之前这里断言 `< 1e-4`，而那个"几乎
+    正好是零"是**静止前导污染出来的假象**，不是免疫性的证据。真实的残余比它大一个
+    数量级，却依然比配对口径迟钝约 74 倍，结论不变而理由是真的。
     """
     left, right = _cycles()
+    biased = shift_cycles(left, -0.020)
     trial = evaluate_trial(
-        "T", _anchor_report([0.020] * 8), shift_cycles(left, -0.020), right,
-        sync_quality=QUALITY,
+        "T", _anchor_report([0.020] * 8), biased, right, sync_quality=QUALITY,
     )
     fraction = next(m for m in trial.metrics if m.name == "double_support_fraction")
     paired = next(m for m in trial.metrics if m.name == "double_support_leading_difference")
-    assert abs(fraction.bias) < 1e-4
+
     assert abs(paired.bias) == pytest.approx(0.040, abs=1e-6)
+
+    n_left, n_right, _ = paired_double_support(biased, right).structure
+    step_time = float(np.median([c.stride_time for c in right])) / 2.0
+    # 符号：`bias = host − corrected`，而 corrected 的残余为零，所以 bias 就是主机
+    # 时基那一侧的残余。类别按「先离地的是哪只脚」分，左前那类变短 Δ、右前变长 Δ，
+    # 故留下 `Δ·(n_左前 − n_右前) / N`。实测与它符合到 13 位有效数字。
+    predicted = 0.020 * (n_left - n_right) / (n_left + n_right) / step_time
+    assert fraction.bias == pytest.approx(predicted, abs=2e-5)
+    # 结论不变：迟钝，但要说得出迟钝多少 —— 实测 74 倍，闸门取 50 倍留余量。
+    assert abs(fraction.bias) < abs(paired.bias / step_time) / 50
+
+
+def _cycle(foot, ic, to, idx=0):
+    """一条只有时刻是真的 `GaitCycle` —— 跨足时序量只看时刻，其余字段取合法值。"""
+    stance = to - ic
+    return GaitCycle(
+        foot=foot, idx=idx, t_ic=ic, t_to=to, t_ic_next=ic + 2.0,
+        stride_length=1.3, stride_time=2.0, gait_speed=0.65,
+        stance_time=stance, swing_time=2.0 - stance,
+        stance_ratio=100.0 * stance / 2.0, toe_clearance=0.05,
+        strike_angle=20.0, valid=True, confidence="normal",
+    )
 
 
 def test_structure_change_reports_nan_with_a_reason_not_a_wrong_number():
     """相位结构在校正下改变时，两次读数不是同一个量 —— 必须报 nan 并说明原因。
 
-    实测触发点：合成步态的两足事件落在同一采样网格上，校正的浮点回程（1 ulp）
-    就能翻转包含判定。真机上两足各有时间轴，罕见 —— 但「罕见」不是「不会」，
-    而给一个错数比给 nan 危险得多：nan 会被追问，错数会被引用。
+    **触发方式是手工构造的，这一点是有意的。** RAY-296 之前这条靠的是一个浮点巧合：
+    合成步态的两足事件落在同一采样网格上，而输入里残留的静止前导让包含判定对校正的
+    1 ulp 回程敏感。前导剔掉之后那个巧合不再发生，这条测试就跟着变绿了 —— 它守的
+    机制却一点没被验证过。
+
+    所以这里直接造一个**包含型翻转**：左足支撑区间在校正后落进右足区间内部，于是
+    这一相位从"正常配对"变成"被剔除的包含型"，结构三元组随之改变。机制与数据脱钩，
+    不再依赖任何巧合。
     """
-    left, right = _cycles()
+    # 右足固定；左足在主机时基下与右足部分重叠，校正（−0.5 s）后被完全包含。
+    right = [_cycle("R", 0.0, 1.0, 0), _cycle("R", 2.0, 3.0, 1), _cycle("R", 4.0, 5.0, 2)]
+    left = [_cycle("L", 0.7, 1.3, 0), _cycle("L", 2.7, 3.3, 1), _cycle("L", 3.8, 4.5, 2)]
+
+    host = paired_double_support(left, right)
+    fixed = paired_double_support(shift_cycles(left, 0.5), right)
+    assert host.structure != fixed.structure  # 前提自检：确实造出了结构变化
+
     trial = evaluate_trial(
-        "T", _anchor_report([0.030] * 8), shift_cycles(left, -0.030), right,
-        sync_quality=QUALITY,
+        "T", _anchor_report([0.5] * 8), left, right, sync_quality=QUALITY,
     )
     paired = next(m for m in trial.metrics if m.name == "double_support_leading_difference")
     assert not paired.comparable
@@ -311,6 +368,102 @@ def test_paired_support_with_no_overlap_is_nan_not_zero():
     paired = paired_double_support(left, far)
     assert math.isnan(paired.difference)
     assert paired.left_phases == 0 or paired.right_phases == 0
+
+
+# --- live 路径的 API 契约：不需要硬件就能验 -----------------------------------
+
+
+def test_live_path_api_contract():
+    """`live` 用到的每个外部符号都必须存在且签名兼容。
+
+    **这条测试的由来是一次真实事故。** `StreamConfig(rate_hz=...)` 与
+    `device.stream()` 两处都是凭印象写的 API：前者的字段其实叫 `rate`（`ReturnRate`
+    的值），后者的方法其实叫 `samples()`。`live` 需要两台真硬件、CI 覆盖不到，于是
+    错误一直等到受试者与设备都就位时才暴露，代价是一次上机。
+
+    而这些调用**根本不需要硬件就能验** —— 字段名、方法名、签名全是静态的。它们不该
+    靠上机来发现。这条测试的价值不在于修好那两处（那只是还债），而在于挡住下一个：
+    wt901 或 `device/ble.py` 再改接口时，这里会红，而不是等到现场。
+    """
+    from wt901 import ReturnRate, WT901Device
+
+    from gait.device.ble import StreamConfig, configure_streaming
+
+
+    # 取样：是 samples() 不是 stream()，且必须是异步生成器（`_consume` 用 `async for`）。
+    assert inspect.isasyncgenfunction(WT901Device.samples), "device.samples() 必须是异步生成器"
+    assert not hasattr(WT901Device, "stream"), "接口已变：出现了 stream()，请复核 _consume"
+
+    # 流配置：字段名是 rate（ReturnRate 的值），不是 rate_hz。
+    fields = {f.name for f in dataclasses.fields(StreamConfig)}
+    assert {"rate", "bandwidth", "algorithm"} <= fields, f"StreamConfig 字段变了：{fields}"
+    StreamConfig(rate=int(ReturnRate.HZ_200))  # 关键字与取值都必须被接受
+
+    # 下发：按位置传 (device, config)，所以验的是"能接住两个位置参数"，不是参数名。
+    assert len(inspect.signature(configure_streaming).parameters) >= 2
+
+
+def test_consume_reads_through_the_real_sampling_api():
+    """把 `_consume` 真的跑一遍 —— 上一条只验了库这一侧，管不住我们的调用点。
+
+    `test_live_path_api_contract` 断言的是 `WT901Device.samples` 存在、`stream`
+    不存在。那挡得住 wt901 改接口，**挡不住有人在 `_consume` 里再写一次
+    `device.stream()`** —— 库没变，那条断言照样绿。所以这里拿一个假设备把调用点
+    执行一遍：写错方法名就是 `AttributeError`，当场红。
+    """
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class _FakeDevice:
+        """只实现 `samples()`。**故意不实现 `stream()`** —— 写错就 AttributeError。"""
+
+        def __init__(self, samples):
+            self._samples = samples
+
+        async def samples(self):
+            for sample in self._samples:
+                yield sample
+
+    def _sample(t: float) -> ImuSample:
+        return ImuSample(
+            device_id="fake", t_host=t, seq=0,
+            accel=Vec3(1.0, 2.0, 3.0), gyro=Vec3(4.0, 5.0, 6.0),
+            euler=Vec3(0.0, 0.0, 0.0), raw=b"",
+        )
+
+    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+    # 与 `tests/test_device_ble.py` 同一个写法：本仓库不引 pytest-asyncio。
+    # `started=0.0`：采集起点划在第一个样本上，两个样本都不早于它，都该被收下。
+    # 丢弃早于起点的积压样本另有 `test_consume_discards_pre_capture_backlog` 把关。
+    asyncio.run(_consume(_FakeDevice([_sample(0.0), _sample(0.005)]), capture, 0.0))
+
+    assert capture.arrival == [0.0, 0.005]
+    assert capture.accel == [(1.0, 2.0, 3.0), (1.0, 2.0, 3.0)]
+    assert capture.gyro == [(4.0, 5.0, 6.0), (4.0, 5.0, 6.0)]
+
+
+@pytest.mark.parametrize(("fs", "expected"), [(200.0, 11), (100.0, 9), (50.0, 8)])
+def test_stream_config_maps_rate_to_the_device_register(fs, expected):
+    """映射到器件寄存器值，不是把赫兹数直接写下去。
+
+    这条同时执行到 `StreamConfig(...)` 的**构造**：字段名写错（例如写回当年的
+    `rate_hz`）在这里就是 `TypeError`，不必等上机。
+    """
+    from gait.cli.v3prime import _stream_config
+
+    assert _stream_config(fs).rate == expected
+
+
+def test_unsupported_rate_fails_loudly_instead_of_snapping():
+    """**取最近一档是最坏的处置。**
+
+    采集会照着一个与 `--nominal-fs` 不同的速率跑完，而分析正是用 `--nominal-fs`
+    回推包内时刻的 —— 两者不一致不会报错，只会让整趟的时间轴系统性地错。
+    宁可当场停在配置阶段。
+    """
+    from gait.cli.v3prime import HarnessError, _stream_config
+
+    with pytest.raises(HarnessError, match="不支持"):
+        _stream_config(150.0)
 
 
 # --- CLI：不需要硬件的那几条路径 ---------------------------------------------
@@ -452,70 +605,6 @@ def test_missing_foot_assignment_is_none_not_guessed(tmp_path, capsys):
 
 
 # --- live 路径的接口契约（无硬件可验，防的是"上机才发现调错 API"）-----------
-
-
-def test_live_path_api_contract():
-    """`live` 用到的每个外部符号都必须存在且签名兼容。
-
-    这条测试的由来是一次真实事故：`StreamConfig(rate_hz=...)` 与
-    `device.stream()` 两处都是凭印象写的 API，而 `live` 需要硬件、CI 覆盖不到，
-    于是错误一直等到受试者与两台模块都就位时才暴露，代价是一次上机。
-
-    这些调用**不需要硬件也能验**：字段名、方法名、签名都是静态的。所以它们不该
-    靠上机来发现。
-    """
-    import inspect
-
-    from wt901 import BleTransport, ReturnRate, WT901Device, scan
-    from wt901.models import ImuSample, Vec3
-    from wt901.transport.recording import RecordingTransport
-
-    from gait.device.ble import StreamConfig, configure_streaming
-    from gait.device.recorder import ThreadedRecordingWriter
-
-    # 取样：是 samples() 不是 stream()，且必须是异步生成器（`async for` 用它）。
-    assert inspect.isasyncgenfunction(WT901Device.samples), "device.samples() 必须是异步生成器"
-    assert not hasattr(WT901Device, "stream"), "接口已变：出现了 stream()，请复核 _consume"
-
-    # 流配置：字段名是 rate（ReturnRate 值），不是 rate_hz。
-    fields = {f.name for f in dataclasses.fields(StreamConfig)}
-    assert {"rate", "bandwidth", "algorithm"} <= fields, f"StreamConfig 字段变了：{fields}"
-    StreamConfig(rate=int(ReturnRate.HZ_200))  # 关键字与取值都必须被接受
-
-    # 下发：按位置传 (device, config)，所以验的是"能接住两个位置参数"，不是参数名。
-    assert len(inspect.signature(configure_streaming).parameters) >= 2
-
-    # 样本字段：`_consume` 逐样本取这三项。
-    sample_fields = {f.name for f in dataclasses.fields(ImuSample)}
-    assert {"t_host", "accel", "gyro"} <= sample_fields, sample_fields
-    assert {f.name for f in dataclasses.fields(Vec3)} >= {"x", "y", "z"}
-
-    # 连接与落盘链路的构造签名。
-    # scan 与 writer 走关键字，验名字；两个 transport 走位置，只验能接住几个。
-    assert "timeout" in inspect.signature(scan).parameters
-    assert len(inspect.signature(BleTransport.__init__).parameters) >= 2  # self + 目标设备
-    assert len(inspect.signature(RecordingTransport.__init__).parameters) >= 3  # self + 传输 + writer
-    writer_params = inspect.signature(ThreadedRecordingWriter.__init__).parameters
-    assert {"path", "device_id", "note"} <= set(writer_params), list(writer_params)
-
-
-@pytest.mark.parametrize(("fs", "expected"), [(200.0, 11), (100.0, 9), (50.0, 8)])
-def test_return_rate_maps_supported_rates(fs, expected):
-    from gait.cli.v3prime import _return_rate
-
-    assert _return_rate(fs) == expected
-
-
-def test_unsupported_rate_fails_loudly_instead_of_snapping():
-    """器件不支持的速率当场失败，不取最近的一档。
-
-    取最近一档会让采集速率与 `--nominal-fs` 悄悄不一致 —— 没有任何东西会报错，
-    只会让整趟数据的时间轴系统性地错。
-    """
-    from gait.cli.v3prime import HarnessError, _return_rate
-
-    with pytest.raises(HarnessError, match="不支持"):
-        _return_rate(150.0)
 
 
 # --- 时基不可信的趟次不得进入判定 --------------------------------------------
