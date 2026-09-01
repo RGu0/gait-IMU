@@ -375,15 +375,34 @@ async def _run_live(
     taps: int,
     tap_seconds: float,
     walk_seconds: float,
+    settle_seconds: float,
     mac_filters: list[str] | None,
     scan_timeout: float,
     cfg: AlgoConfig,
     echo=print,
 ) -> dict[str, Any]:
-    """采一趟：连接 → 对碰段 → 步行段 → 分析。
+    """采一趟：连接 → **稳定期** → 对碰段 → 步行段 → 分析。
 
     两段之间**不断开连接**：重连会重新协商连接参数，固有链路延迟随之改变，那时
     对碰段量到的 Δ 就不是步行段的 Δ 了（模块文档"一趟的结构"）。
+
+    ## 为什么开头要丢掉一段
+
+    两台设备是**顺序**建链、顺序配置的：第一台写完速率寄存器就开始满速推流，
+    而第二台此时还在建链与寄存器读写。于是**第二台**在流启动后的第 2~6 秒
+    掉到 160~184 样本/秒（稳态 200），第 7 秒才恢复。
+
+    实测（T-213-02，7/7 复现）：劣化跟随**连接顺序**而非器件 —— 对调 `--mac`
+    顺序后它整个跳到另一台上。静置与行走完全一致，与运动无关。
+
+    后果不是"少几个样本"：`build_timebase` 分窗拟合，**一个坏窗**就能让
+    `fs_window_spread` 从 1e-4 涨到 2.5e-2（判据 < 1e-3），整趟被判 `stable=False`。
+    而对碰恰好紧贴这一段 —— 实测 Δ 中位因此从真值约 0 被推到 +24~+50 ms，
+    而判据只有 5.5 ms。
+
+    所以这里在**消费者侧**丢弃 `settle_seconds` 内的样本：`arrivals.npz` 因此
+    只含干净数据，时基、`stable`、锚点全都自然地在剔除之后评估，下游无需改动。
+    **原始字节仍由 `RecordingTransport` 完整落进 `raw_*.jsonl`**，劣化段可审计。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     loop = asyncio.get_running_loop()
@@ -434,11 +453,17 @@ async def _run_live(
         # `loop.time()` 与 `ImuSample.t_host` 同源：CPython 的事件循环时钟就是
         # `time.monotonic`（`cli/linktest.py` 依赖的也是这一点）。
         started = loop.time()
+        # 稳定期内消费者照常跑（要把队列抽空），但样本一律丢弃。
+        capture_from = started + settle_seconds
         consumers = [
-            asyncio.ensure_future(_consume(device, capture, started))
+            asyncio.ensure_future(_consume(device, capture, capture_from))
             for device, capture in zip(devices, captures, strict=True)
         ]
         try:
+            if settle_seconds > 0:
+                echo("")
+                echo(f"▶ 稳定期（{settle_seconds:.0f} s）：两台都不要动，这一段不进分析。")
+                await _countdown(settle_seconds, echo)
             echo("")
             echo(f"▶ 对碰段（{tap_seconds:.0f} s）：两模块外壳干脆对碰 {taps} 次，")
             echo("  间隔至少半秒、不要打成节拍器，力道以不削顶为宜。")
@@ -475,6 +500,7 @@ async def _run_live(
         foot_assignment=np.asarray("explicit_mac" if mac_filters else "scan_order"),
         captured_utc=np.asarray(datetime.now(UTC).isoformat()),
         tap_window=np.asarray([tap_start, tap_stop]),
+        settle_seconds=np.asarray(settle_seconds),
     )
     # 走与 `replay` 完全相同的读取路径，好让两条路的产出逐字段一致 —— 现场看到的
     # 报告与事后复算出来的报告不一致，是最难查的那种不一致。
@@ -547,6 +573,9 @@ def load_trial_dir(path: Path, cfg: AlgoConfig | None = None) -> dict[str, Any]:
     payload = analyze_trial(
         str(data["label"]), captures[0], captures[1], float(data["nominal_fs"]), cfg,
         tap_window=window,
+    )
+    payload["settle_seconds"] = (
+        float(data["settle_seconds"]) if "settle_seconds" in data.files else None
     )
     for key in ("foot_assignment", "captured_utc"):
         # 缺席不补默认值：一份没记录左右足来源的旧数据，与一份记着 "scan_order"
@@ -681,6 +710,16 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--taps", type=int, default=20, help="对碰次数（默认 20）")
     live.add_argument("--tap-seconds", type=float, default=40.0, help="对碰段时长，s")
     live.add_argument("--walk-seconds", type=float, default=180.0, help="步行段时长，s")
+    live.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=10.0,
+        help=(
+            "开流后的稳定期，s。这一段的样本被丢弃，不进 arrivals.npz（原始字节仍落盘）。"
+            "默认 10 s 由 T-213-02 实测得出：第二台设备在第 2~6 秒掉到 160~184 样本/秒"
+            "（稳态 200），第 7 秒恢复，最差延至第 8 秒。设为 0 可关闭。"
+        ),
+    )
     live.add_argument("--mac", action="append", help="按 MAC 片段选设备，第一个为左足")
     live.add_argument("--scan-timeout", type=float, default=10.0)
     live.add_argument("--nominal-fs", type=float, default=200.0)
@@ -708,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                     taps=args.taps,
                     tap_seconds=args.tap_seconds,
                     walk_seconds=args.walk_seconds,
+                    settle_seconds=args.settle_seconds,
                     mac_filters=args.mac,
                     scan_timeout=args.scan_timeout,
                     cfg=cfg,

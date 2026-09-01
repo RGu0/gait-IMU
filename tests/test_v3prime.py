@@ -14,6 +14,7 @@ import dataclasses
 import inspect
 import json
 import math
+import types
 from dataclasses import replace
 
 import numpy as np
@@ -682,3 +683,103 @@ def test_consume_discards_pre_capture_backlog():
     asyncio.run(_consume(FakeDevice(), capture, 100.0))
     assert capture.arrival == [100.1, 100.2]
     assert len(capture.accel) == 2 and len(capture.gyro) == 2
+
+
+# --- 稳定期：丢掉开流后的劣化段 ------------------------------------------------
+
+
+def test_settle_discards_the_startup_degradation():
+    """稳定期内的样本一律不进 `capture`。
+
+    **这条测试钉的是一次真机事故。** 两台设备顺序建链，第一台写完速率寄存器就
+    满速推流，第二台此时还在建链与配置 —— 于是第二台在开流后第 2~6 秒掉到
+    160~184 样本/秒（稳态 200）。`build_timebase` 是分窗拟合，一个坏窗就让
+    `fs_window_spread` 从 1e-4 涨到 2.5e-2（判据 < 1e-3），整趟判 `stable=False`；
+    而对碰紧贴这一段，Δ 中位被从真值约 0 推到 +24~+50 ms —— 判据只有 5.5 ms。
+
+    实测参数见 T-213-02（7/7 复现，劣化跟随连接顺序而非器件）。
+    """
+    import asyncio
+
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class _FakeDevice:
+        def __init__(self, samples):
+            self._samples = samples
+
+        async def samples(self):
+            for sample in self._samples:
+                yield sample
+
+    def _sample(t):
+        return types.SimpleNamespace(
+            t_host=t,
+            accel=types.SimpleNamespace(x=1.0, y=2.0, z=3.0),
+            gyro=types.SimpleNamespace(x=4.0, y=5.0, z=6.0),
+        )
+
+    started, settle = 1000.0, 10.0
+    capture_from = started + settle
+    # 劣化段（started .. capture_from）与稳定段各若干
+    degraded = [_sample(started + t) for t in (0.0, 2.5, 6.0, 9.99)]
+    good = [_sample(capture_from), _sample(capture_from + 0.005)]
+
+    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+    asyncio.run(_consume(_FakeDevice(degraded + good), capture, capture_from))
+
+    assert capture.arrival == [capture_from, capture_from + 0.005], (
+        "稳定期内的样本必须被丢弃 —— 留着它们会拉塌第一个时基窗"
+    )
+
+
+def test_settle_seconds_is_recorded_so_replay_can_account_for_it():
+    """`settle_seconds` 必须落盘。
+
+    采集参数不落盘正是 `tap_window` 之前踩过的坑：边界只活在操作者记忆里，
+    `replay` 与任何离线复算都无从知道开头丢了多少，也就无法解释
+    `arrivals.npz` 的时间轴为何不是从 0 开始。
+    """
+    import inspect
+
+    from gait.cli.v3prime import _run_live, load_trial_dir
+
+    source = inspect.getsource(_run_live)
+    assert "settle_seconds=np.asarray(settle_seconds)" in source, (
+        "settle_seconds 必须写进 arrivals.npz"
+    )
+    # 读取侧：缺席时报 None，不补默认值（与 foot_assignment 同口径）
+    assert "settle_seconds" in inspect.getsource(load_trial_dir)
+
+
+def test_settle_defaults_to_the_measured_value_not_a_guess():
+    """默认值必须覆盖实测的劣化窗口。
+
+    T-213-02 实测：劣化在第 2~6 秒，最差延至第 8 秒，第 7 秒恢复（7/7 复现）。
+    默认值取 10 s —— 覆盖最差情形并留余量。**这个数是量出来的，不是拍的**，
+    调小它需要新的实测依据，所以这里钉住"不得小于实测最差恢复时刻"。
+    """
+    import argparse
+
+    from gait.cli.v3prime import main
+
+    captured = {}
+    real_parse = argparse.ArgumentParser.parse_args
+
+    def _capture(self, argv=None, namespace=None):
+        args = real_parse(self, argv, namespace)
+        captured.update(vars(args))
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = _capture
+    try:
+        with pytest.raises(SystemExit):
+            main(["live", "--subject", "S", "--trial", "1", "--out", "x"])
+    finally:
+        argparse.ArgumentParser.parse_args = real_parse
+
+    measured_worst_recovery_s = 8.0  # T-213-02 实测最差恢复时刻
+    assert captured["settle_seconds"] >= measured_worst_recovery_s, (
+        f"稳定期默认 {captured['settle_seconds']} s 短于实测最差恢复时刻 "
+        f"{measured_worst_recovery_s} s —— 劣化段会漏进 arrivals.npz"
+    )
+    assert captured["settle_seconds"] == 10.0
