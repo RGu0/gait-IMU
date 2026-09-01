@@ -785,3 +785,77 @@ def test_settle_defaults_to_the_measured_value_not_a_guess():
         f"{measured_residual_s} s —— 残留会漏进 arrivals.npz"
     )
     assert captured["settle_seconds"] == 3.0
+
+
+# --- 时基自适应：稳则不动，不稳才换区间 --------------------------------------
+
+
+def _uniform_capture(foot, n=4000, fs=200.0, t0=1000.0):
+    """一段规整的捕获。加计静置在 g 上，陀螺为零 —— 只用于走通判定路径。"""
+    from gait.cli.v3prime import FootCapture
+
+    return FootCapture(
+        foot=foot,
+        device_id=f"fake-{foot}",
+        arrival=[t0 + i / fs for i in range(n)],
+        accel=[(0.0, 0.0, 9.80665)] * n,
+        gyro=[(0.0, 0.0, 0.0)] * n,
+    )
+
+
+def test_stable_timebase_keeps_the_full_fit():
+    """时基稳时**不得**改用窗口拟合 —— 这条是本机制的防滥用锁。
+
+    在使用区间上重拟合，只有在"全程 fs 恒定"这个前提被推翻时才正当。
+    前提成立时若也换，就成了"换把尺子去凑一个好看的数"。
+
+    实测支撑（RAY-230 批次）：时基稳的那一趟，两种拟合给出同一个 Δ
+    （−1.12 ms vs −0.93 ms）；而两趟时基不稳的，全趟拟合给出 +202.74 / −29.27 ms，
+    窗口拟合给出 +5.70 / −2.93 ms。**恒等性正是"这不是凑数"的证据。**
+    """
+    from gait.cli.v3prime import analyze_trial
+
+    left, right = _uniform_capture("L"), _uniform_capture("R")
+    payload = analyze_trial("t", left, right, 200.0, tap_window=(1000.0, 1005.0))
+    assert payload["timebase_scope"] == "full", (
+        "规整数据的时基是稳的，不该触发窗口重拟合"
+    )
+
+
+def test_integrity_uses_measured_fs_not_nominal():
+    """完整性的分母必须是**实测**采样率。
+
+    器件晶振比标称低约 0.75%。按标称算的话，一条完美链路的逐秒到达率读作 0.988，
+    永远低于欠采门槛 —— RAY-200 的 `bench-runs/README.md` 记过这一条，
+    `cli/linktest.py` 已按此办，而 `analyze_trial` 此前漏了：
+    实测使 overall_rate 从 0.9995 被读成 0.9918。
+    """
+    import inspect
+
+    from gait.cli.v3prime import analyze_trial
+
+    source = inspect.getsource(analyze_trial)
+    assert "assess(left_arrival, anchor.left_sync.fs, cfg)" in source
+    assert "assess(right_arrival, anchor.right_sync.fs, cfg)" in source
+    assert "nominal_fs, cfg)" not in source.split("left_integrity")[1][:200], (
+        "完整性不得再用标称采样率作分母"
+    )
+
+
+def test_delta_gate_judges_the_tap_window_not_the_whole_trial():
+    """可信度按**测量区间**判，不按整趟。
+
+    Δ 只在对碰段测，步行段的空洞伤不到它。实测（RAY-230 批次）：
+    S1-sport 右足整趟 `unusable`（丢 207、18 处空洞），
+    而对碰窗口内 `grade=normal`、丢 0、0 空洞 —— 整趟二值会把这样一趟整个否掉。
+    另一趟（S1-flat）合计只丢 14 个样本（0.0075%）同样被整趟否掉。
+    """
+    import inspect
+
+    from gait.cli.v3prime import analyze_trial
+
+    source = inspect.getsource(analyze_trial)
+    assert "delta_left.grade" in source and "delta_right.grade" in source, (
+        "可信度须由测量区间的完整性决定"
+    )
+    assert "delta_region_integrity" in source, "测量区间的完整性须落进报告，便于复核"
