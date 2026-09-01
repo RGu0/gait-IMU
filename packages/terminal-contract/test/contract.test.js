@@ -142,13 +142,24 @@ describe("事件流", () => {
 });
 
 describe("能力缺口", () => {
-  it("calib 与 report 目前都是缺口，且各自带着 Issue", () => {
+  it("四个缺口各自指向认领它的 Issue", () => {
     expect(capabilityGap("calibration").issue).toBe("RAY-208");
     expect(capabilityGap("report").issue).toBe("RAY-224");
+    expect(capabilityGap("subject-directory").issue).toBe("RAY-322");
+    expect(capabilityGap("operator-auth").issue).toBe("RAY-323");
   });
 
-  it("尚无 Issue 认领的缺口把 issue 留空，而不是编一个", () => {
-    expect(capabilityGap("subject-directory").issue).toBeNull();
+  it("每个缺口都声明了归属，且非空的号长得像 Issue 号", () => {
+    // `issue` 允许为 null —— 那表示还没有 Issue 认领，界面会照实说，
+    // 编一个号会把这件事藏起来。所以这里不要求非空，要求的是字段存在，
+    // 以及非空时不是一个拼错的号：拼错的号看起来可以追查，点进去什么也没有。
+    for (const [name, entry] of Object.entries(CAPABILITIES)) {
+      expect(entry, name).toHaveProperty("issue");
+      expect(entry.summary.trim(), name).not.toBe("");
+      if (entry.issue !== null) {
+        expect(entry.issue, name).toMatch(/^RAY-\d+$/);
+      }
+    }
   });
 
   it("未登记的能力问不出结果", () => {

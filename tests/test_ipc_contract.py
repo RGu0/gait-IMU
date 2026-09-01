@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 from wt901 import Battery
@@ -291,6 +292,23 @@ def test_session_result_never_pretends_a_report_exists() -> None:
     assert result["report"]["issue"] == "RAY-224"
 
 
+def test_every_capability_declares_who_owns_it() -> None:
+    """每个缺口都要么指向一个 Issue，要么显式地说「没人认领」。
+
+    `issue` **允许为 None** —— 那表示这个缺口还没有 Issue 认领，界面会照实说。
+    编一个号会把这件事藏起来，所以这里不要求非空；要求的是这个字段**存在**，
+    以及非空时长得像一个 Issue 号（`RAY-123`）。一个拼错的号比没有号更糟：
+    它看起来可以追查，点进去却什么也没有。
+    """
+    for name, entry in contract()["capabilities"].items():
+        assert "issue" in entry, f"{name} 没有声明归属"
+        assert entry["summary"].strip(), f"{name} 缺少说明"
+        if entry["issue"] is not None:
+            assert re.fullmatch(r"RAY-\d+", entry["issue"]), (
+                f"{name} 的 issue {entry['issue']!r} 不像一个 Issue 号"
+            )
+
+
 def test_login_does_not_pretend_there_is_an_auth_backend() -> None:
     """非空就放行等于没有认证 —— 那是在假装一个后端存在。
 
@@ -329,8 +347,8 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
     [
         ("runCalibration", "calibration", "RAY-208"),
         ("reportFor", "report", "RAY-224"),
-        ("lookupSubject", "subject-directory", None),
-        ("login", "operator-auth", None),
+        ("lookupSubject", "subject-directory", "RAY-322"),
+        ("login", "operator-auth", "RAY-323"),
     ],
 )
 def test_gaps_are_visible_not_faked(

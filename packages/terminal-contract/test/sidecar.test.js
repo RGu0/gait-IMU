@@ -136,6 +136,6 @@ describe("真实 sidecar 往返（不经 mock）", () => {
   it("登录没有后端，因此以缺口出境而不是一个假的通过", async () => {
     // 「账号密码非空就放行」等于没有认证 —— 那是在假装一个后端存在。
     const outcome = await adapter.login({ organization: "康健社区卫生服务中心", password: "x" });
-    expect(adapter.gapOf(outcome)).toMatchObject({ capability: "operator-auth", issue: null });
+    expect(adapter.gapOf(outcome)).toMatchObject({ capability: "operator-auth", issue: "RAY-323" });
   });
 });
