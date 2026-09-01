@@ -26,14 +26,18 @@ import { createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 export function selectAdapter(scope = globalThis) {
   const bridge = scope?.gaitSidecar;
   if (bridge?.request) {
-    return { adapter: createSidecarAdapter((request) => bridge.request(request)), mocked: false };
+    return {
+      adapter: createSidecarAdapter((request) => bridge.request(request)),
+      mocked: false,
+      lifecycle: bridge.onSidecarState ? { subscribe: bridge.onSidecarState } : null,
+    };
   }
-  return { adapter: mockTerminalAdapter, mocked: true };
+  return { adapter: mockTerminalAdapter, mocked: true, lifecycle: null };
 }
 
 /* c8 ignore start -- 浏览器入口，由 vite 加载，不在 jsdom 测试里跑 */
 if (typeof document !== "undefined" && document.getElementById("root")) {
-  const { adapter, mocked } = selectAdapter(globalThis.window);
+  const { adapter, mocked, lifecycle } = selectAdapter(globalThis.window);
   createRoot(document.getElementById("root")).render(
     <React.StrictMode>
       {mocked ? (
@@ -41,7 +45,7 @@ if (typeof document !== "undefined" && document.getElementById("root")) {
           演示数据：未连接 sidecar，界面显示的不是真实采集结果。
         </div>
       ) : null}
-      <TerminalApp adapter={adapter} />
+      <TerminalApp adapter={adapter} lifecycle={lifecycle} />
     </React.StrictMode>,
   );
 }

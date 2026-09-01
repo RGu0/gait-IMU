@@ -21,6 +21,22 @@ import {
   interpret,
 } from "@gait/terminal-contract";
 
+/**
+ * sidecar 进程本身不在了。
+ *
+ * 这**不是** `TerminalFailure` —— 它没有六域错误码，因为它不属于六个域中的任何一个：
+ * 那六个说的是采集现场出了什么事，而进程没了是另一回事。文案由**主进程**给出
+ * （sidecar 死了写不了自己的讣告），渲染端同样只排版不改写。
+ */
+export class SidecarDown extends Error {
+  constructor(notice) {
+    super(notice.message);
+    this.name = "SidecarDown";
+    this.notice = notice;
+    this.recoverable = notice.recoverable !== false;
+  }
+}
+
 /** 携带 sidecar 给的码与动作。渲染端只排版这三段，不改写。 */
 export class TerminalFailure extends Error {
   constructor(error) {
@@ -44,6 +60,11 @@ export function createSidecarAdapter(transport, { now = () => Date.now() / 1000 
       method,
       params,
     });
+    // 主进程把进程级失败以响应的形状送回来。它先于契约解释处理：
+    // `interpret` 只认识 sidecar 说的话，而这句话是主进程说的。
+    if (response?.sidecarUnavailable) {
+      throw new SidecarDown(response.sidecarUnavailable);
+    }
     const outcome = interpret(response);
     if (outcome.status === STATUS_OK) return outcome.result;
     if (outcome.status === STATUS_UNIMPLEMENTED) return { unimplemented: outcome.gap };

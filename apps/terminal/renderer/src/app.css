@@ -895,3 +895,34 @@ body {
   padding: var(--space-2, 8px) var(--space-5, 20px);
   text-align: center;
 }
+
+/* sidecar 不在时的整页接管（RAY-250）。用 danger 而不是 warning：与能力缺口不同，
+   这不是「这条路还没建好」，是「现在什么都做不了」。 */
+.sidecar-down {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--color-surface, #fff);
+  padding: var(--space-6, 24px);
+  z-index: 100;
+}
+
+.sidecar-down__panel {
+  max-width: 620px;
+  text-align: center;
+  border-top: 3px solid var(--color-danger-border, #a12b2b);
+  padding-top: var(--space-6, 24px);
+}
+
+.sidecar-down__message {
+  font-size: 28px;
+  margin: 0 0 var(--space-4, 16px);
+  color: var(--color-text-primary, #1a1a1a);
+}
+
+.sidecar-down__action {
+  font-size: 18px;
+  margin: 0 0 var(--space-5, 20px);
+  color: var(--color-text-secondary, #5a5a5a);
+}
