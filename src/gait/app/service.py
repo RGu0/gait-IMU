@@ -112,18 +112,22 @@ class TerminalService:
     def _do_describe(self, _: dict[str, Any]) -> dict[str, Any]:
         return protocol.describe()
 
-    def _do_login(self, params: dict[str, Any]) -> Any:
-        organization = str(params.get("organization") or "").strip()
-        password = str(params.get("password") or "")
-        if not organization or not password:
-            return TerminalError(
-                code="E-BLE-1001",
-                message="机构账号与密码都要填写。",
-                action="请补齐后重试。",
-                blocking=True,
-            )
-        self.operator = {"organization": organization}
-        return self._snapshot()
+    def _do_login(self, _: dict[str, Any]) -> Any:
+        """P-00 机构登录 —— **没有后端**。
+
+        FR-01 写明操作员在 P-00 登录的是**机构账号**，用于识别「谁在操作」，与终端的
+        预配置技术凭据是两件事。RAY-225 交付的是后者（`cloud/tenancy.py` 的终端身份
+        与设备绑定），前者在本仓库没有任何实现。
+
+        先前这里写过一个「账号密码非空就放行」的检查，并给它套了 `E-BLE-1001`。
+        那有两处错：一是它在假装存在一个认证后端 —— 非空就通过等于没有认证；二是
+        `E-BLE` 说的是采集现场的连接故障，拿它表示一个登录问题，会在日志里造出一个
+        查无此事的设备故障（`__main__._fatal` 拒绝这么做的理由完全相同）。
+
+        字段非空这类表单校验留在渲染进程：它没有错误码，因此不受「文案与错误码同源」
+        约束 —— 那条约束管的是错误，不是表单。
+        """
+        return _Unimplemented("operator-auth")
 
     def _do_snapshot(self, _: dict[str, Any]) -> dict[str, Any]:
         return self._snapshot()
@@ -263,8 +267,8 @@ class TerminalService:
         links = tuple(
             LinkOutcome(
                 foot=label,  # type: ignore[arg-type]
-                disconnected_at=params.get("disconnectedAt", {}).get(label),
-                reconnects=int(params.get("reconnects", {}).get(label, 0)),
+                disconnected_at=(params.get("disconnectedAt") or {}).get(label),
+                reconnects=int((params.get("reconnects") or {}).get(label, 0)),
             )
             for label in ("L", "R")
         )

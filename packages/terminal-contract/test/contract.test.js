@@ -14,6 +14,7 @@ import {
   checkError,
   interpret,
 } from "../index.js";
+import { subscribeEvents } from "../../../apps/terminal/renderer/src/sidecarTerminalAdapter.js";
 
 const CONTRACT_FILE = fileURLToPath(
   new URL("../../../src/gait/app/contract.json", import.meta.url),
@@ -87,6 +88,56 @@ describe("渲染进程不得自造错误文案（RAY-248 验收第二条）", ()
 describe("版本不符要当场发现", () => {
   it("sidecar 报别的版本时拒绝解释", () => {
     expect(() => interpret({ v: "9.9", status: "ok", result: {} })).toThrow(/契约版本不符/);
+  });
+
+  it("缺 v 不是绕过版本检查的口子", () => {
+    expect(() => interpret({ status: "ok", result: {} })).toThrow(/契约版本不符/);
+  });
+
+  it("只有协议层失败允许不带 v —— 它先于版本协商发生", () => {
+    expect(() => interpret({ status: "error", protocolError: "未登记的方法 'nope'" })).toThrow(
+      /协议层失败/,
+    );
+  });
+});
+
+describe("事件流", () => {
+  it("按 seq 丢弃迟到或重放的事件", () => {
+    // 事件迟到会让步数倒退，而操作员看到的是一个正在变小的计数 ——
+    // 那比不更新更糟：它看起来是真的。
+    const seen = [];
+    subscribeEvents(
+      (emit) => {
+        emit({ kind: "event", topic: "session.tick", seq: 1, payload: { steps: { left: 10 } } });
+        emit({ kind: "event", topic: "session.tick", seq: 3, payload: { steps: { left: 30 } } });
+        emit({ kind: "event", topic: "session.tick", seq: 2, payload: { steps: { left: 20 } } });
+        return () => {};
+      },
+      (update) => seen.push(update.steps.left),
+    );
+    expect(seen).toEqual([10, 30]);
+  });
+
+  it("把三种话题分别接到界面要的字段上", () => {
+    const seen = [];
+    subscribeEvents(
+      (emit) => {
+        emit({ kind: "event", topic: "session.notice", seq: 1, payload: { text: "已记录一次停顿" } });
+        emit({
+          kind: "event",
+          topic: "session.aborted",
+          seq: 2,
+          payload: { error: { code: "E-BLE-1020" } },
+        });
+        emit({ kind: "response", status: "ok" });
+        return () => {};
+      },
+      (update) => seen.push(update),
+    );
+    expect(seen).toEqual([
+      { notices: ["已记录一次停顿"] },
+      { aborted: { code: "E-BLE-1020" } },
+    ]);
   });
 });
 

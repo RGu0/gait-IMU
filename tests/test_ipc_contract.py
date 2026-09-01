@@ -291,6 +291,31 @@ def test_session_result_never_pretends_a_report_exists() -> None:
     assert result["report"]["issue"] == "RAY-224"
 
 
+def test_login_does_not_pretend_there_is_an_auth_backend() -> None:
+    """非空就放行等于没有认证 —— 那是在假装一个后端存在。
+
+    也不该给它套一个 `E-BLE` 码：那说的是采集现场的连接故障，用它表示登录问题
+    会在日志里造出一个查无此事的设备故障。
+    """
+    response = TerminalService().handle(
+        {"id": "1", "method": "login", "params": {"organization": "康健", "password": "x"}}
+    )
+    assert response["status"] == protocol.STATUS_UNIMPLEMENTED
+    assert response["unimplemented"]["capability"] == "operator-auth"
+
+
+def test_session_result_tolerates_absent_link_params() -> None:
+    service = _finished_session()
+    result = service.handle(
+        {
+            "id": "r",
+            "method": "sessionResult",
+            "params": {"wearing": "pass", "disconnectedAt": None, "reconnects": None},
+        }
+    )["result"]
+    assert result["integrity"]["complete"] is True
+
+
 def test_create_subject_uses_the_real_uuid_source() -> None:
     import uuid
 
@@ -305,6 +330,7 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
         ("runCalibration", "calibration", "RAY-208"),
         ("reportFor", "report", "RAY-224"),
         ("lookupSubject", "subject-directory", None),
+        ("login", "operator-auth", None),
     ],
 )
 def test_gaps_are_visible_not_faked(

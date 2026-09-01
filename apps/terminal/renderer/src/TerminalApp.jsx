@@ -59,6 +59,9 @@ export function TerminalApp({ adapter }) {
   // 报告预览的缺口（RAY-224）。与 report 分开存：一个「打不开」和一个「还没接通」
   // 在界面上要说不同的话。
   const [reportGap, setReportGap] = useState(null);
+  // 登录（P-00）也没有后端。不接住这个缺口，`await adapter.login()` 不抛错，
+  // 界面就会直接进工作台 —— 那正是「静默穿过一个不存在的步骤」。
+  const [loginGap, setLoginGap] = useState(null);
 
   async function navigate(label) {
     const next = NAV_STAGE[label];
@@ -83,7 +86,11 @@ export function TerminalApp({ adapter }) {
     setLoading(true);
     setError("");
     try {
-      await adapter.login(credentials);
+      const outcome = await adapter.login(credentials);
+      if (outcome?.unimplemented) {
+        setLoginGap(outcome.unimplemented);
+        return;
+      }
       setSnapshot(await adapter.snapshot());
       setStage(STAGE.hub);
     } catch (loginError) {
@@ -256,6 +263,10 @@ export function TerminalApp({ adapter }) {
         }}
       />
     );
+  }
+
+  if (loginGap) {
+    return <CapabilityGap gap={loginGap} step={0} onBack={() => setLoginGap(null)} />;
   }
 
   if (stage === STAGE.reportPreview && reportGap) {

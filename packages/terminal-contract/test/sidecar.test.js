@@ -120,10 +120,22 @@ describe("真实 sidecar 往返（不经 mock）", () => {
   });
 
   it("错误带着 sidecar 给的码与动作到达渲染端", async () => {
-    await expect(adapter.login({ organization: "", password: "" })).rejects.toMatchObject({
-      name: "TerminalFailure",
-      domain: "E-BLE",
-    });
-    await adapter.login({ organization: "康健社区卫生服务中心", password: "x" }).catch(() => {});
+    // 走一条真实的短步行：180 s 配置下只走 30 s，有效时长不到 70%，
+    // 于是 TimedWalk.verdict() 判 invalid，服务端附上 E-QLT-5002。
+    // 这条路的错误码与文案全部由 sidecar 推出，渲染端一个字也没写。
+    await adapter.call("startSession", { now: 0 });
+    await adapter.call("stopSession", { now: 30 });
+    const result = await adapter.sessionResult({ wearing: "pass" });
+
+    expect(result.overall).toBe("invalid");
+    expect(result.error.code).toBe("E-QLT-5002");
+    expect(result.error.action).toMatch(/重新检测/);
+    expect(result.error.message).toMatch(/70%/);
+  });
+
+  it("登录没有后端，因此以缺口出境而不是一个假的通过", async () => {
+    // 「账号密码非空就放行」等于没有认证 —— 那是在假装一个后端存在。
+    const outcome = await adapter.login({ organization: "康健社区卫生服务中心", password: "x" });
+    expect(adapter.gapOf(outcome)).toMatchObject({ capability: "operator-auth", issue: null });
   });
 });

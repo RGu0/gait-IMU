@@ -39,7 +39,9 @@ export function interpret(response) {
   if (!response || typeof response !== "object") {
     throw new ContractViolation("响应不是对象");
   }
-  if (response.v !== undefined && response.v !== IPC_CONTRACT_VERSION) {
+  // 协议层失败先于版本协商发生（两端连话都没对上），所以只有它允许不带 v。
+  // 放行任何缺 v 的响应，等于给版本检查开一个「不带版本就能穿过」的口子。
+  if (!response.protocolError && response.v !== IPC_CONTRACT_VERSION) {
     throw new ContractViolation(
       `IPC 契约版本不符：sidecar 说 ${response.v}，渲染端是 ${IPC_CONTRACT_VERSION}`,
     );
