@@ -1,0 +1,98 @@
+{
+  "ipc_contract_version": "1.0",
+  "data_contract_version": "1.1",
+  "error_domains": {
+    "E-BLE": {
+      "range": [
+        1000,
+        1999
+      ],
+      "about": "连接、到达率、电量、写盘"
+    },
+    "E-WEAR": {
+      "range": [
+        2000,
+        2999
+      ],
+      "about": "佩戴：戴反、松动"
+    },
+    "E-CAL": {
+      "range": [
+        3000,
+        3999
+      ],
+      "about": "标定：出厂参数缺失、安装角不收敛"
+    },
+    "E-SYNC": {
+      "range": [
+        4000,
+        4999
+      ],
+      "about": "双足同步残差"
+    },
+    "E-QLT": {
+      "range": [
+        5000,
+        5999
+      ],
+      "about": "质量：有效时长、有效步数"
+    },
+    "E-NET": {
+      "range": [
+        6000,
+        6999
+      ],
+      "about": "上传与网络"
+    }
+  },
+  "codes": {
+    "E-BLE-1001": "模块未连接",
+    "E-BLE-1002": "模块电量不足",
+    "E-BLE-1003": "模块缺少出厂校准",
+    "E-BLE-1004": "模块电量读不到",
+    "E-BLE-1005": "开流前电量准入未通过",
+    "E-BLE-1010": "链路到达率不足",
+    "E-BLE-1020": "采集中长断连或写盘错误",
+    "E-CAL-3001": "出厂标定参数缺失",
+    "E-QLT-5002": "有效步行时长低于配置的 70%",
+    "E-QLT-5003": "会话完整性不足，双足指标不可算"
+  },
+  "methods": [
+    "createSubject",
+    "describe",
+    "deviceSupport",
+    "listRecords",
+    "login",
+    "lookupSubject",
+    "recheckDevices",
+    "reportFor",
+    "runCalibration",
+    "runPreflight",
+    "sessionResult",
+    "snapshot",
+    "startSession",
+    "stopSession"
+  ],
+  "event_topics": [
+    "session.tick",
+    "session.notice",
+    "session.aborted"
+  ],
+  "capabilities": {
+    "calibration": {
+      "implemented": false,
+      "issue": "RAY-208",
+      "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未实现；gait/calib/ 目前是空包"
+    },
+    "report": {
+      "implemented": false,
+      "issue": "RAY-224",
+      "summary": "本地基础报告尚未实现；gait/report/ 目前是空包"
+    },
+    "subject-directory": {
+      "implemented": false,
+      "issue": null,
+      "summary": "按机构档案号查找受试者需要云端加密身份库（FR-02：身份字段仅存云端）；本地无此后端，且尚无 Issue 认领"
+    }
+  }
+}
