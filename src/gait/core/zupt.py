@@ -360,7 +360,7 @@ def _fold_harmonic(value: float, seed: float) -> float:
 
 
 def _estimate_period(
-    swing: np.ndarray, impact: np.ndarray, fs: float, cfg: AlgoConfig, limit: int
+    swing: np.ndarray, impact: np.ndarray, fs: float, cfg: AlgoConfig
 ) -> PeriodReport | None:
     """估步态周期并划出周期边界。不是步态时返回 None。
 
@@ -416,14 +416,6 @@ def _estimate_period(
     if span_end - span_start <= 0:
         return None
 
-    # 范围之内再搜**相位**。峰只用来划范围，不用来定相位：`‖ω‖` 的最大值出现在蹬离/
-    # 触地，那是**紧挨着支撑相**的位置而不是摆动中段，按峰对齐恰好把边界推到支撑相边
-    # 上（实测边界 932/1154 分别落进支撑相 867–1001 与 1089–1223，那一步被劈成两半，
-    # 两个周期的 `argmin` 各自跑到隔壁步上，谁也不标它）。
-    #
-    # 改为直接搜：起点在第一个峰之前一个周期以内滑动，取让**各边界处 `‖ω‖` 平均值最大**
-    # 的那一个。这是把"边界要落在脚动得最快的地方"写成目标函数，不经过任何峰选。
-    # 边界落在摆动相与落在支撑相的得分差一个数量级，选起来没有悬念。
     # 必须把**整整一个周期**的相位都试到。按 `max(0, span_start - period)` 截断看着无害，
     # 实则当第一个峰离记录开头不足一个周期时会砍掉一整段相位，最优解恰好落在被砍掉的
     # 那段里时，选出来的网格是反相的 —— 每条边界都落进支撑相。相位是模周期的量，越界
@@ -504,14 +496,6 @@ def _period_stance(
     half = cfg.soft_zupt_span_samples // 2
     limit = math.cos(math.radians(cfg.stance_attitude_tolerance_deg))
     for start, end in period.bounds:
-        # 姿态校验（结构第 5 步）先**筛候选**，再在候选里取 `argmin`，而不是取全局
-        # `argmin` 之后再否决它。周期数定死了"有几步"，姿态回答的是"这一步在哪"——
-        # 它是个定位量，用作事后一票否决就浪费了：某一步被噪声搅乱时，全局最低点会
-        # 跑到相邻摆动相的某个偶然安静样本上，否决掉它就等于连**这一步本来落在哪**
-        # 一起丢掉。先筛后取则仍然把它定位回那一步里，只是置信度低。
-        #
-        # 整个周期无一刻脚是平的，才真的没有可信的零速时刻，此时才丢：漏检只损失
-        # 一步，误检毁掉整条轨迹。
         # 这个周期**只要有**硬检测就整格让开。周期路径是用来救"一个硬检测都没有"的
         # 周期的（实测快速档 87% 的周期就是这样），不是用来给已经检出的那一步加注的。
         #
@@ -525,6 +509,14 @@ def _period_stance(
         # 被劈开的那一步 —— 那正是当初收窄这条判据的理由，现在它不成立了。
         if hard[start:end].any():
             continue
+        # 姿态校验（结构第 5 步）先**筛候选**，再在候选里取 `argmin`，而不是取全局
+        # `argmin` 之后再否决它。周期数定死了"有几步"，姿态回答的是"这一步在哪"——
+        # 它是个定位量，用作事后一票否决就浪费了：某一步被噪声搅乱时，全局最低点会
+        # 跑到相邻摆动相的某个偶然安静样本上，否决掉它就等于连**这一步本来落在哪**
+        # 一起丢掉。先筛后取则仍然把它定位回那一步里，只是置信度低。
+        #
+        # 整个周期无一刻脚是平的，才真的没有可信的零速时刻，此时才丢：漏检只损失
+        # 一步，误检毁掉整条轨迹。
         candidates = np.arange(start, end)
         if reference is not None:
             candidates = candidates[unit_acc[candidates] @ reference >= limit]
@@ -575,7 +567,11 @@ def _period_confidence(
         marked = soft[start:end]
         if not marked.any():
             continue
-        minimum = float(swing[start:end].min())
+        # 取**被标中的**样本里的最低值，而不是整个周期的最低值。姿态校验否决掉全局
+        # 最低点时（那一刻脚不平，多半在摆动相），用它算权重就等于拿一个**没有采用的**
+        # 时刻去给采用的时刻背书，报出来的置信度会高于实际依据。两者只在姿态否决时
+        # 不同，而那恰恰是最该压低置信度的情形。
+        minimum = float(swing[start:end][marked].min())
         confidence[start:end] = np.where(
             marked, ceiling * reference / (reference + minimum), 0.0
         )
@@ -673,7 +669,7 @@ def detect_stance(
     # 尖锐事件，滑窗平均会把它削矮并向两侧抹开，而这里要的正是它的位置。
     swing = np.linalg.norm(omega, axis=1)
     impact = np.abs(np.linalg.norm(detection_acc, axis=1) - gravity)
-    period = _estimate_period(swing, impact, fs, cfg, n)
+    period = _estimate_period(swing, impact, fs, cfg)
 
     if period is None:
         # 没有可辨认的步态：静立、足部被固定，或段太短。阈值判据在这里是对的 ——
