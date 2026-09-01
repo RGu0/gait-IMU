@@ -14,7 +14,8 @@
     "@gait/report-template": "workspace:*",
     "@vitejs/plugin-react": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "@gait/terminal-contract": "workspace:*"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "latest",

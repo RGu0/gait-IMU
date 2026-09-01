@@ -826,3 +826,72 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* 能力缺口（RAY-248）。刻意用 warning 描边而不是 danger：设备没出问题，
+   是这条通路还没建好 —— 用 danger 会让操作员去排查一个不存在的故障。 */
+.capability-gap {
+  border: 1px solid var(--color-warning-border, #d9a441);
+  background: var(--color-warning-surface, #fdf6e8);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-5, 20px);
+}
+
+.capability-gap__summary {
+  font-size: 20px;
+  color: var(--color-text-primary, #1a1a1a);
+  margin: 0 0 var(--space-3, 12px);
+}
+
+.capability-gap__note {
+  font-size: 15px;
+  color: var(--color-text-secondary, #5a5a5a);
+  margin: 0;
+}
+
+/* 会话判定摘要（RAY-248）。三态各有自己的边色 —— indeterminate 不借用
+   invalid 的红，因为「评不了」要操作员去 P-06 确认左右，不是去重测。 */
+.verdict-summary { margin-bottom: var(--space-5, 20px); }
+
+.verdict-summary__headline {
+  font-size: 24px;
+  margin: 0 0 var(--space-4, 16px);
+  color: var(--color-text-primary, #1a1a1a);
+}
+
+.verdict-summary[data-overall="indeterminate"] .verdict-summary__headline {
+  color: var(--color-warning-text, #8a6116);
+}
+
+.verdict-summary[data-overall="invalid"] .verdict-summary__headline {
+  color: var(--color-danger-text, #a12b2b);
+}
+
+.verdict-summary__checks {
+  display: flex;
+  gap: var(--space-6, 24px);
+  margin: 0 0 var(--space-4, 16px);
+}
+
+.verdict-summary__checks dt {
+  font-size: 13px;
+  color: var(--color-text-secondary, #5a5a5a);
+}
+
+.verdict-summary__checks dd {
+  margin: 0;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdict-summary__problem { display: block; font-size: 14px; }
+
+/* 走 mock 时的常驻提示（RAY-248）。一个悄悄用着假数据的窗口与一个连着真后端的
+   窗口长得一模一样 —— 而两者的结论完全不能互换。 */
+.mock-banner {
+  background: var(--color-warning-surface, #fdf6e8);
+  border-bottom: 1px solid var(--color-warning-border, #d9a441);
+  color: var(--color-warning-text, #8a6116);
+  font-size: 14px;
+  padding: var(--space-2, 8px) var(--space-5, 20px);
+  text-align: center;
+}

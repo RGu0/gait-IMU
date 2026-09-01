@@ -12,6 +12,8 @@ import { ResultScreen } from "./ResultScreen.jsx";
 import { SubjectScreen } from "./SubjectScreen.jsx";
 import { TestRunScreen } from "./TestRunScreen.jsx";
 import { WearGuideScreen } from "./WearGuideScreen.jsx";
+import { CapabilityGap } from "./CapabilityGap.jsx";
+import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
 
 /**
  * Screens are selected by an explicit `stage` rather than by inferring one from
@@ -54,6 +56,12 @@ export function TerminalApp({ adapter }) {
   const [records, setRecords] = useState([]);
   const [report, setReport] = useState(null);
   const [deviceInfo, setDeviceInfo] = useState(null);
+  // 报告预览的缺口（RAY-224）。与 report 分开存：一个「打不开」和一个「还没接通」
+  // 在界面上要说不同的话。
+  const [reportGap, setReportGap] = useState(null);
+  // 登录（P-00）也没有后端。不接住这个缺口，`await adapter.login()` 不抛错，
+  // 界面就会直接进工作台 —— 那正是「静默穿过一个不存在的步骤」。
+  const [loginGap, setLoginGap] = useState(null);
 
   async function navigate(label) {
     const next = NAV_STAGE[label];
@@ -78,7 +86,11 @@ export function TerminalApp({ adapter }) {
     setLoading(true);
     setError("");
     try {
-      await adapter.login(credentials);
+      const outcome = await adapter.login(credentials);
+      if (outcome?.unimplemented) {
+        setLoginGap(outcome.unimplemented);
+        return;
+      }
       setSnapshot(await adapter.snapshot());
       setStage(STAGE.hub);
     } catch (loginError) {
@@ -190,6 +202,27 @@ export function TerminalApp({ adapter }) {
     );
   }
 
+  // 真实后端下 P-09 没有指标可显示 —— 指标出自基础报告，而基础报告（RAY-224）
+  // 还不存在。能诚实显示的只有会话判定本身（它是真的），外加一个说明为什么到此
+  // 为止的缺口。用 mock 走的路径不带 report 字段，因此不进这个分支。
+  if (stage === STAGE.result && result?.report?.status === "unimplemented") {
+    return (
+      <CapabilityGap
+        gap={{
+          capability: result.report.capability,
+          issue: result.report.issue,
+          summary: "本地基础报告尚未实现，因此这次检测没有生成报告。",
+        }}
+        step={6}
+        details={<SessionVerdictSummary result={result} />}
+        onBack={() => {
+          setResult(null);
+          setStage(STAGE.hub);
+        }}
+      />
+    );
+  }
+
   if (stage === STAGE.result && result) {
     return (
       <ResultScreen
@@ -220,8 +253,30 @@ export function TerminalApp({ adapter }) {
         records={records}
         onNavigate={navigate}
         onOpenRecord={async (record) => {
-          setReport(await adapter.reportFor(record));
+          const opened = await adapter.reportFor(record);
+          if (opened?.unimplemented) {
+            setReportGap(opened.unimplemented);
+          } else {
+            setReport(opened);
+          }
           setStage(STAGE.reportPreview);
+        }}
+      />
+    );
+  }
+
+  if (loginGap) {
+    return <CapabilityGap gap={loginGap} step={0} onBack={() => setLoginGap(null)} />;
+  }
+
+  if (stage === STAGE.reportPreview && reportGap) {
+    return (
+      <CapabilityGap
+        gap={reportGap}
+        step={7}
+        onBack={() => {
+          setReportGap(null);
+          setStage(STAGE.records);
         }}
       />
     );

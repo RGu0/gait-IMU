@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, CountdownFocus } from "@gait/design-system";
 import { WizardShell } from "./WizardShell.jsx";
+import { CapabilityGap } from "./CapabilityGap.jsx";
 
 /**
  * P-07 — session calibration, in two sub-steps that advance on their own:
@@ -56,6 +57,9 @@ export function CalibrationScreen({ runCalibration, onDone, onAbandon, tickMs = 
   const [progress, setProgress] = useState(STEPS[0].total);
   const [failure, setFailure] = useState(null);
   const [attempts, setAttempts] = useState(0);
+  // 会话标定（RAY-208）还不存在。sidecar 因此返回 unimplemented 而不是一个
+  // 看起来通过了的 verdict —— 这一步必须停下来说清楚，不能悄悄放行。
+  const [gap, setGap] = useState(null);
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
 
@@ -80,7 +84,9 @@ export function CalibrationScreen({ runCalibration, onDone, onAbandon, tickMs = 
       }
       const verdict = await runCalibration();
       if (cancelled) return;
-      if (verdict.ok) {
+      if (verdict?.unimplemented) {
+        setGap(verdict.unimplemented);
+      } else if (verdict.ok) {
         onDoneRef.current();
       } else {
         setFailure(verdict.reason);
@@ -95,6 +101,18 @@ export function CalibrationScreen({ runCalibration, onDone, onAbandon, tickMs = 
     setFailure(null);
     setStepIndex(0);
     setProgress(STEPS[0].total);
+  }
+
+  if (gap) {
+    return (
+      <CapabilityGap
+        gap={gap}
+        step={5}
+        onBack={onAbandon}
+        onContinue={onDone}
+        continueLabel="跳过标定，继续检测"
+      />
+    );
   }
 
   if (failure) {
