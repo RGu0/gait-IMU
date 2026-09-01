@@ -14,6 +14,7 @@ import dataclasses
 import inspect
 import json
 import math
+import types
 from dataclasses import replace
 
 import numpy as np
@@ -432,7 +433,9 @@ def test_consume_reads_through_the_real_sampling_api():
 
     capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
     # 与 `tests/test_device_ble.py` 同一个写法：本仓库不引 pytest-asyncio。
-    asyncio.run(_consume(_FakeDevice([_sample(0.0), _sample(0.005)]), capture))
+    # `started=0.0`：采集起点划在第一个样本上，两个样本都不早于它，都该被收下。
+    # 丢弃早于起点的积压样本另有 `test_consume_discards_pre_capture_backlog` 把关。
+    asyncio.run(_consume(_FakeDevice([_sample(0.0), _sample(0.005)]), capture, 0.0))
 
     assert capture.arrival == [0.0, 0.005]
     assert capture.accel == [(1.0, 2.0, 3.0), (1.0, 2.0, 3.0)]
@@ -600,3 +603,185 @@ def test_missing_foot_assignment_is_none_not_guessed(tmp_path, capsys):
     payload = json.loads((trial_dir / "trial.json").read_text(encoding="utf-8"))
     assert payload["foot_assignment"] is None
     assert "未记录" in capsys.readouterr().out
+
+
+# --- live 路径的接口契约（无硬件可验，防的是"上机才发现调错 API"）-----------
+
+
+# --- 时基不可信的趟次不得进入判定 --------------------------------------------
+
+
+def _mark_unstable(trial_dir):
+    """把一趟的 trial.json 改成"时基不稳"，模拟丢包严重的链路。"""
+    path = trial_dir / "trial.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["timebase_trustworthy"] = False
+    payload["timebase_note"] = "测试注入"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_unstable_timebase_trial_is_excluded_from_verdict(tmp_path, capsys):
+    """时基不稳的趟次必须被排除，且**排除本身要出现在输出里**。
+
+    静默丢弃会让「5 人 × 3 趟」变成谎话：样本量看起来永远是满的，而判定其实
+    只用了其中几趟。
+    """
+    from gait.cli.v3prime import main
+
+    good = _fake_capture(tmp_path / "g", delta=0.013)
+    bad = _fake_capture(tmp_path / "b", delta=0.013)
+    main(["replay", "--trial-dir", str(good)])
+    main(["replay", "--trial-dir", str(bad)])
+    _mark_unstable(bad)
+
+    out_path = tmp_path / "verdict.json"
+    assert main(["verdict", "--trials", str(good), str(bad), "--out", str(out_path)]) == 0
+    summary = json.loads(out_path.read_text(encoding="utf-8"))
+    assert summary["verdict"]["trials"] == 1  # 只有好的那一趟进了判定
+    text = capsys.readouterr().out
+    assert "已排除 1 趟" in text and "时基不稳" in text
+
+
+def test_untrustworthy_timebase_blocks_metric_bias(tmp_path):
+    """时基不可信时不算指标偏差 —— 校正量本身就来自那条跑偏的时间轴。"""
+    from gait.cli.v3prime import load_trial_dir
+
+    trial_dir = _fake_capture(tmp_path, delta=0.013)
+    payload = load_trial_dir(trial_dir)
+    # 合成夹具的链路是干净的，应当判为可信 —— 这条同时守着「别把好数据也拒了」。
+    assert payload["timebase_trustworthy"] is True
+    assert payload["trial"] is not None
+
+
+def test_consume_discards_pre_capture_backlog():
+    """早于采集起点的样本必须丢弃 —— 它们是配置阶段积压在队列里的残留。
+
+    这条测试的由来是一次真实采集：没有这道过滤时，arrival 跨度比名义采集时长
+    多出 5.5 s，时基回归据此把实测采样率读成 191/178 Hz（真值 198），残差 p95
+    涨到 0.5~1.3 s，整趟被判 unusable —— 而同一时段 linktest 测得链路缺失率
+    只有 0.02%，链路本身是好的。
+    """
+    import asyncio
+
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class FakeVec:
+        x = y = z = 1.0
+
+    class FakeSample:
+        def __init__(self, t):
+            self.t_host = t
+            self.accel = self.gyro = FakeVec()
+
+    class FakeDevice:
+        async def samples(self):
+            # 前三个是积压（早于 started=100.0），后两个是真正的采集样本。
+            for t in (97.5, 98.0, 99.9, 100.1, 100.2):
+                yield FakeSample(t)
+
+    capture = FootCapture(foot="L", device_id="x", arrival=[], accel=[], gyro=[])
+    asyncio.run(_consume(FakeDevice(), capture, 100.0))
+    assert capture.arrival == [100.1, 100.2]
+    assert len(capture.accel) == 2 and len(capture.gyro) == 2
+
+
+# --- 稳定期：丢掉开流后的劣化段 ------------------------------------------------
+
+
+def test_settle_discards_the_startup_degradation():
+    """稳定期内的样本一律不进 `capture`。
+
+    **这条测试钉的是一次真机事故。** 两台设备顺序建链，第一台写完速率寄存器就
+    满速推流，第二台此时还在建链与配置 —— 于是第二台在开流后第 2~6 秒掉到
+    160~184 样本/秒（稳态 200）。`build_timebase` 是分窗拟合，一个坏窗就让
+    `fs_window_spread` 从 1e-4 涨到 2.5e-2（判据 < 1e-3），整趟判 `stable=False`；
+    而对碰紧贴这一段，Δ 中位被从真值约 0 推到 +24~+50 ms —— 判据只有 5.5 ms。
+
+    实测参数见 T-213-02（7/7 复现，劣化跟随连接顺序而非器件）。
+    """
+    import asyncio
+
+    from gait.cli.v3prime import FootCapture, _consume
+
+    class _FakeDevice:
+        def __init__(self, samples):
+            self._samples = samples
+
+        async def samples(self):
+            for sample in self._samples:
+                yield sample
+
+    def _sample(t):
+        return types.SimpleNamespace(
+            t_host=t,
+            accel=types.SimpleNamespace(x=1.0, y=2.0, z=3.0),
+            gyro=types.SimpleNamespace(x=4.0, y=5.0, z=6.0),
+        )
+
+    started, settle = 1000.0, 10.0
+    capture_from = started + settle
+    # 劣化段（started .. capture_from）与稳定段各若干
+    degraded = [_sample(started + t) for t in (0.0, 2.5, 6.0, 9.99)]
+    good = [_sample(capture_from), _sample(capture_from + 0.005)]
+
+    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+    asyncio.run(_consume(_FakeDevice(degraded + good), capture, capture_from))
+
+    assert capture.arrival == [capture_from, capture_from + 0.005], (
+        "稳定期内的样本必须被丢弃 —— 留着它们会拉塌第一个时基窗"
+    )
+
+
+def test_settle_seconds_is_recorded_so_replay_can_account_for_it():
+    """`settle_seconds` 必须落盘。
+
+    采集参数不落盘正是 `tap_window` 之前踩过的坑：边界只活在操作者记忆里，
+    `replay` 与任何离线复算都无从知道开头丢了多少，也就无法解释
+    `arrivals.npz` 的时间轴为何不是从 0 开始。
+    """
+    import inspect
+
+    from gait.cli.v3prime import _run_live, load_trial_dir
+
+    source = inspect.getsource(_run_live)
+    assert "settle_seconds=np.asarray(settle_seconds)" in source, (
+        "settle_seconds 必须写进 arrivals.npz"
+    )
+    # 读取侧：缺席时报 None，不补默认值（与 foot_assignment 同口径）
+    assert "settle_seconds" in inspect.getsource(load_trial_dir)
+
+
+def test_settle_defaults_to_the_measured_value_not_a_guess():
+    """默认值必须覆盖 `started` 之后的残留劣化。
+
+    劣化的主体在**消费者启动之前**的积压里，已由 `started` 挡掉：实测每趟
+    arrival 跨度比名义时长多约 5.3 s，而恢复稳定所需的最小裁切量正是 5~6 s，
+    两者吻合。按 arrival[0] ≈ `started` − 5.3 s 推算，残留约 0.7 s。
+
+    默认 3 s 给约 4 倍余量。**它不是主力那道闸**，主力是 `started`。
+    """
+    import argparse
+
+    from gait.cli.v3prime import main
+
+    captured = {}
+    real_parse = argparse.ArgumentParser.parse_args
+
+    def _capture(self, argv=None, namespace=None):
+        args = real_parse(self, argv, namespace)
+        captured.update(vars(args))
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = _capture
+    try:
+        with pytest.raises(SystemExit):
+            main(["live", "--subject", "S", "--trial", "1", "--out", "x"])
+    finally:
+        argparse.ArgumentParser.parse_args = real_parse
+
+    measured_residual_s = 0.7  # started 之后的残留劣化（实测推算）
+    assert captured["settle_seconds"] >= measured_residual_s, (
+        f"稳定期默认 {captured['settle_seconds']} s 短于 started 之后的残留劣化 "
+        f"{measured_residual_s} s —— 残留会漏进 arrivals.npz"
+    )
+    assert captured["settle_seconds"] == 3.0

@@ -511,3 +511,41 @@ def test_cli_missing_file_fails_cleanly(tmp_path, capsys):
     )
     assert code == 2
     assert "锚点分析失败" in capsys.readouterr().err
+
+
+def test_tap_window_excludes_walking_impacts():
+    """对碰窗把步行段的足跟着地挡在锚点之外。
+
+    由来是一次真实采集：对碰段内 5 对的 Δ 全在 ±8 ms，而步行段两次**不相关**的
+    着地被硬配成一对，给出 −223 ms 的假 Δ，把 |Δ| 90 分位从 6.5 ms 抬到 115 ms。
+    着地冲击（实测 3~6.7 g）与轻碰在幅值上重叠，靠阈值分不开；调用方本来就知道
+    对碰段是哪一段，用时间窗比猜形状可靠。
+    """
+    taps = [2.0, 4.0, 6.0]
+    # 晚期一对：左右错开 200 ms —— 两次不相关的着地，落在配对窗（250 ms）内，
+    # 不限窗就会被硬配成一对。
+    left, right = dual_feet([*taps, 22.0], [*taps, 22.2])
+
+    wide = measure_offsets(left, right, NOMINAL_FS)
+    windowed = measure_offsets(
+        left, right, NOMINAL_FS, window=(left.arrival[0], left.arrival[0] + 10.0)
+    )
+
+    assert len(wide.pairs) == len(taps) + 1      # 假配对混了进来
+    assert len(windowed.pairs) == len(taps)      # 限窗后只剩真对碰
+    assert wide.offset_max_abs > 0.15            # 假 Δ 是几百毫秒量级
+    # 窗内留下的都是真对碰：逐对相对真值（注入的固有延迟差 −13 ms）误差在
+    # 一个采样周期内，而不限窗时那个假配对把最大值推到了 200 ms 以上。
+    assert np.abs(windowed.deltas - TRUE_DELTA).max() < 0.005
+    assert windowed.offset_max_abs < abs(TRUE_DELTA) + 0.005
+
+
+def test_window_keeps_timebase_on_full_data():
+    """限窗只筛锚点候选，时基仍用整段拟合 —— 样本越多回归越稳。"""
+    left, right = dual_feet([3.0, 4.5, 6.0])
+    full = measure_offsets(left, right, NOMINAL_FS)
+    windowed = measure_offsets(
+        left, right, NOMINAL_FS, window=(left.arrival[0], left.arrival[0] + 7.0)
+    )
+    assert windowed.left_sync.samples == full.left_sync.samples
+    assert windowed.left_sync.fs == pytest.approx(full.left_sync.fs)
