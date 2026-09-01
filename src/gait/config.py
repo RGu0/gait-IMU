@@ -62,7 +62,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.8"
+CONFIG_VERSION: Final[str] = "1.9"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -118,7 +118,9 @@ class ProtocolConfig:
                 "预设之外的值会产生一份不属于任何已知协议的数据。"
             )
         if not 0 < self.valid_fraction <= 1:
-            raise ConfigError(f"valid_fraction 应在 (0, 1] 内，收到 {self.valid_fraction}")
+            raise ConfigError(
+                f"valid_fraction 应在 (0, 1] 内，收到 {self.valid_fraction}"
+            )
         _positive(self.pause_threshold_s, "pause_threshold_s")
         if self.trim_steps_per_segment < 0:
             raise ConfigError(
@@ -203,6 +205,42 @@ class AlgoConfig:
     #: 强制零角速度更新。低速/病理步态下支撑相角速度不一定过阈，PRD §7 要求该预设
     #: 强制 ZARU。
     force_zaru: bool = False
+
+    # ── 周期分段零速（RAY-325）。见 `core/zupt.py` 的"为什么不能只靠阈值" ────────
+    #
+    # 下面五个参数**不是阈值判据**。真机实测（RAY-230 / T-230-03、T-230-04，24 格
+    # ＝2 鞋 × 3 速 × 2 足）证明：支撑相里 `‖ω‖` 的**周期内最小值**是 1.08~11.59 °/s，
+    # 随速度与鞋型都变，而 GLRT 实际要求 ≲1 °/s —— **脚从来没有满足过那个判据**。
+    # 因此这里没有"多静才算静"的门；周期只用来决定**有几步**与**每步的最低点在哪**。
+
+    #: 可信步态周期的下界，s。实测最快档 1.02 s（步频 123）。
+    stance_period_min_s: float = 0.5
+    #: 可信步态周期的上界，s。实测最慢档 2.91 s（步频 37）。
+    stance_period_max_s: float = 4.0
+    #: 多个独立估计（自相关、摆动峰、冲击峰）之间允许的最大比值。
+    #:
+    #: **这是全模块唯一的门限，而它有近 20 倍余量**：实测一致时 1.005~1.058，
+    #: 而致命失效（两周期并成一个／一周期劈成两个）按构造是 2.0 或 0.5。要分的两类
+    #: 东西差了一个数量级，所以它"不可能太严也不可能太松"（T-230-04 追加二）。
+    stance_period_consistency_max: float = 1.3
+    #: 一段数据至少要有这么多个周期，才谈得上"周期"。少于此不启用周期分段。
+    stance_min_cycles: int = 3
+    #: 周期内候选零速时刻的**姿态校验**容差，度。
+    #:
+    #: 这不是检测判据 —— 有几步已经由周期数定死。它只做一件事：否决落在摆动相里的
+    #: 候选。两个物理上独立的量互证（速度最低 ∧ 足底平放）比任一个单独可信：实测
+    #: `argmin ‖ω‖` 处 79~97% 的周期姿态确实在静立参考 5° 内（T-230-04 追加一）。
+    #:
+    #: 取 12° 是因为角度法在 24 格上以 θ=12° 全部落在 34~43，而 θ 从 8° 放到 20°
+    #: （2.5 倍）检出只从 35 动到 37 —— **这个量不敏感**，与 σ_gyr 放大 11 倍纹丝不动
+    #: 恰成对照：前者是"有清晰边界怎么切都对"，后者是"没有边界可切"。
+    stance_attitude_tolerance_deg: float = 12.0
+    #: 定观测权重用的参考角速度，rad/s（≈2 °/s）。
+    #:
+    #: 取实测**最好的**那一档（平底鞋慢速 1.08~1.75 °/s、运动鞋慢速 2.00~2.79 °/s）
+    #: 作参考：周期内最低 `‖ω‖` 等于它时给半权，越大权越低。这是连续量而不是
+    #: 二值接受/拒绝 —— 现行做法"不够静就整步丢掉"在快速档丢掉了全部 87%。
+    stance_still_reference_rad_s: float = 0.035
 
     # ── ESKF（RAY-204）。整体设计 §5.6 ──────────────────────────────────────
     #
@@ -378,10 +416,27 @@ class AlgoConfig:
 
     def __post_init__(self) -> None:
         if self.preset not in ("default", "low_speed"):
-            raise ConfigError(f"preset 应为 'default' 或 'low_speed'，收到 {self.preset!r}")
-        for name in ("zupt_window_samples", "min_stance_samples", "soft_zupt_gap_samples"):
+            raise ConfigError(
+                f"preset 应为 'default' 或 'low_speed'，收到 {self.preset!r}"
+            )
+        for name in (
+            "zupt_window_samples",
+            "min_stance_samples",
+            "soft_zupt_gap_samples",
+            "stance_min_cycles",
+        ):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} 必须为正，收到 {getattr(self, name)}")
+        if self.stance_period_min_s >= self.stance_period_max_s:
+            raise ConfigError(
+                f"stance_period_min_s 必须小于 stance_period_max_s，收到 "
+                f"{self.stance_period_min_s} 与 {self.stance_period_max_s}。"
+            )
+        if self.stance_period_consistency_max <= 1.0:
+            raise ConfigError(
+                "stance_period_consistency_max 是多个周期估计之间的最大比值，必须大于 1，"
+                f"收到 {self.stance_period_consistency_max}。等于 1 要求各估计逐比特相同。"
+            )
         if self.soft_zupt_span_samples <= 0 or self.soft_zupt_span_samples % 2 == 0:
             raise ConfigError(
                 f"soft_zupt_span_samples 必须是正奇数，收到 {self.soft_zupt_span_samples}。"
@@ -396,6 +451,11 @@ class AlgoConfig:
             "zupt_sigma_acc",
             "zupt_sigma_gyr",
             "detection_lowpass_hz",
+            "stance_period_min_s",
+            "stance_period_max_s",
+            "stance_period_consistency_max",
+            "stance_attitude_tolerance_deg",
+            "stance_still_reference_rad_s",
             "eskf_gyro_noise_density",
             "eskf_accel_noise_density",
             "eskf_gyro_bias_instability",
