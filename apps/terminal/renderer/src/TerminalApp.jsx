@@ -14,6 +14,7 @@ import { TestRunScreen } from "./TestRunScreen.jsx";
 import { WearGuideScreen } from "./WearGuideScreen.jsx";
 import { CapabilityGap } from "./CapabilityGap.jsx";
 import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
+import { SidecarDownScreen } from "./SidecarDownScreen.jsx";
 
 /**
  * Screens are selected by an explicit `stage` rather than by inferring one from
@@ -43,7 +44,11 @@ const NAV_STAGE = {
   设备与支持: STAGE.deviceSupport,
 };
 
-export function TerminalApp({ adapter }) {
+/**
+ * `lifecycle` 是可选的：它由主进程提供（`window.gaitSidecar.onSidecarState`）。
+ * 走 mock 时没有进程可看护，因此不传 —— 而不是造一个永远 ready 的假生命周期。
+ */
+export function TerminalApp({ adapter, lifecycle }) {
   const [credentials, setCredentials] = useState({ organization: "", password: "" });
   const [snapshot, setSnapshot] = useState(null);
   const [stage, setStage] = useState(STAGE.login);
@@ -62,6 +67,9 @@ export function TerminalApp({ adapter }) {
   // 登录（P-00）也没有后端。不接住这个缺口，`await adapter.login()` 不抛错，
   // 界面就会直接进工作台 —— 那正是「静默穿过一个不存在的步骤」。
   const [loginGap, setLoginGap] = useState(null);
+  // sidecar 的进程状态。null 表示「没有进程可看护」（mock 路径），
+  // 与「进程状态未知」不是一回事，所以不给它一个默认的 ready。
+  const [sidecar, setSidecar] = useState(null);
 
   async function navigate(label) {
     const next = NAV_STAGE[label];
@@ -70,6 +78,11 @@ export function TerminalApp({ adapter }) {
     if (next === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
     setStage(next);
   }
+
+  useEffect(() => {
+    if (!lifecycle?.subscribe) return undefined;
+    return lifecycle.subscribe(setSidecar);
+  }, [lifecycle]);
 
   // The live sidebar values arrive while the walk is happening. They are held
   // here rather than inside TestRunScreen so that screen stays a view of a
@@ -261,6 +274,17 @@ export function TerminalApp({ adapter }) {
           }
           setStage(STAGE.reportPreview);
         }}
+      />
+    );
+  }
+
+  // 放在所有分支最前面：sidecar 不在时，别的屏上每一个按钮点下去都只会再失败
+  // 一次，让它们看起来还能用才是真正的伤害。
+  if (sidecar && (sidecar.state === "unavailable" || sidecar.state === "restarting")) {
+    return (
+      <SidecarDownScreen
+        notice={sidecar.notice ?? { message: "采集服务正在启动。", action: "请稍候。", recoverable: true }}
+        onRetry={() => setStage(STAGE.hub)}
       />
     );
   }
