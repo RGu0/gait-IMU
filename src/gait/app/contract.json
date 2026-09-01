@@ -91,13 +91,13 @@
     },
     "subject-directory": {
       "implemented": false,
-      "issue": null,
-      "summary": "按机构档案号查找受试者需要云端加密身份库（FR-02：身份字段仅存云端）；本地无此后端，且尚无 Issue 认领"
+      "issue": "RAY-322",
+      "summary": "按机构档案号查找受试者需要云端加密身份库（FR-02：身份字段仅存云端）；本地无此后端"
     },
     "operator-auth": {
       "implemented": false,
-      "issue": null,
-      "summary": "机构操作员账号登录（P-00）没有后端：FR-01 说明它与终端预配置凭据是两件事，而 RAY-225 交付的是后者（终端身份与设备绑定）。尚无 Issue 认领"
+      "issue": "RAY-323",
+      "summary": "机构操作员账号登录（P-00）没有后端：FR-01 说明它与终端预配置凭据是两件事，而 RAY-225 交付的是后者（终端身份与设备绑定）"
     }
   }
 }
