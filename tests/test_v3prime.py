@@ -752,11 +752,13 @@ def test_settle_seconds_is_recorded_so_replay_can_account_for_it():
 
 
 def test_settle_defaults_to_the_measured_value_not_a_guess():
-    """默认值必须覆盖实测的劣化窗口。
+    """默认值必须覆盖 `started` 之后的残留劣化。
 
-    T-213-02 实测：劣化在第 2~6 秒，最差延至第 8 秒，第 7 秒恢复（7/7 复现）。
-    默认值取 10 s —— 覆盖最差情形并留余量。**这个数是量出来的，不是拍的**，
-    调小它需要新的实测依据，所以这里钉住"不得小于实测最差恢复时刻"。
+    劣化的主体在**消费者启动之前**的积压里，已由 `started` 挡掉：实测每趟
+    arrival 跨度比名义时长多约 5.3 s，而恢复稳定所需的最小裁切量正是 5~6 s，
+    两者吻合。按 arrival[0] ≈ `started` − 5.3 s 推算，残留约 0.7 s。
+
+    默认 3 s 给约 4 倍余量。**它不是主力那道闸**，主力是 `started`。
     """
     import argparse
 
@@ -777,9 +779,9 @@ def test_settle_defaults_to_the_measured_value_not_a_guess():
     finally:
         argparse.ArgumentParser.parse_args = real_parse
 
-    measured_worst_recovery_s = 8.0  # T-213-02 实测最差恢复时刻
-    assert captured["settle_seconds"] >= measured_worst_recovery_s, (
-        f"稳定期默认 {captured['settle_seconds']} s 短于实测最差恢复时刻 "
-        f"{measured_worst_recovery_s} s —— 劣化段会漏进 arrivals.npz"
+    measured_residual_s = 0.7  # started 之后的残留劣化（实测推算）
+    assert captured["settle_seconds"] >= measured_residual_s, (
+        f"稳定期默认 {captured['settle_seconds']} s 短于 started 之后的残留劣化 "
+        f"{measured_residual_s} s —— 残留会漏进 arrivals.npz"
     )
-    assert captured["settle_seconds"] == 10.0
+    assert captured["settle_seconds"] == 3.0
