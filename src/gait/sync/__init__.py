@@ -10,6 +10,8 @@ Modules, and the Issue that delivers each::
                    -> RAY-211
     anchor.py      F3.1 physical tap anchor — engineering mode only
                    -> RAY-212
+    planning.py    net windows and the wide gate for gait-cycle planning
+                   -> RAY-328
 
 PRD v1.2 §8/§14: the host receive-time model is the default time base.
 anchor.py is demoted to a lab ground-truth tool for V3' and is off by

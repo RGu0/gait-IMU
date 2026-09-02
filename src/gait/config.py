@@ -36,6 +36,10 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 2.0（RAY-328 `dual-foot-qc-windowing`）：`AlgoConfig` 增加跨脚周期比值闸、
+#: 空洞保护带与双脚净窗覆盖率下限。这三个数只服务周期规划的**宽闸**；步态参数
+#: 那条路径的严闸不受影响，含义也没变 —— 升的是"多了字段"，不是"旧字段改了意思"。
+#:
 #: 1.8（RAY-290 `selfcheck-pairing-premise`）：`AlgoConfig` 增加相邻配对的适用
 #: 范围参数。它把 `sync/selfcheck.py` 一直隐含依赖的前提（|Δ| 远小于步时）变成
 #: 一个显式的、可复现的数 —— 前提留在脑子里，下一个人把它用在别处就会踩中。
@@ -62,7 +66,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "1.9"
+CONFIG_VERSION: Final[str] = "2.0"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -371,6 +375,43 @@ class AlgoConfig:
     integrity_rate_warn: float = 0.98
     integrity_rate_unusable: float = 0.90
 
+    # ── 双脚协同的周期规划（RAY-328）。PRD §6.1 ────────────────────────────
+    #
+    # 下面三个参数只服务**周期规划**这一条路径。步态参数那条路径的严闸
+    # （`SyncReport.stable`，分窗采样率离散 < 0.1%）一个字都不动 —— 两条路径要的
+    # 精度差一个数量级，用同一道闸必然有一边错：严闸给周期规划用就过严（实测把
+    # 整个 S1-sport 判成不可信，而它的周期估计好得很），宽闸给步态参数用就过松。
+
+    #: 跨脚周期比值 max(T_L, T_R) / min(T_L, T_R) 的上限，超过则**标记降级**。
+    #:
+    #: **它只加票，不否决**：越阈只是给这一趟盖一个"两脚对不上"的戳，检出与置信度
+    #: 一个不改。理由是没有数据能区分"估计跑掉了"与"这个人两脚周期真的不同"——
+    #: 病理/不对称步态下 T_L ≠ T_R 是真实现象，而目标人群恰恰是他们。
+    #:
+    #: 取 1.15 的依据与代价（RAY-328 可行性实测，24 格 = 2 鞋型 × 6 趟 × 2 脚）：
+    #: 12 趟的比值是 1.000~1.172，**只有一个真阳性** —— S1-flat/slow-a 的 1.172，
+    #: 正是单脚一致性闸（`stance_period_consistency_max`，实测 1.277 < 1.3）放过的
+    #: 那格。紧邻它的是 S1-sport/slow-b 的 1.112 与 S1-sport/mid-a 的 1.104，两格
+    #: 都必须放过。所以 1.15 是被一个真阳性和一个真阴性夹出来的，余量只有
+    #: 1.172 / 1.15 ≈ 1.02 —— **与 `stance_period_consistency_max` 近 20 倍的余量
+    #: 完全不同量级**，别拿那条的"怎么调都对"套在这条上。样本量（一个健康受试者）
+    #: 也不支持更精细的调参。
+    cross_foot_period_ratio_max: float = 1.15
+    #: 空洞两侧的保护带，s。净窗按 `[空洞前一个到达时刻 - guard, 后一个 + guard]`
+    #: 挖掉。
+    #:
+    #: 需要保护带是因为 BLE 按连接事件成簇送达：空洞前后那几个样本是"迟到扎堆"
+    #: 的一簇，到达时刻挤在一起，用它们做的任何时间推断都偏。0.10 s 是实测的簇
+    #: 长度量级，也远小于最快档周期（1.0 s）的 1/8，不会把整周期切碎。
+    planning_gap_guard_s: float = 0.10
+    #: 双脚净窗交集的覆盖率下限。低于它，这一趟**显式**标为不可规划。
+    #:
+    #: 0.95 来自实测：`assess` 分级不是 unusable 的格，双净覆盖是 99.1%~100%，
+    #: 离 0.95 有余量；唯一掉到 94.7% 的是 S1-sport/slow-a，而它的右脚本来就被
+    #: `assess` 判了 unusable（残差 RMS 148 ms / p95 286 ms），两道判据指向同一格。
+    #: 所以这个下限在实测里不单独否决任何一格，它是**兜底**而不是主判据。
+    planning_min_coverage: float = 0.95
+
     # ── 同步质量自检（RAY-211）。PRD §8、§13 ───────────────────────────────
 
     #: 左右 stride 周期差超过这个比例就标注节律不对称。取值来自 PRD §8 的
@@ -480,6 +521,9 @@ class AlgoConfig:
             "anchor_pairing_window_s",
             "integrity_rate_warn",
             "integrity_rate_unusable",
+            "cross_foot_period_ratio_max",
+            "planning_gap_guard_s",
+            "planning_min_coverage",
             "selfcheck_stride_period_tolerance",
             "selfcheck_offset_consistency_s",
             "selfcheck_offset_warn_s",
@@ -509,6 +553,17 @@ class AlgoConfig:
             raise ConfigError(
                 f"integrity_gap_samples 至少为 1，收到 {self.integrity_gap_samples}。"
                 "取 0 表示任何一个采样周期的空白都算空洞，而 BLE 抖动本来就有那个量级。"
+            )
+        if self.cross_foot_period_ratio_max <= 1.0:
+            raise ConfigError(
+                "cross_foot_period_ratio_max 是两脚周期的最大比值，必须大于 1，"
+                f"收到 {self.cross_foot_period_ratio_max}。等于 1 要求两脚周期逐比特相同，"
+                "那会把每一趟都标成降级，戳也就不再有信息。"
+            )
+        if not 0.0 < self.planning_min_coverage <= 1.0:
+            raise ConfigError(
+                f"planning_min_coverage 必须落在 (0, 1]，收到 {self.planning_min_coverage}。"
+                "它是双脚净窗占共同跨度的比例，超出这个范围的值没有对应的窗口。"
             )
         if not self.integrity_rate_unusable < self.integrity_rate_warn <= 1.0:
             raise ConfigError(
