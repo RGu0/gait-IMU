@@ -61,6 +61,7 @@ from gait.protocolflow.timed_walk import (
     CHECK_FAIL,
     CHECK_PASS,
     CHECK_UNKNOWN,
+    TERMINAL,
     VERDICT_INVALID,
     TimedWalk,
 )
@@ -93,6 +94,10 @@ class TerminalService:
         self.session_id: str | None = None
         self.loop = TransportLoop()
         self._wrapped: dict[str, Any] = {}
+        #: 每只脚的写盘错误，来自 `CaptureStatus.problems`。它必须一路进到会话
+        #: 结论里去（`LinkOutcome.recording_error`），否则「这次采集有一半没落盘」
+        #: 就停在一个事件里，而事件是会被错过的。
+        self._recording_errors: dict[str, str] = {}
         self.walk: TimedWalk | None = None
         self._event_seq = 0
         self._aborted: dict[str, Any] | None = None
@@ -256,6 +261,7 @@ class TerminalService:
         now = float(params.get("now", 0.0))
         self.walk = TimedWalk(self.config)
         self._aborted = None
+        self._recording_errors = {}
         self.walk.start_baseline(now)
         self.walk.start_calibration(now)
         self.walk.start_walking(now)
@@ -365,6 +371,11 @@ class TerminalService:
         self._wrapped = {}
         status = self.capture.close()
         self.loop.stop()
+        # 把每只脚的写盘失败挑出来，供 `sessionResult` 构造 `LinkOutcome`。
+        for problem in status.problems:
+            for label in ("L", "R"):
+                if problem.startswith(f"{label} 的原始数据写盘失败"):
+                    self._recording_errors[label] = problem
         directory = session_directory(self.session_root, self.session_id)
         meta = read_meta(directory)
         write_meta(
@@ -390,6 +401,8 @@ class TerminalService:
                 foot=label,  # type: ignore[arg-type]
                 disconnected_at=(params.get("disconnectedAt") or {}).get(label),
                 reconnects=int((params.get("reconnects") or {}).get(label, 0)),
+                # 写盘失败由 sidecar 自己知道，不该等调用方转述 —— 转述会漏。
+                recording_error=self._recording_errors.get(label),
             )
             for label in ("L", "R")
         )
@@ -468,12 +481,34 @@ class TerminalService:
     # ── 事件流 ────────────────────────────────────────────────────────────
 
     def tick(self, now: float) -> dict[str, Any]:
-        """P-08 每拍推给渲染进程的三样东西，一样不多。
+        r"""P-08 每拍推给渲染进程的三样东西，一样不多 —— 外加一次写盘巡检。
 
         FR-07：采集中链路健康只以到达率表达；PRD §6.1：采集中只显示剩余时间、步数、
         链路三档，不显示专业指标、不显示上传进度。所以这个 payload 是有意贫瘠的。
+
+        ## 为什么巡检长在这里
+
+        `capture.py` 的模块文档写明：「写线程里的错误不会自己冒到事件循环，所以必须
+        有人主动看」。在此之前**没人看** —— `grep -rn "\.check()" src/` 只搜得到那句
+        文档本身。后果不是报错，是磁盘写满之后倒计时照常走完：操作员陪着受试者走完
+        三分钟，结束时才发现什么都没采到。
+
+        tick 是唯一一个「采集期间会反复发生」的调用点，所以巡检长在这里。发现失败时
+        本方法**返回 `session.aborted` 而不是 tick** —— 渲染端据此整页接管（UI 设计
+        §7：写盘错误是阻断级，不是侧栏图标级）。
         """
-        self._require_walk()  # 未开始就问剩余时间，是调用方的错，不是 0 秒
+        walk = self._require_walk()  # 未开始就问剩余时间，是调用方的错，不是 0 秒
+        if walk.state in TERMINAL:
+            # 已经停了还在 tick，说明调用方没有理会上一条 `session.aborted`。
+            # 继续发 tick 会让倒计时在一个已经安全停止的会话上照常往下走 ——
+            # 那正是本 scope 要消灭的那个画面，只是换了个成因。
+            raise protocol.ProtocolError(
+                f"会话已处于终态 {walk.state!r}，不能再 tick。"
+                "收到 session.aborted 之后应当停止推进。"
+            )
+        aborted = self._check_writes(now)
+        if aborted is not None:
+            return aborted
         started = self._walk_started_at
         if started is None:  # pragma: no cover - start_walking 保证已设
             raise protocol.ProtocolError("会话尚未开走")
@@ -489,12 +524,40 @@ class TerminalService:
             },
         )
 
+    def _check_writes(self, now: float) -> dict[str, Any] | None:
+        """巡检写盘。有失败就安全停止，返回中止事件；否则返回 `None`。"""
+        if self.capture is None:
+            return None
+        problems = self.capture.failures()
+        if not problems:
+            return None
+        return self.abort(
+            now,
+            TerminalError(
+                code="E-BLE-1020",
+                message="原始数据写盘失败，测试已安全停止。" + "".join(problems),
+                action="请检查磁盘剩余空间后重新检测。本次数据已尽可能保留，但不完整，不会生成报告。",
+            ),
+        )
+
     def notice(self, text: str) -> dict[str, Any]:
         self._event_seq += 1
         return protocol.event("session.notice", self._event_seq, {"text": text})
 
     def abort(self, now: float, failure: TerminalError) -> dict[str, Any]:
+        """安全停止。
+
+        ## 「安全」指的是收尾的顺序，不是「没出事」
+
+        PRD §6.1：断连或写盘错误即安全停止并标记会话不完整。所以这里必须先把采集
+        收尾 —— 停流、断开、close、把真实结论改写进元数据 —— 再中止流程。
+
+        在此之前 `abort()` 只中止 `TimedWalk`，采集就那么挂着：写线程还在跑，元数据
+        永远停在 pending，而 pending 的含义是「进程没了」。一个被安全停止的会话与一个
+        被杀掉的进程在磁盘上因此长得一样，那正好把上个 scope 建立的判据毁掉。
+        """
         walk = self._require_walk()
+        self._close_capture()
         walk.abort(now, failure.message)
         self._aborted = failure.snapshot()
         self._event_seq += 1
