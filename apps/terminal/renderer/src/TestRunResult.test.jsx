@@ -14,6 +14,15 @@ const live = {
   aborted: null,
 };
 
+/** sidecar 给出的完整错误：码 + 现象 + 动作。渲染端只排版这三段。 */
+const ABORTED = {
+  code: "E-BLE-1020",
+  domain: "E-BLE",
+  message: "原始数据写盘失败，测试已安全停止。",
+  action: "请检查磁盘剩余空间后重新检测。本次数据已尽可能保留，但不完整，不会生成报告。",
+  blocking: true,
+};
+
 const renderRun = (overrides = {}, props = {}) =>
   render(
     <TestRunScreen
@@ -194,15 +203,38 @@ describe("the countdown reaching zero", () => {
 
 describe("a mid-session abort takes over the whole page", () => {
   it("says data was kept, that it is incomplete, and offers one way out", () => {
-    renderRun({ aborted: { code: "E-BLE-1020" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("测试已安全停止（E-BLE-1020）");
-    expect(screen.getByText(/数据已保存但不完整，本次不生成报告/)).toBeVisible();
+    // 错误对象是 sidecar 给的完整三段（码 + 现象 + 动作），mock 也照这个形状 ——
+    // 一个只带 code 的 fixture 会让界面「自造文案」看起来是必要的。
+    renderRun({ aborted: ABORTED });
+    expect(screen.getByRole("alert")).toHaveTextContent("原始数据写盘失败，测试已安全停止。");
+    expect(screen.getByRole("alert")).toHaveTextContent("E-BLE-1020");
+    // 动作那一段同样来自 sidecar：它说数据保住了、不完整、不会出报告。
+    expect(screen.getByText(ABORTED.action)).toBeVisible();
     expect(screen.getAllByRole("button")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "返回工作台" })).toBeEnabled();
   });
 
+  it("不自造文案：换一条错误，屏上跟着换", () => {
+    // 这条是 RAY-248 验收第二条的可执行形式。写死的文案在上面那条测试里同样能过 ——
+    // 只有换一条错误才能把「界面只是排版」和「界面自己写了一句」分开。
+    renderRun({
+      aborted: {
+        code: "E-BLE-1002",
+        domain: "E-BLE",
+        message: "右模块电量耗尽，测试已安全停止。",
+        action: "请更换电池后重新检测。",
+        blocking: true,
+      },
+    });
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("右模块电量耗尽，测试已安全停止。");
+    expect(alert).toHaveTextContent("请更换电池后重新检测。");
+    expect(alert).not.toHaveTextContent("写盘");
+    expect(alert).not.toHaveTextContent("磁盘");
+  });
+
   it("shows no countdown and no sidebar once aborted", () => {
-    renderRun({ aborted: { code: "E-BLE-1020" } });
+    renderRun({ aborted: ABORTED });
     expect(screen.queryByLabelText("操作员侧栏")).not.toBeInTheDocument();
     expect(screen.queryByText("剩余时间（秒）")).not.toBeInTheDocument();
   });
