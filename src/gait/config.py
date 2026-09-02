@@ -36,6 +36,9 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 2.3（RAY-339 `event-interval-estimator`）：`AlgoConfig` 增加事件域周期精修的
+#: 间隔带与最少间隔数。
+#:
 #: 2.2（RAY-328 `alternation-decoding`）：`AlgoConfig` 增加交替解码的取整容差。
 #:
 #: 2.1（RAY-328 `xcorr-period-prior`）：`AlgoConfig` 增加反相自检的相位带。互相关
@@ -72,7 +75,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "2.2"
+CONFIG_VERSION: Final[str] = "2.3"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -435,6 +438,26 @@ class AlgoConfig:
     #: 读成 2，取整就不再是判断而是抛硬币。留 0.15 的余地给上面那两项散布。
     alternation_slot_tolerance: float = 0.35
 
+    # ── 事件域周期精修（RAY-339）。见 `core/zupt.py` 的"网格铺完之后还能再问一次" ──
+
+    #: 精修时保留的间隔带，相对中位间隔的下界与上界。
+    #:
+    #: 要挡掉的是两种**量化**的失效：另一只脚漏检让间隔变成 ×2，一个支撑相被断成两段
+    #: 让它变成 ×0.5。带取 (0.6, 1.6) 稳稳落在 (0.5, 2.0) 里边，两侧都有余量。
+    #:
+    #: **上界刻意比下界离 1 更远**（+0.6 对 −0.4）：实测单趟内步幅 IQR/中位到 22.6%，
+    #: 而起步段的头几个 stride 明显偏长。上界收到 1.4 会把那些真实的长 stride 一起剔掉，
+    #: 而剔掉它们正好是把估计往偏小的方向推。
+    period_refine_low: float = 0.6
+    period_refine_high: float = 1.6
+    #: 采纳事件域估计所需的最少间隔数。少于此就不采纳，保留网格自己的估计。
+    #:
+    #: 事件域的软肋是支撑相检出本身不规则：实测 `S1-sport/fast-a/R` 那一格 37 个间隔里
+    #: 只有 11 个像一个 stride。6 个是"中位数还算得上中位数"的下限，也与
+    #: `stance_min_cycles`（3）保持同一量级的克制 —— 这道闸拦的是"没有足够证据"，
+    #: 不是"证据不够好"。
+    period_refine_min_intervals: int = 6
+
     # ── 同步质量自检（RAY-211）。PRD §8、§13 ───────────────────────────────
 
     #: 左右 stride 周期差超过这个比例就标注节律不对称。取值来自 PRD §8 的
@@ -550,6 +573,8 @@ class AlgoConfig:
             "xcorr_antiphase_min",
             "xcorr_antiphase_max",
             "alternation_slot_tolerance",
+            "period_refine_low",
+            "period_refine_high",
             "selfcheck_stride_period_tolerance",
             "selfcheck_offset_consistency_s",
             "selfcheck_offset_warn_s",
@@ -585,6 +610,24 @@ class AlgoConfig:
                 "cross_foot_period_ratio_max 是两脚周期的最大比值，必须大于 1，"
                 f"收到 {self.cross_foot_period_ratio_max}。等于 1 要求两脚周期逐比特相同，"
                 "那会把每一趟都标成降级，戳也就不再有信息。"
+            )
+        if not self.period_refine_low < 1.0 < self.period_refine_high:
+            raise ConfigError(
+                f"精修间隔带必须把 1 夹在中间，收到 ({self.period_refine_low}, "
+                f"{self.period_refine_high})。带的参照量就是中位间隔本身，"
+                "不含 1 的带会把中位数自己排除在外。"
+            )
+        if not 0.5 <= self.period_refine_low or not self.period_refine_high <= 2.0:
+            raise ConfigError(
+                f"精修间隔带必须落在 [0.5, 2.0]，收到 ({self.period_refine_low}, "
+                f"{self.period_refine_high})。越过 0.5 会放进被断成两段的支撑相，"
+                "越过 2.0 会放进漏检造成的双倍间隔 —— 那正是这道带要挡的两种失效。"
+            )
+        if self.period_refine_min_intervals < 3:
+            raise ConfigError(
+                f"period_refine_min_intervals 至少为 3，收到 "
+                f"{self.period_refine_min_intervals}。两个间隔的中位数就是它们的均值，"
+                "稳健性无从谈起。"
             )
         if not 0.0 < self.alternation_slot_tolerance < 0.5:
             raise ConfigError(
