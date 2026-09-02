@@ -16,15 +16,42 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, TextIO
 
 from gait.app.protocol import ProtocolError
 from gait.app.service import TerminalService
+from gait.app.sources import StubDeviceSource
+
+
+def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalService:
+    """按环境变量配置一个 service。
+
+    `GAIT_SESSION_ROOT` 决定这次运行往哪里落盘。**不设就不落盘** —— 那是一个显式
+    的「这次不写」，而不是悄悄什么都没写：`_open_capture` 在没有 root 时直接返回，
+    `stopSession` 的 `capture` 字段随之为 `null`，调用方看得见。
+
+    `GAIT_STUB_FEED_HZ` 只在没有真设备时有意义，它让 stub 产生结构合法的合成字节。
+    产生的会话的元数据里会带 `provenance.source = "stub"`，确保它永远不会被当成
+    实测数据 —— 见 `sources.StubDeviceSource.provenance`。
+    """
+    values = os.environ if env is None else env
+    root = values.get("GAIT_SESSION_ROOT")
+    try:
+        feed_hz = float(values.get("GAIT_STUB_FEED_HZ", "0") or "0")
+    except ValueError:
+        feed_hz = 0.0
+    return TerminalService(
+        source=StubDeviceSource(autofeed_hz=feed_hz),
+        session_root=Path(root) if root else None,
+    )
 
 
 def serve(stdin: TextIO, stdout: TextIO, service: TerminalService | None = None) -> int:
-    service = service or TerminalService()
+    service = service or service_from_environment()
     for line in stdin:
         line = line.strip()
         if not line:
