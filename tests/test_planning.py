@@ -637,3 +637,25 @@ def test_seeded_is_false_when_the_prior_never_materialised():
     result = plan_dual_foot_periods(still, still, 200.0)
     assert result.seeded is False
     assert result.left.period is None
+
+
+def test_swapping_the_feet_does_not_change_the_antiphase_verdict():
+    """左右对调后 φ/T 变成 1 − φ/T，而判定不变。
+
+    反相是两只脚之间的**关系**，不该取决于谁被叫做"左"。这条成立是因为带对称于
+    0.5；哪天有人把带改成不对称的，这条会先红，而不是等到某趟采集左右接反时才发现。
+    """
+    feet = dual_walk(duration_s=40.0)
+    stride = 120.0 / WalkSpec().cadence
+    left_swing = np.linalg.norm(feet["L"].gyro, axis=1)
+    right_swing = np.linalg.norm(feet["R"].gyro, axis=1)
+
+    forward = cross_foot_phase(
+        left_swing, feet["L"].arrival, right_swing, feet["R"].arrival, stride
+    )
+    backward = cross_foot_phase(
+        right_swing, feet["R"].arrival, left_swing, feet["L"].arrival, stride
+    )
+    assert forward.in_antiphase is backward.in_antiphase is True
+    assert forward.phase_fraction + backward.phase_fraction == pytest.approx(1.0, abs=0.05)
+    assert forward.period_s == pytest.approx(backward.period_s, rel=0.02)
