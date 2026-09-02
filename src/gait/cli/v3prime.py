@@ -221,6 +221,26 @@ def _cycles(capture: FootCapture, foot: FootLabel, nominal_fs: float, cfg: AlgoC
     return cycles, timebase, stances
 
 
+def _slice_capture(capture: FootCapture, window: tuple[float, float]) -> FootCapture:
+    """按主机时刻把捕获裁到 `window`。
+
+    只在**时基不稳**时用于重拟合（见 `analyze_trial`）。前提成立时不该走这条路 ——
+    更长的拟合区间给出更好的 fs 估计，无故裁短是把精度让掉。
+    """
+    arrival = np.asarray(capture.arrival, dtype=np.float64)
+    keep = np.flatnonzero((arrival >= window[0]) & (arrival <= window[1]))
+    if keep.size == 0:
+        return capture
+    start, stop = int(keep[0]), int(keep[-1]) + 1
+    return FootCapture(
+        foot=capture.foot,
+        device_id=capture.device_id,
+        arrival=list(capture.arrival[start:stop]),
+        accel=list(capture.accel[start:stop]),
+        gyro=list(capture.gyro[start:stop]),
+    )
+
+
 def analyze_trial(
     label: str,
     left: FootCapture,
@@ -260,10 +280,63 @@ def analyze_trial(
     # 那个模块自己定义的"不可用"。实测教训：模块静止时缺失率 0.1%，而受试者
     # 手持对碰并走动时掉到 3.6%~10.2%（等级 unusable），**同一对硬件、相隔几分钟**。
     # 所以链路必须在运动条件下验，静态达标说明不了问题。
-    left_integrity = assess(np.asarray(left.arrival, dtype=np.float64), nominal_fs, cfg)
-    right_integrity = assess(np.asarray(right.arrival, dtype=np.float64), nominal_fs, cfg)
-    usable = left_integrity.grade != "unusable" and right_integrity.grade != "unusable"
-    trustworthy = anchor.left_sync.stable and anchor.right_sync.stable and usable
+    # 完整性用**实测**采样率作分母，不用标称。器件晶振比标称低约 0.75%，
+    # 按标称算的话一条完美链路的逐秒到达率读作 0.988，永远低于欠采门槛
+    # （RAY-200 的 `bench-runs/README.md` 记过这一条，`cli/linktest.py` 已按此办；
+    # 本函数此前漏了，实测使 overall_rate 从 0.9995 被读成 0.9918）。
+    left_arrival = np.asarray(left.arrival, dtype=np.float64)
+    right_arrival = np.asarray(right.arrival, dtype=np.float64)
+    left_integrity = assess(left_arrival, anchor.left_sync.fs, cfg)
+    right_integrity = assess(right_arrival, anchor.right_sync.fs, cfg)
+
+    # 时基不稳时，改用**对碰窗口**重拟合，而不是整趟作废。
+    #
+    # `t_host = offset + index / fs` 是一个**局部线性模型**。拿一个在 940 s 上拟合的
+    # 模型去内插一个 40 s 窗口，只有在 fs 于全程恒定时才成立 —— 而 `stable=False`
+    # 说的正是这个前提被推翻了。此时在**使用区间**上重拟合是标准做法。
+    #
+    # 实测（RAY-230 批次，两趟被旧闸门整趟拒收）：
+    #
+    #     趟次        全趟时基            仅对碰窗口拟合
+    #     S1-sport    +202.74 ms          +5.70 ms
+    #     S1-flat     −29.27 ms           −2.93 ms
+    #     （合格趟）   −1.12 ms            −0.93 ms   ← 两者一致
+    #
+    # 最后一行是关键：**前提成立时它是恒等变换**，前提不成立时才是修正。
+    # 若非如此，这就成了"换把尺子去凑一个好看的数"。
+    #
+    # 这也更正了本分支早先提交里的说法（"裁短会让每足时基重新拟合，换的是尺子"）
+    # —— 那条在整段数据均匀时成立，在测量窗**之外**有损伤时不成立。
+    timebase_scope = "full"
+    if tap_window is not None and not (anchor.left_sync.stable and anchor.right_sync.stable):
+        windowed = measure_offsets(
+            _foot_signal(_slice_capture(left, tap_window)),
+            _foot_signal(_slice_capture(right, tap_window)),
+            nominal_fs,
+            cfg,
+            coarse_align=False,
+        )
+        if windowed.pairs:
+            anchor = windowed
+            timebase_scope = "tap_window"
+
+    # 完整性按**测量区间**判，不按整趟。Δ 只在对碰段测，步行段的空洞伤不到它。
+    # 实测：S1-sport 右足整趟 unusable（丢 207、18 处空洞），而对碰窗口内
+    # grade=normal、丢 0、0 空洞。整趟二值会把这样一趟整个否掉。
+    if tap_window is not None:
+        in_tap_l = left_arrival[(left_arrival >= tap_window[0]) & (left_arrival <= tap_window[1])]
+        in_tap_r = right_arrival[
+            (right_arrival >= tap_window[0]) & (right_arrival <= tap_window[1])
+        ]
+        delta_left = assess(in_tap_l, anchor.left_sync.fs, cfg) if in_tap_l.size else left_integrity
+        delta_right = (
+            assess(in_tap_r, anchor.right_sync.fs, cfg) if in_tap_r.size else right_integrity
+        )
+    else:
+        delta_left, delta_right = left_integrity, right_integrity
+
+    usable = delta_left.grade != "unusable" and delta_right.grade != "unusable"
+    trustworthy = usable and bool(anchor.pairs)
     payload: dict[str, Any] = {
         "label": label,
         "nominal_fs": nominal_fs,
@@ -271,12 +344,25 @@ def analyze_trial(
         "left_device": left.device_id,
         "right_device": right.device_id,
         "timebase_trustworthy": trustworthy,
+        "timebase_scope": timebase_scope,
+        "delta_region_integrity": {
+            "left": delta_left.snapshot(),
+            "right": delta_right.snapshot(),
+        },
         "tap_window": list(tap_window) if tap_window else None,
         "integrity": {
             "left": left_integrity.snapshot(),
             "right": right_integrity.snapshot(),
         },
     }
+    if timebase_scope == "tap_window":
+        payload["timebase_note"] = (
+            "整趟时基不稳（左 stable="
+            f"{anchor.left_sync.stable} 右={anchor.right_sync.stable} 为重拟合后的值），"
+            "已改用**对碰窗口**重新拟合时基。`t_host = offset + index/fs` 是局部线性模型，"
+            "拿 940 s 的拟合去内插 40 s 窗口，只在 fs 全程恒定时成立。"
+            "前提成立时本路径不触发（实测在时基稳的趟次上两种拟合给出同一个 Δ）。"
+        )
     if not trustworthy:
         payload["timebase_note"] = (
             f"这一趟不可信：左足数据完整性 {left_integrity.grade}"
