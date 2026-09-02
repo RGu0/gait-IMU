@@ -21,6 +21,7 @@ from gait.device.ble import (
     StreamConfig,
     configure_streaming,
     read_battery_at_low_rate,
+    start_streaming,
 )
 
 _UNLOCK = 0x69
@@ -402,3 +403,79 @@ def test_an_unregistered_mounting_value_never_reaches_the_device() -> None:
             await device.close()
 
     asyncio.run(scenario())
+
+
+# --- 把「开流」从「配置」里拆出来（RAY-333） ----------------------------------
+
+
+def test_defer_rate_does_not_start_the_stream() -> None:
+    """`defer_rate=True` 不写速率寄存器 —— **写速率就是开流**。
+
+    双设备逐台走完整配置时，第一台写完速率即满速推流，而第二台还要走完自己那
+    3~5 秒的配置（四次写事务各 `2×write_delay + save_delay = 0.7 s`，加四次回读）。
+    **第一台独自推流的这几秒，正是第二台开流后过渡期的成因** ——
+    实测第 2~6 秒掉到 160~184 样本/秒（稳态 200），7/7 复现，
+    且跟随连接顺序而非器件（RAY-213 `T-213-02`）。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        applied = await configure_streaming(device, StreamConfig(), defer_rate=True)
+        assert applied.verified, applied.mismatches
+        # 四项非速率配置都写了
+        written = {register for register, _ in _config_writes(transport)}
+        assert Register.BANDWIDTH in written
+        assert Register.ALGORITHM in written
+        assert Register.MOUNTING in written
+        assert Register.DISPLACEMENT_OUTPUT in written
+        # 速率**没有**写 —— 设备因此还没开始推流
+        assert Register.RRATE not in written, "defer_rate=True 时不得写速率寄存器"
+        assert applied.rate_readback is None
+
+    asyncio.run(scenario())
+
+
+def test_start_streaming_writes_rate_and_merges_the_snapshot() -> None:
+    """`start_streaming` 写速率，并把结果**并回** `AppliedConfig`。
+
+    返回合并后的整份而不是只返回回读值：`config_snapshot`（PRD §6.1 可观测性）
+    要求配置下发的结果是完整的一份。拆成两半后若不合并，快照里就会少掉
+    `rate_readback` —— 而那是「速率写对没有」的唯一证据。
+    """
+    transport = FakeDeviceTransport()
+
+    async def scenario() -> None:
+        device = await _connect(transport)
+        config = StreamConfig()
+        deferred = await configure_streaming(device, config, defer_rate=True)
+        applied = await start_streaming(device, config, deferred)
+
+        written = {register for register, _ in _config_writes(transport)}
+        assert Register.RRATE in written, "start_streaming 必须写速率寄存器"
+        assert applied.rate_readback == config.rate
+        assert applied.verified, applied.mismatches
+        # 非速率各项从 deferred 原样带过来，没有丢
+        assert applied.bandwidth_readback == deferred.bandwidth_readback
+        assert applied.algorithm_readback == deferred.algorithm_readback
+        assert applied.mounting_readback == deferred.mounting_readback
+        assert applied.output_mode_readback == deferred.output_mode_readback
+
+    asyncio.run(scenario())
+
+
+def test_deferred_then_started_matches_the_all_in_one_path() -> None:
+    """拆两步与一步到位写出的寄存器序列一致 —— 拆分不改变下发内容，只改时机。"""
+    one_shot, two_step = FakeDeviceTransport(), FakeDeviceTransport()
+
+    async def scenario() -> None:
+        config = StreamConfig()
+        device_a = await _connect(one_shot)
+        await configure_streaming(device_a, config)
+
+        device_b = await _connect(two_step)
+        deferred = await configure_streaming(device_b, config, defer_rate=True)
+        await start_streaming(device_b, config, deferred)
+
+    asyncio.run(scenario())
+    assert _config_writes(one_shot) == _config_writes(two_step)

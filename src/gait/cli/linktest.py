@@ -84,6 +84,7 @@ from gait.device.ble import (
     StreamConfig,
     configure_streaming,
     read_battery_at_low_rate,
+    start_streaming,
 )
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.integrity import IntegrityReport, assess, estimate_period
@@ -548,19 +549,42 @@ async def run_bench(
                 writers.append(writer)
 
             # 电量在高速流开启前读（PRD §6.1 自检顺序）；随后正式配置并校验。
+            # 先把两台的**非速率**配置全部下完，最后再一起开流 ——
+            # 写速率寄存器就是开流，逐台走完整配置会让第一台独自推流 3~5 秒，
+            # 那正是第二台开流后过渡期的成因（RAY-213 T-213-02，7/7 复现）。
+            # 本工具与 v3prime 同为双设备顺序建链，同一处设计缺陷，一并修。
             for device, run in zip(devices, runs):
                 run.battery_before = await read_battery_at_low_rate(device)
                 echo(
                     f"{run.device_id} 电量（前）："
                     f"{_battery_snapshot(run.battery_before)}"
                 )
-                run.applied_config = await configure_streaming(device, config)
+                run.applied_config = await configure_streaming(
+                    device, config, defer_rate=True
+                )
                 if not run.applied_config.verified:
                     raise SystemExit(
                         f"{run.device_id} 配置校验失败："
                         f"{run.applied_config.mismatches}。中止本轮。"
                     )
                 echo(f"{run.device_id} 配置已下发并校验")
+
+            # 两台一起开流：速率写入的间隔从 3~5 s 降到一次 BLE 写的往返。
+            # 只并发速率写入，建链仍是顺序的（CoreBluetooth 对并发 connect 未验）。
+            for run, applied in zip(
+                runs,
+                await asyncio.gather(
+                    *(
+                        start_streaming(device, config, run.applied_config)
+                        for device, run in zip(devices, runs)
+                    )
+                ),
+            ):
+                run.applied_config = applied
+                if not applied.verified:
+                    raise SystemExit(
+                        f"{run.device_id} 速率校验失败：{applied.mismatches}。中止本轮。"
+                    )
 
         started = loop.time()
         stop_at = started + duration
