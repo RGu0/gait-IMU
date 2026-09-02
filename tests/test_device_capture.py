@@ -20,6 +20,7 @@ from gait.device.adapter import to_raw_frame
 from gait.device.capture import (
     CaptureError,
     SessionCapture,
+    _check_replay_losses,
     payload_equal,
     replay_raw_frames,
     replay_session_foot,
@@ -416,3 +417,59 @@ class TestReplayNeverLosesSamplesSilently:
             return seen
 
         assert asyncio.run(scenario()) == 3
+
+
+class TestReplayLossesAreReportedApart:
+    """RAY-334：`_check_replay_losses` 把两个丢弃计数分开报。
+
+    wt901 v0.3.0 新增 `DeviceStats.dropped_before_ready` 且**没有**并进
+    `dropped_samples`。回放路径此前只看后者，于是「回放缺了开头一段」会安静通过。
+    """
+
+    @staticmethod
+    def _stats(*, dropped_samples: int = 0, dropped_before_ready: int = 0):
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Stats:
+            dropped_samples: int
+            dropped_before_ready: int
+
+        return _Stats(dropped_samples, dropped_before_ready)
+
+    def test_clean_replay_raises_nothing(self) -> None:
+        _check_replay_losses(self._stats(), 4096)
+
+    def test_queue_overflow_still_points_at_queue_size(self) -> None:
+        with pytest.raises(CaptureError) as excinfo:
+            _check_replay_losses(self._stats(dropped_samples=9), 4096)
+
+        assert "queue_size" in str(excinfo.value)
+
+    def test_before_ready_is_not_blamed_on_the_queue(self) -> None:
+        """这条的处方与队列无关，消息里不能把人引向 queue_size。"""
+        with pytest.raises(CaptureError) as excinfo:
+            _check_replay_losses(self._stats(dropped_before_ready=3), 4096)
+
+        message = str(excinfo.value)
+        assert "就绪前" in message
+        assert "调大 queue_size 不会有帮助" in message
+
+    def test_before_ready_is_reported_first(self) -> None:
+        """两者都不为零时先报就绪前丢弃 —— 队列的数字是在被截过的流上数的。"""
+        with pytest.raises(CaptureError) as excinfo:
+            _check_replay_losses(
+                self._stats(dropped_samples=9, dropped_before_ready=3), 4096
+            )
+
+        assert "就绪前" in str(excinfo.value)
+
+    def test_a_stats_object_without_the_field_is_tolerated(self) -> None:
+        """旧 wt901 的 DeviceStats 没有这个字段，getattr 必须落到 0。"""
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Legacy:
+            dropped_samples: int
+
+        _check_replay_losses(_Legacy(0), 4096)

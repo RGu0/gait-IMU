@@ -19,30 +19,33 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-# wt901 未发布到 PyPI、无 tag、无 release，因此按 commit 钉住。
+# wt901 未发布到 PyPI，但**自上游 v0.2.0 起已有 tag**，因此按 tag 钉住。
 #
-# 钉 commit 而不是分支：分支引用会让"同一份 uv.lock"在不同时刻装出不同的代码，
-# 而锁文件的全部意义就是排除这种可能。换版本 = 改这里的 rev + 重新 uv lock，
+# 这里此前写的是「无 tag、无 release，因此按 commit 钉住」—— 那句话自 v0.2.0
+# 起就不成立了，却留了下来，让「按 40 位 SHA 钉」看着像唯一选择。上游 RAY-299 /
+# RAY-320 立项要终结的正是这件事（RAY-334）。
+#
+# 钉 tag 而不是分支：分支引用会让「同一份 uv.lock」在不同时刻装出不同的代码，
+# 而锁文件的全部意义就是排除这种可能。tag 与 commit 一样是不可变引用，但它还
+# 带着上游的发布语义与 CHANGELOG —— 换版本 = 改这里的 tag + 重新 uv lock，
 # 是一次显式的、会进 diff 的动作。
 #
-# cb88cee5 = WT901#20 "RAY-293 [zero-serial] 全零序列号不再伪装成空字符串"。
-# 相对上一钉（ad98ceab）只带一件：
+# v0.3.0 = WT901#39。相对上一钉（cb88cee5，它本身还在 v0.2.0 之前）带进 22 个
+# 合并，其中对本仓库要紧的：
 #
-#   RAY-293  新增 SerialNumber（raw / value / is_plausible）；read_serial_number
-#            由返回 str 改为返回它，全零回读的 value 是 None 而不是 ""；
-#            DeviceInfo 新增 serial_number_raw 区分「没读到」与「读到了但全零」。
+#   RAY-292  0x71 回帧按 4 个寄存器解，协议固定回 8 个 —— 解码错误，不是缺功能。
+#   RAY-306  重连后配置重放失败时整条重连语义静默失效：连上了、数据在流、设备
+#            停在出厂 10 Hz，而应用以为是自己配的速率，没有任何一处报错。
+#   RAY-305  芯片时间 / 四元数 / 版本号在寄存器全零时交出看着正常的假值。
+#   RAY-311  连接就绪之前到达的帧不再交付，计入新增的
+#            DeviceStats.dropped_before_ready；它**没有**并进 dropped_samples。
+#            device/capture.py 与 cli/linktest.py 的可信性判据已一并接入它。
 #
-# 这是一次破坏性变更，但**本仓库没有调用点**：升级时对全部 .py 逐文件 grep
-# read_serial_number / serial_number_raw / SerialNumber / DeviceInfo，命中为 0；
-# 唯一的 telemetry 调用是 device/ble.py 的 read_battery()。身份绑定走的是
-# RAY-279 的 read_mac()，不是序列号 —— device/binding.py 的模块文档已写明它只
-# 消费注入的 DeviceIdentity，而 DeviceIdentity 本就拒空值。
-#
-# 那为什么还要升：上游那个全零读数在真机上出现过（两台主机、两台设备），旧行为
-# 把它变成 ""，下游一旦拿它当绑定键就会让每台设备的键都相同 —— 一种不报错的
-# 互相冒充。现在没人踩不等于将来没人踩，把已知会静默出错的读数留在依赖里没有
-# 好处（RAY-329）。
-wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "cb88cee5dab014656bec638a9fdb69c3b17075cd" }
+# 两条破坏性变更（read_version() 全零改抛、ChipTime.__str__ 不再打成时间戳样式）
+# 在本仓库均零命中。「Battery.percent 可能为 None」上游列在升级须知里，但对本
+# 仓库**不是本次变化** —— battery_percent 在 cb88cee 与 v0.3.0 之间逐字节相同，
+# device/orchestration.py 早已显式处理 None。
+wt901 = { git = "https://github.com/RGu0/WT901.git", tag = "v0.3.0" }
 
 [dependency-groups]
 dev = [

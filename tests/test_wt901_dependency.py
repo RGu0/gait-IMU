@@ -28,8 +28,20 @@ ADAPTER_SURFACE = (
 )
 
 
+#: `pyproject.toml` 的 `[tool.uv.sources]` 钉的 tag，去掉前缀 `v`。
+#: 自 RAY-334 起依赖按 tag 而非 40 位 SHA 钉，这个常量是那个 tag 在测试侧的回声。
+PINNED_VERSION = "0.3.0"
+
+
 def test_wt901_is_installed_at_the_pinned_version():
-    assert metadata.version("wt901") == "0.1.0"
+    """装上的是不是我们钉的那一版。
+
+    这条与 `ADAPTER_SURFACE` 守的不是一回事：那些名字在多个版本里都在，所以
+    「表面契约全过」并不能说明装对了版本。按 tag 钉之后尤其要守——tag 是可以被
+    上游移动的引用（`uv.lock` 里记着解析出的 commit，但重新 `uv lock` 会跟着
+    移动的 tag 走），而 commit 不会。**这条挂了先看 tag 是不是被挪过。**
+    """
+    assert metadata.version("wt901") == PINNED_VERSION
 
 
 @pytest.mark.parametrize("name", ADAPTER_SURFACE)
