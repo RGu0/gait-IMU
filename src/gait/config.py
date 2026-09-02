@@ -36,6 +36,10 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 2.1（RAY-328 `xcorr-period-prior`）：`AlgoConfig` 增加反相自检的相位带。互相关
+#: 给出的周期 T_x 不需要新参数 —— 它进的是既有的估计池，受 `stance_period_*` 那几个
+#: 已有的闸管着，而那正是"进池不是特权通道"的意思。
+#:
 #: 2.0（RAY-328 `dual-foot-qc-windowing`）：`AlgoConfig` 增加跨脚周期比值闸、
 #: 空洞保护带与双脚净窗覆盖率下限。这三个数只服务周期规划的**宽闸**；步态参数
 #: 那条路径的严闸不受影响，含义也没变 —— 升的是"多了字段"，不是"旧字段改了意思"。
@@ -66,7 +70,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "2.0"
+CONFIG_VERSION: Final[str] = "2.1"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -411,6 +415,15 @@ class AlgoConfig:
     #: `assess` 判了 unusable（残差 RMS 148 ms / p95 286 ms），两道判据指向同一格。
     #: 所以这个下限在实测里不单独否决任何一格，它是**兜底**而不是主判据。
     planning_min_coverage: float = 0.95
+    #: 反相自检的相位带，φ/T 落在带外就标记反相异常。
+    #:
+    #: 对称步态里左右脚反相，φ/T 应当在 0.5 附近 —— 实测 12 趟全部落在 0.46~0.51
+    #: （散布 0.05）。带宽却给到 0.30，是实测散布的 6 倍，**这是刻意放松的**：偏瘫、疼痛回避、
+    #: 假肢的相位可能系统性偏离 0.5，而本判据的用途是抓"左右配对彻底错了"（那会让
+    #: φ/T 跑到 0 或 1 附近），不是抓"这个人走得不太对称"。后者是步态参数要报的
+    #: 结论，不是同步自检该否决的东西。
+    xcorr_antiphase_min: float = 0.35
+    xcorr_antiphase_max: float = 0.65
 
     # ── 同步质量自检（RAY-211）。PRD §8、§13 ───────────────────────────────
 
@@ -524,6 +537,8 @@ class AlgoConfig:
             "cross_foot_period_ratio_max",
             "planning_gap_guard_s",
             "planning_min_coverage",
+            "xcorr_antiphase_min",
+            "xcorr_antiphase_max",
             "selfcheck_stride_period_tolerance",
             "selfcheck_offset_consistency_s",
             "selfcheck_offset_warn_s",
@@ -559,6 +574,12 @@ class AlgoConfig:
                 "cross_foot_period_ratio_max 是两脚周期的最大比值，必须大于 1，"
                 f"收到 {self.cross_foot_period_ratio_max}。等于 1 要求两脚周期逐比特相同，"
                 "那会把每一趟都标成降级，戳也就不再有信息。"
+            )
+        if not 0.0 < self.xcorr_antiphase_min < self.xcorr_antiphase_max < 1.0:
+            raise ConfigError(
+                "反相带必须满足 0 < min < max < 1，收到 "
+                f"{self.xcorr_antiphase_min} 与 {self.xcorr_antiphase_max}。"
+                "φ/T 是模周期的相位比，带外就是带外，反过来的区间没有对应的相位。"
             )
         if not 0.0 < self.planning_min_coverage <= 1.0:
             raise ConfigError(

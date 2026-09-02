@@ -107,6 +107,10 @@ class PeriodReport:
     #: "两周期并成一个"或"一周期劈成两个"在结构上不可能发生。
     cycles: int
     #: 各法给出的周期（样本）。落进报告供人直接核对，不是调试残留。
+    #:
+    #: 名字就是来源：`autocorrelation` / `swing` / `impact` 来自本脚自己的信号，
+    #: `crosscorrelation` 来自双脚互相关的外部先验（RAY-328 L1）。哪一票在场是可读
+    #: 的事实 —— 同一段数据用不用双脚，估计池就不一样，而报告必须说得出这件事。
     estimates: tuple[tuple[str, float], ...]
     #: 各估计的 max/min。实测一致时 1.005~1.058，致命失效时 2.0。
     ratio: float
@@ -360,7 +364,11 @@ def _fold_harmonic(value: float, seed: float) -> float:
 
 
 def _estimate_period(
-    swing: np.ndarray, impact: np.ndarray, fs: float, cfg: AlgoConfig
+    swing: np.ndarray,
+    impact: np.ndarray,
+    fs: float,
+    cfg: AlgoConfig,
+    prior_samples: float | None = None,
 ) -> PeriodReport | None:
     """估步态周期并划出周期边界。不是步态时返回 None。
 
@@ -371,6 +379,15 @@ def _estimate_period(
 
     事件域没有这样的分离：A–B 事件间隔的 IQR 跨趟差 30 倍，"这两个事件相差 80 ms
     算不算同一个"需要一个精细容差，而那个容差同样面临太严/太松。
+
+    `prior_samples` 是**外部**算好的周期先验，样本（RAY-328 L1：双脚 swing 互相关的
+    峰间距 T_x）。它由调用方算好传进来，本模块不去取 —— 互相关要两只脚的信号落在同
+    一条时间轴上，而对齐是 `sync` 层的事，`gait.core` 不得 import 它（分层红线）。
+
+    它进的是**估计池**，不是特权通道：与另外三个估计一样折谐波、一样做范围检查、
+    一样参与一致性闸与中位数。理由是它并不比别的估计更可信 —— 实测 T_x 与单脚中位
+    周期差 0.5%~9.3%，而它自己也可能锁到谐波上。给它特权就等于把"两只脚一起错"这
+    种失效变成不可检出的。
     """
     low = max(1, round(cfg.stance_period_min_s * fs))
     high = round(cfg.stance_period_max_s * fs)
@@ -380,6 +397,10 @@ def _estimate_period(
 
     separation = max(1, round(0.5 * seed))
     estimates: list[tuple[str, float]] = [("autocorrelation", seed)]
+    if prior_samples is not None and prior_samples > 0.0:
+        prior = _fold_harmonic(float(prior_samples), seed)
+        if low <= prior <= high:
+            estimates.append(("crosscorrelation", prior))
     for name, signal in (("swing", swing), ("impact", impact)):
         peaks = _local_peaks(signal, separation)
         if peaks.size >= 2:
@@ -585,12 +606,17 @@ def detect_stance(
     cfg: AlgoConfig | None = None,
     *,
     gravity: float = GRAVITY_STANDARD,
+    period_prior_samples: float | None = None,
 ) -> StanceDetection:
     """检测零速区间。`acc` 是比力（m/s²），`gyr` 是角速度（rad/s），单个连续段。
 
     `cfg` 就是预设切换的接口 —— 换一个 `AlgoConfig` 即可，本模块**没有任何模块级
     状态**。`AlgoConfig.low_speed()` 与默认预设可以在同一个进程里对同一段数据反复
     交替调用而互不影响，测试直接断言这件事。
+
+    `period_prior_samples` 是可选的外部周期先验（RAY-328 L1 的双脚互相关 T_x），
+    以**样本**计。不传时本函数的行为与它存在之前逐比特相同 —— 这是刻意的：单脚路径
+    仍然是完整可用的，双脚只是在有条件时多给一票。见 `_estimate_period`。
     """
     cfg = cfg or AlgoConfig()
     specific_force = np.asarray(acc, dtype=np.float64)
@@ -669,7 +695,7 @@ def detect_stance(
     # 尖锐事件，滑窗平均会把它削矮并向两侧抹开，而这里要的正是它的位置。
     swing = np.linalg.norm(omega, axis=1)
     impact = np.abs(np.linalg.norm(detection_acc, axis=1) - gravity)
-    period = _estimate_period(swing, impact, fs, cfg)
+    period = _estimate_period(swing, impact, fs, cfg, period_prior_samples)
 
     if period is None:
         # 没有可辨认的步态：静立、足部被固定，或段太短。阈值判据在这里是对的 ——
