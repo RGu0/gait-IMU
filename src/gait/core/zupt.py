@@ -416,20 +416,45 @@ def _estimate_period(
     # 标注"，而不是把一个已知跑掉的估计拌进中位数里。实测 `shuffle`（拖步样步态，
     # 摆动峰本就微弱）正落在这一支：中位数会给出 259 而真值 400。
     period = float(np.median(values)) if consistent else seed
+    # **这不再是最后一句话。** 网格铺完之后 `detect_stance` 会拿标出来的支撑相回头
+    # 再问一次周期（`_refine_from_events`，RAY-339），而那一票通常会取代这里的取值。
+    # 上面这条一致/不一致的分支因此只决定**第一遍**用什么，以及精修不采纳时保留什么。
 
-    # 周期定了"每格多宽"，还差"格子从哪切"。**相位必须让边界落在摆动相里**：边界一旦
-    # 切进支撑相，那一步就被劈给相邻两个周期，两边的 `argmin` 各自跑到隔壁步上去，那
-    # 一步谁也不标 —— 实测就是这样漏掉的（边界 932/1154 分别落在支撑相 867–1001 与
-    # 1089–1223 里）。
-    #
-    # 不能拿摆动峰当锚点。`‖ω‖` 的最大值出现在蹬离/触地，那是**紧挨着支撑相**的位置，
-    # 不是摆动中段；按峰对齐恰好把边界推到支撑相边上。改为直接搜相位：在 `[0, period)`
-    # 里取让**各边界处 `‖ω‖` 平均值最大**的那一个。这是把"边界要落在脚动得最快的地方"
-    # 直接写成目标函数，不经过任何峰选。两类相位的得分差一个数量级，选起来没有悬念。
-    # 网格的**范围**由摆动峰定：第一个峰到最后一个峰之间必定是走路，之前和之后可能是
-    # 起步前的静立。范围放到整条记录上会把静立段也切成周期并在那里标零速 —— 脚确实是
-    # 静的，不算误检，但那些跨度会混进步相事件里，把左右配对算坏（`generate_dual_walk`
-    # 的 `still_lead_s` 就是这么暴露出来的）。
+    bounds = _lay_grid(swing, period, cfg)
+    if bounds is None:
+        return None
+    return PeriodReport(
+        period_samples=period,
+        cycles=len(bounds),
+        estimates=tuple(estimates),
+        ratio=ratio,
+        consistent=consistent,
+        bounds=bounds,
+    )
+
+
+def _lay_grid(
+    swing: np.ndarray, period: float, cfg: AlgoConfig
+) -> tuple[tuple[int, int], ...] | None:
+    """周期定了"每格多宽"，这里定"格子从哪切"。铺不出合法网格时返回 None。
+
+    **相位必须让边界落在摆动相里**：边界一旦切进支撑相，那一步就被劈给相邻两个周期，
+    两边的 `argmin` 各自跑到隔壁步上去，那一步谁也不标 —— 实测就是这样漏掉的
+    （边界 932/1154 分别落在支撑相 867–1001 与 1089–1223 里）。
+
+    不能拿摆动峰当锚点。`‖ω‖` 的最大值出现在蹬离/触地，那是**紧挨着支撑相**的位置，
+    不是摆动中段；按峰对齐恰好把边界推到支撑相边上。改为直接搜相位：在 `[0, period)`
+    里取让**各边界处 `‖ω‖` 平均值最大**的那一个。这是把"边界要落在脚动得最快的地方"
+    直接写成目标函数，不经过任何峰选。两类相位的得分差一个数量级，选起来没有悬念。
+
+    网格的**范围**由摆动峰定：第一个峰到最后一个峰之间必定是走路，之前和之后可能是
+    起步前的静立。范围放到整条记录上会把静立段也切成周期并在那里标零速 —— 脚确实是
+    静的，不算误检，但那些跨度会混进步相事件里，把左右配对算坏（`generate_dual_walk`
+    的 `still_lead_s` 就是这么暴露出来的）。
+
+    抽成独立函数是因为 RAY-339 的事件域精修要**重铺一次**网格：换了周期就得重铺，
+    而重铺必须与第一次走同一套规则，否则两次的边界含义不同，比较也就没有意义。
+    """
     swing_peaks = _local_peaks(swing, max(1, round(0.5 * period)))
     if swing_peaks.size < 2:
         return None
@@ -465,12 +490,91 @@ def _estimate_period(
     )
     if len(bounds) < cfg.stance_min_cycles:
         return None
+    return bounds
+
+
+def _refine_from_events(
+    swing: np.ndarray,
+    stances: list[tuple[int, int]],
+    period: PeriodReport,
+    fs: float,
+    cfg: AlgoConfig,
+) -> PeriodReport | None:
+    """网格铺完之后，拿标出来的支撑相**回头再问一次周期**。不该采纳时返回 None。
+
+    ## 为什么这一步能赢过铺网格用的那个估计
+
+    铺网格的三票（自相关、摆动峰、冲击峰）都是**整段**统计量，一趟里只要信号的节律或
+    质量在变，它们就都被拉向那个变化的平均，而不是任何一处的真值。这里的量不一样：
+    `_period_stance` 在每个格子里取 `argmin ‖ω‖`，那个位置是**数据定的**，不是格子定的，
+    所以相邻两个标记之间的间隔量到的是真实的 stride，哪怕格子本身偏宽。
+
+    实测（RAY-339，24 格真值受控已知）：网格 T 的 RMS **6.4%**、最差一格 **+23.9%**；
+    事件域的 RMS **2.2%**、几乎无偏。采纳之后整条管线是 RMS **2.3%**、最差 **+4.6%**。
+
+    **它必须被采纳，不能只是进池投票。** 实测把它当第四票喂进 `_estimate_period` 的
+    估计池，RMS 只从 4.1% 动到 4.0% —— 中位数把它稀释掉了。
+
+    ## 一个负结果：合成数据里找不到那个偏差
+
+    最差那一格（`flat/slow-a/L`）的趟内步频漂移也是 24 格里最大的（后 1/3 的中位周期
+    比前 1/3 短 15.1%），所以漂移显然有份。但**单靠漂移不足以造成它**：在合成行走上把
+    步频拉快 35%，网格仍然只偏 1.9%，事件域给出的值与它逐比特相同。另一半来自真机上
+    摆动峰本身的微弱与不规则，而合成器给出的峰干净得多。
+
+    写在这里是为了让下一个人不必再去合成数据里找那个偏差 —— 找不到，而
+    `tests/test_zupt.py::test_synthetic_drift_alone_does_not_move_the_estimate`
+    把这条钉住了。本函数的精度结论只在真机验收里成立。
+
+    ## 三道闸，都不是"准不准"
+
+    1. **支持度**：像一个 stride 的间隔少于 `period_refine_min_intervals` 就不采纳。
+       事件域的软肋是支撑相检出本身不规则（实测最差一格 37 个间隔里只有 11 个可用），
+       而那时中位数已经不是中位数了。
+    2. **谐波**：折回自相关那一支所在的基频。这就是"自相关退成谐波守卫"的意思 ——
+       它不再决定周期是多少，只决定周期在**哪一个八度**上。
+    3. **范围**：折完仍在 `stance_period_*` 之外就整个作废。
+
+    三道闸拦的都是"这个估计没有资格参与"，没有一道在问"它准不准" —— 准不准正是它比
+    网格强的地方，用一道闸去怀疑它等于把改进撤销。
+    """
+    starts = np.array([start for start, _ in stances], dtype=np.float64)
+    if starts.size < cfg.period_refine_min_intervals + 1:
+        return None
+    intervals = np.diff(starts)
+    if intervals.size == 0:
+        return None
+    seed = float(np.median(intervals))
+    if seed <= 0.0:
+        return None
+    kept = intervals[
+        (intervals > cfg.period_refine_low * seed)
+        & (intervals < cfg.period_refine_high * seed)
+    ]
+    if kept.size < cfg.period_refine_min_intervals:
+        return None
+
+    # 谐波守卫：拿铺网格时那个估计当锚。它是整段统计量、可能偏，但**不会偏到另一个
+    # 八度上**（`_autocorrelation_period` 偏向最小近极大滞后正是为了这条）。
+    value = _fold_harmonic(float(np.median(kept)), period.period_samples)
+    if not (cfg.stance_period_min_s * fs <= value <= cfg.stance_period_max_s * fs):
+        return None
+    bounds = _lay_grid(swing, value, cfg)
+    if bounds is None:
+        return None
+
+    estimates = (*period.estimates, ("events", value))
+    values = [item for _, item in estimates]
+    ratio = max(values) / min(values)
     return PeriodReport(
-        period_samples=period,
+        period_samples=value,
         cycles=len(bounds),
-        estimates=tuple(estimates),
+        estimates=estimates,
         ratio=ratio,
-        consistent=consistent,
+        # 一致性闸从**开关**降级为**读数**。它原本决定"取中位数还是退回自相关"，而
+        # 现在周期由事件域直接给出 —— 那个二选一没有了。它仍然报出来，因为"几个估计
+        # 彼此差多少"是读报告的人要看的事实，只是它不再左右结果。
+        consistent=ratio < cfg.stance_period_consistency_max,
         bounds=bounds,
     )
 
@@ -706,10 +810,20 @@ def detect_stance(
         confidence = np.where(degraded, np.minimum(confidence, 0.25), confidence)
     else:
         unit_acc = acc_mean / np.maximum(acc_mean_norm[:, None], 1e-9)
-        degraded = _period_stance(
-            swing, hard, unit_acc, _flat_foot_reference(unit_acc, coarse), period, cfg
-        )
+        reference = _flat_foot_reference(unit_acc, coarse)
+        degraded = _period_stance(swing, hard, unit_acc, reference, period, cfg)
         zupt = hard | degraded
+
+        # 精修**恰好一次**，不迭代到收敛。第二遍的标记会给出又一个事件域估计，第三遍
+        # 再给一个 —— 但那之后的每一步都在拿自己的输出喂自己，收敛到哪里由初值决定，
+        # 而不是由数据决定。一次精修是"用数据定的位置回头修一次格子宽度"，再多就是
+        # 让格子和标记互相说服。
+        refined = _refine_from_events(swing, _runs(zupt), period, fs, cfg)
+        if refined is not None:
+            period = refined
+            degraded = _period_stance(swing, hard, unit_acc, reference, period, cfg)
+            zupt = hard | degraded
+
         confidence = np.where(hard, _confidence(score, cfg.zupt_glrt_threshold), 0.0)
         # 周期零速的置信度来自**实测的**周期内最低 ‖ω‖，不来自 GLRT：GLRT 在这些
         # 样本上按定义是超阈的（那正是本 Issue 的根因），拿它算出来的置信度恒为 0，
