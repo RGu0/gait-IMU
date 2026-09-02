@@ -570,7 +570,7 @@ def test_the_outward_reach_does_not_ask_the_foot_to_stop_turning():
 
     from gait.analysis.events import _flat_foot_runs
 
-    merged, _ = _flat_foot_runs(acc, fs, CFG)
+    merged = _flat_foot_runs(acc, fs, CFG)
     assert merged, "姿态判据应当认出这一整段都是足底平放"
     assert merged[-1][1] >= still + turning - CFG.zupt_window_samples, (
         "转动那一段的比力仍是重力、姿态仍是平放 —— 它必须留在平放段里"
@@ -668,3 +668,24 @@ def test_passing_the_edges_in_skips_the_refinement_entirely():
     assert edges == handmade
     assert all(edge.expanded_start == 0 and edge.expanded_stop == 0 for edge in edges)
     assert cycles
+
+
+def test_the_still_lead_is_dropped_by_the_intervals_own_scale():
+    """前导按**区间自己的**时长剔，不能拿零速区间那边剩下的个数去切。
+
+    两条路的区间数不一样（真机实测 35~42 vs 34~37）。拿一边的个数去切另一边，
+    切掉的就不是前导那一段 —— 而前导是一个秒级的假支撑相，混进去会以一个秒级的
+    "相位"污染双支撑期均值（RAY-296 实测 20.5% 读成 30.5%）。
+    """
+    from gait.cli.v3prime import _drop_lead_edges
+
+    fs = 200.0
+    t = np.arange(4000) / fs
+    lead = StanceEdges(ic=0, to=400, expanded_start=0, expanded_stop=0)  # 2.0 s
+    steps = [
+        StanceEdges(ic=start, to=start + 60, expanded_start=0, expanded_stop=0)
+        for start in range(600, 3600, 300)  # 0.3 s 一个，典型支撑相
+    ]
+
+    assert _drop_lead_edges(t, [lead, *steps], CFG) == steps
+    assert _drop_lead_edges(t, steps, CFG) == steps, "没有前导时一个都不该剔"

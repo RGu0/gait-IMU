@@ -185,10 +185,8 @@ def refine_stance_edges(
     return refined
 
 
-def _flat_foot_runs(
-    acc: np.ndarray, fs: float, cfg: AlgoConfig
-) -> tuple[list[list[int]], np.ndarray]:
-    """足底平放的区间，以及所用的静立参考方向。
+def _flat_foot_runs(acc: np.ndarray, fs: float, cfg: AlgoConfig) -> list[list[int]]:
+    """足底平放的区间。
 
     判据是**姿态**而不是角速度：`‖ω‖` 是率，接近零有两种情形 —— 真站住了，以及摆动
     相里角速度反向的那一瞬，两者用 `‖ω‖` 分不开。而足底平放的姿态是摆动相**不会经过**
@@ -204,7 +202,7 @@ def _flat_foot_runs(
     unit = mean / np.maximum(norm[:, None], 1e-9)
     quasi_static = np.abs(norm - GRAVITY_STANDARD) < cfg.zupt_acc_threshold
     if not quasi_static.any():
-        return [], np.array([0.0, 0.0, 1.0])
+        return []
     # 参考方向取**中位**而不是均值：一个混进来的摆动相样本能把均值拽走，拽不动中位数。
     reference = np.median(unit[quasi_static], axis=0)
     reference = reference / max(float(np.linalg.norm(reference)), 1e-9)
@@ -219,7 +217,7 @@ def _flat_foot_runs(
             merged[-1][1] = stop
         else:
             merged.append([start, stop])
-    return merged, reference
+    return merged
 
 
 def _one_per_cycle(
@@ -234,6 +232,10 @@ def _one_per_cycle(
 
     没有周期报告时退回到零速时刻本身：`_period_stance` 保证一周期一个，所以它同样
     是"每周期一次"的锚，只是少了周期边界这层保护。
+
+    结果**排序后**返回。周期边界升序，重叠最大的那一段通常也就跟着升序 —— 但"通常"
+    不够：下游拿 `refined[-1].to` 与 `picked[i+1][0]` 当外推的上下界，那是把升序当成
+    前提在用。与其依赖它成立，不如让它成立。
     """
     starts = np.array([run[0] for run in merged])
     stops = np.array([run[1] for run in merged])
@@ -249,13 +251,13 @@ def _one_per_cycle(
             overlap = np.minimum(stops, stop) - np.maximum(starts, start)
             if overlap.max(initial=0) > 0:
                 take(int(np.argmax(overlap)))
-        return picked
+        return sorted(picked)
     for start, stop in detection.stances:
         centre = (start + stop) // 2
         inside = (starts <= centre) & (centre < stops)
         distance = np.where(inside, 0, np.minimum(abs(starts - centre), abs(stops - centre)))
         take(int(np.argmin(distance)))
-    return picked
+    return sorted(picked)
 
 
 def _impact(deviation: np.ndarray, max_width: float) -> int | None:
@@ -366,7 +368,7 @@ def detect_stance_intervals(
     if not np.isfinite(fs) or fs <= 0:
         raise EventError(f"fs 必须是正的有限值，收到 {fs}")
 
-    merged, _reference = _flat_foot_runs(acc, fs, cfg)
+    merged = _flat_foot_runs(acc, fs, cfg)
     if not merged:
         return []
     picked = _one_per_cycle(merged, detection)
