@@ -21,6 +21,7 @@ import pytest
 from gait.config import AlgoConfig, ConfigError
 from gait.core.ins import GRAVITY_STANDARD
 from gait.core.zupt import (
+    PeriodReport,
     StanceDetection,
     ZuptError,
     _autocorrelation_period,
@@ -764,3 +765,83 @@ def test_consistency_became_a_reading_not_a_switch():
     assert isinstance(detection.period.consistent, bool)
     # 无论 consistent 是真是假，周期都等于事件域那一票。
     assert detection.period.period_samples == dict(detection.period.estimates)["events"]
+
+
+# ── 首尾截断显式报出（RAY-339 `boundary-truncation-reporting`）──────────────
+
+
+def test_the_grid_reports_what_it_left_outside():
+    """网格两头剩下的数据被报出来，而且 `cycles` 一个都没变。
+
+    判据 4 的原话是"显式报出，不补进计数"。`cycles` 的定义是"观测跨度内的完整周期"——
+    那是个稳定、可复核的量；"这一趟一共迈了几步"是另一个问题。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    period = detection.period
+
+    assert period.head_truncated >= 0.0
+    assert period.tail_truncated >= 0.0
+    # 报的是格子外面那两截，所以它必须与格子的位置对得上。
+    assert period.head_truncated == pytest.approx(
+        period.bounds[0][0] / period.period_samples
+    )
+    assert period.tail_truncated == pytest.approx(
+        (series.acc.shape[0] - period.bounds[-1][1]) / period.period_samples
+    )
+    assert period.cycles == len(period.bounds)
+
+
+def test_the_two_ends_are_added_before_rounding_not_after():
+    """两头先相加再取整，不是各取整再相加。
+
+    两头各 0.4 个周期，合起来是 0.8 —— 分开取整会把这一整步整个丢掉。实测两头合计的
+    中位数是 1.27 个周期，正落在"分开取整会丢掉一个"的区间里。
+    """
+    report = PeriodReport(
+        period_samples=100.0,
+        cycles=30,
+        estimates=(("autocorrelation", 100.0),),
+        ratio=1.0,
+        consistent=True,
+        bounds=((0, 100), (100, 200)),
+        head_truncated=0.4,
+        tail_truncated=0.4,
+    )
+    assert report.spanned_cycles == 31  # 30 + round(0.8)
+    assert round(0.4) + round(0.4) == 0  # 分开取整会给出 30
+
+
+@pytest.mark.parametrize(
+    ("head", "tail", "truncated"), [(0.0, 0.0, False), (0.2, 0.2, False), (0.3, 0.3, True)]
+)
+def test_truncated_says_whether_a_step_was_left_out(head, tail, truncated):
+    """两头合起来够半个周期，就算"至少有一步没被数进来"。"""
+    report = PeriodReport(
+        period_samples=100.0,
+        cycles=30,
+        estimates=(("autocorrelation", 100.0),),
+        ratio=1.0,
+        consistent=True,
+        bounds=((0, 100),),
+        head_truncated=head,
+        tail_truncated=tail,
+    )
+    assert report.truncated is truncated
+
+
+def test_a_report_without_truncation_fields_still_works():
+    """老的构造点不传两头，默认 0 —— `spanned_cycles` 退化成 `cycles`。
+
+    这条守的是"新增字段没有改变既有含义"：不传的时候，两个量必须相等。
+    """
+    report = PeriodReport(
+        period_samples=100.0,
+        cycles=30,
+        estimates=(("autocorrelation", 100.0),),
+        ratio=1.0,
+        consistent=True,
+        bounds=((0, 100),),
+    )
+    assert report.spanned_cycles == report.cycles == 30
+    assert report.truncated is False

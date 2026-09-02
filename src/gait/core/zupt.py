@@ -118,6 +118,36 @@ class PeriodReport:
     consistent: bool
     #: 周期边界，半开、升序，恰好 `cycles` 个。
     bounds: tuple[tuple[int, int], ...]
+    #: 网格**之前**与**之后**还剩多少数据，以周期计。
+    #:
+    #: 网格只铺在首个到末个摆动峰之间（见 `_lay_grid`），两头总还剩一截 —— 那截里
+    #: 通常正好有**一步**，只是它没有完整的两个边界，所以不进 `cycles`。
+    #:
+    #: **不要把它加进 `cycles`。** `cycles` 的定义是"观测跨度内的完整周期"，那是个
+    #: 稳定、可复核的量；而"这一趟一共迈了几步"是另一个问题，答案要看两头那两截算不算。
+    #: 报出来让调用方自己决定 —— `spanned_cycles` 是其中一种决定。
+    head_truncated: float = 0.0
+    tail_truncated: float = 0.0
+
+    @property
+    def truncated(self) -> bool:
+        """两头合起来还剩至少半个周期 —— 也就是"至少有一步没被数进来"。"""
+        return self.head_truncated + self.tail_truncated >= 0.5
+
+    @property
+    def spanned_cycles(self) -> int:
+        """**数据跨度**里一共有几个周期，把两头那两截算进来。
+
+        与 `cycles` 是两个量，谁也不替代谁：`cycles` 数的是完整的格子，这个数的是
+        这段数据实际盖住了多少个周期。做一次加法再取整，而不是两头各取整再相加 ——
+        两头各 0.5 个周期合起来是一整个，分开取整会把它整个丢掉。
+
+        实测（RAY-339，24 格，真值 38）：`cycles` 的偏差是 **−1.04**，本属性是
+        **+0.33**、RMSE 0.96。作为对照，T-230-03 那种定长走廊可以直接 `cycles + 1`
+        （偏差 −0.04），但那个 1 来自"首尾恰好各半步"这个**协议性质**，自由行走没有 ——
+        本属性不需要它。
+        """
+        return round(self.cycles + self.head_truncated + self.tail_truncated)
 
 
 @dataclass(frozen=True)
@@ -423,6 +453,7 @@ def _estimate_period(
     bounds = _lay_grid(swing, period, cfg)
     if bounds is None:
         return None
+    head, tail = _truncation(swing.size, bounds, period)
     return PeriodReport(
         period_samples=period,
         cycles=len(bounds),
@@ -430,7 +461,23 @@ def _estimate_period(
         ratio=ratio,
         consistent=consistent,
         bounds=bounds,
+        head_truncated=head,
+        tail_truncated=tail,
     )
+
+
+def _truncation(
+    samples: int, bounds: tuple[tuple[int, int], ...], period: float
+) -> tuple[float, float]:
+    """网格两头各剩多少数据，以周期计。
+
+    这是个**观测**，不是修正：它只说"格子外面还有这么多"，不替调用方决定那些算不算
+    一步。判据 4 的原话是"显式报出，不补进计数" —— 因为"首尾恰好各半步"是定长走廊
+    协议才有的性质，自由行走没有，拿算法去补会在自由行走上反过来多数一个。
+    """
+    if not bounds or period <= 0.0:
+        return 0.0, 0.0
+    return bounds[0][0] / period, (samples - bounds[-1][1]) / period
 
 
 def _lay_grid(
@@ -566,6 +613,7 @@ def _refine_from_events(
     estimates = (*period.estimates, ("events", value))
     values = [item for _, item in estimates]
     ratio = max(values) / min(values)
+    head, tail = _truncation(swing.size, bounds, value)
     return PeriodReport(
         period_samples=value,
         cycles=len(bounds),
@@ -576,6 +624,8 @@ def _refine_from_events(
         # 彼此差多少"是读报告的人要看的事实，只是它不再左右结果。
         consistent=ratio < cfg.stance_period_consistency_max,
         bounds=bounds,
+        head_truncated=head,
+        tail_truncated=tail,
     )
 
 
