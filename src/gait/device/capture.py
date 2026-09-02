@@ -58,7 +58,7 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 from wt901 import OutputMode, WT901Device
 from wt901.device import DEFAULT_QUEUE_SIZE
@@ -217,6 +217,41 @@ class SessionCapture:
         self.close()
 
 
+def _check_replay_losses(stats: Any, queue_size: int) -> None:
+    """回放结束后检查两个丢弃计数，非零即抛。
+
+    **这是两件事，混着看会把原因指错**：
+
+    * ``dropped_samples`` —— 队列压力。喂入快过消费（下游每帧处理耗时），队列
+      满后丢弃最旧的样本。解法是调大 ``queue_size`` 或按原速回放。
+    * ``dropped_before_ready`` —— 连接就绪之前到达、因而被丢弃的帧（wt901
+      v0.3.0 新增，**没有**并进 ``dropped_samples``）。它与消费速度无关：流还
+      没开始。在回放语境下它意味着这份回放的**开头被截掉了一段**，而那段在原
+      录制里是有的 —— 这不是「与实时不一致」，是「与原录制不一致」。
+
+    先报后者：它不为零时，前者的数字是在一段已经被截过的流上数出来的，先去调
+    ``queue_size`` 只会绕远路。
+
+    ``stats`` 不标成 ``DeviceStats``：那要把它加进 `ADAPTER_SURFACE`，等于声明
+    适配层依赖这个类型，而这里只读两个属性。标 ``Any`` 是说「这里是有意的鸭子
+    类型」—— 标 ``object`` 则是错的，``object`` 上没有 ``dropped_samples``。
+    """
+    before_ready = getattr(stats, "dropped_before_ready", 0)
+    if before_ready:
+        raise CaptureError(
+            f"回放在连接就绪前丢了 {before_ready} 帧：这份回放缺了开头的一段，"
+            "与原录制不是同一串数据。它与队列大小无关 —— 流还没开始就丢了，"
+            "调大 queue_size 不会有帮助。"
+        )
+    dropped = stats.dropped_samples
+    if dropped:
+        raise CaptureError(
+            f"回放丢了 {dropped} 个样本：喂入快过消费，样本队列（{queue_size}）"
+            "满后丢弃了最旧的样本。这份回放与实时结果不再一致 —— "
+            "调大 queue_size，或用 speed=1.0 按原速回放。"
+        )
+
+
 async def replay_raw_frames(
     path: Path, *, speed: float | None = None, queue_size: int = DEFAULT_QUEUE_SIZE
 ) -> AsyncIterator[RawFrame]:
@@ -243,8 +278,8 @@ async def replay_raw_frames(
     ``await asyncio.sleep(0)``，正是为了不让整段录制在一个事件循环轮次里喂完。
     这里守的是另一半 —— **下游每帧处理耗时**时，喂入仍会跑在消费前面。
 
-    所以迭代正常结束后检查 `stats.dropped_samples`，非零即抛。消费者中途 `break`
-    不算 —— 那是它自己不要了。要处理慢下游可以调大 `queue_size`。
+    所以迭代正常结束后走 `_check_replay_losses`，两个丢弃计数非零即抛。消费者
+    中途 `break` 不算 —— 那是它自己不要了。要处理慢下游可以调大 `queue_size`。
     """
     recording = read_recording(Path(path))
     transport = ReplayTransport(recording, speed=speed)
@@ -263,13 +298,7 @@ async def replay_raw_frames(
         closer.cancel()
         await device.close()
 
-    dropped = device.stats.dropped_samples
-    if dropped:
-        raise CaptureError(
-            f"回放丢了 {dropped} 个样本：喂入快过消费，样本队列（{queue_size}）"
-            "满后丢弃了最旧的样本。这份回放与实时结果不再一致 —— "
-            "调大 queue_size，或用 speed=1.0 按原速回放。"
-        )
+    _check_replay_losses(device.stats, queue_size)
 
 
 async def replay_session_foot(
@@ -391,10 +420,4 @@ async def replay_recording(
         closer.cancel()
         await device.close()
 
-    dropped = device.stats.dropped_samples
-    if dropped:
-        raise CaptureError(
-            f"回放丢了 {dropped} 个样本：喂入快过消费，样本队列（{queue_size}）"
-            "满后丢弃了最旧的样本。这份回放与实时结果不再一致 —— "
-            "调大 queue_size，或用 speed=1.0 按原速回放。"
-        )
+    _check_replay_losses(device.stats, queue_size)

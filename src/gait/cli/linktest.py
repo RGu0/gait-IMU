@@ -407,6 +407,14 @@ def _verdict(
                 f"{run.device_id}: 主机侧消费队列溢出 "
                 f"{run.stats['dropped_samples']} 样本，测量自身不可信"
             )
+        # 与上一条是两件事：那条是消费者跟不上，这条是流还没开始。混进
+        # dropped_samples 会让「调大队列」成为对一个与队列无关的问题的处方。
+        if run.stats.get("dropped_before_ready", 0):
+            problems.append(
+                f"{run.device_id}: 连接就绪前丢弃 "
+                f"{run.stats['dropped_before_ready']} 帧，"
+                "该段链路刚建立，数据不能按当前配置理解"
+            )
     return {
         "pass": not problems,
         "problems": problems,
@@ -970,15 +978,15 @@ def _markdown(report: dict[str, Any]) -> str:
     lines += ["", "## 各设备", ""]
     lines.append(
         "| 设备 | 样本 | 时长 s | 缺失率 | 最差 30s 窗 | 最差秒丢失 | 空洞数 | "
-        "resync | 队列溢出 | 电量前→后 | 扫描期 RSSI |"
+        "resync | 队列溢出 | 就绪前丢弃 | 电量前→后 | 扫描期 RSSI |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for dev in report["devices"]:
         integ = dev["integrity"]
         if integ is None:
             lines.append(
                 f"| {dev['device_id']} | {dev['samples']} | — | 样本不足 "
-                f"| | | | | | | {_rssi_cell(dev)} |"
+                f"| | | | | | | | {_rssi_cell(dev)} |"
             )
             continue
         loss = dev["loss_rate"]
@@ -993,7 +1001,8 @@ def _markdown(report: dict[str, Any]) -> str:
             f"| {loss:.3%} | {dev['worst_window_loss']:.2%} "
             f"| {integ['worst_second_loss']} | {len(integ['gaps'])} "
             f"| {dev['device_stats'].get('resync_count', '—')} "
-            f"| {dev['device_stats'].get('dropped_samples', '—')} | {battery} "
+            f"| {dev['device_stats'].get('dropped_samples', '—')} "
+            f"| {dev['device_stats'].get('dropped_before_ready', '—')} | {battery} "
             f"| {_rssi_cell(dev)} |"
         )
     verdict = report["verdict"]
