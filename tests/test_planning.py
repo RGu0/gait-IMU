@@ -15,10 +15,16 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from gait.analysis.planning import FootPlanInput, plan_periods
+from gait.analysis.planning import (
+    FootPlanInput,
+    FootSeriesInput,
+    cross_foot_phase,
+    plan_dual_foot_periods,
+    plan_periods,
+)
 from gait.config import AlgoConfig, ConfigError
 from gait.core.dualfoot import DualFootError, check_cross_foot_period
-from gait.core.zupt import PeriodReport
+from gait.core.zupt import PeriodReport, detect_stance
 from gait.sync.integrity import assess
 from gait.sync.planning import (
     PlanningError,
@@ -27,6 +33,7 @@ from gait.sync.planning import (
     plan_dual_net_window,
 )
 from gait.sync.timebase import build_timebase
+from gait.validate.synthetic import NoiseModel, WalkSpec, generate_dual_walk
 
 NOMINAL_FS = 200.0
 
@@ -439,3 +446,194 @@ def test_an_integrity_report_from_another_segment_is_refused():
     other = assess(arrivals(duration_s=30.0), NOMINAL_FS)
     with pytest.raises(PlanningError):
         net_window(holed, NOMINAL_FS, report=other)
+
+
+# ── 判据 3：互相关融合不回退 ─────────────────────────────────────────────────
+
+
+def dual_walk(**spec_kwargs) -> dict[str, FootSeriesInput]:
+    """一对合成的双足行走。右足相位滞后半个 stride，两只脚共用同一条时间轴。
+
+    合成数据里不存在同步误差 —— `generate_dual_walk` 刻意让两只脚的 `t` 完全相同，
+    因为跨足对齐是 RAY-209/213 的题目，不该在这里被悄悄引入。所以这里测到的相位差
+    是**模型的**相位差，不掺对齐误差，正是要钉的那个量。
+    """
+    pair = generate_dual_walk(WalkSpec(**spec_kwargs), noise=NoiseModel(seed=3))
+    return {
+        foot: FootSeriesInput(
+            arrival=series.t, accel=series.acc, gyro=series.gyr, fs=series.fs
+        )
+        for foot, (series, _truth) in pair.items()
+    }
+
+
+def test_the_prior_joins_the_pool_under_its_own_name():
+    """先验进池，并且在报告里报得出自己是谁。
+
+    `estimates` 的名字就是来源。哪一票在场是可读的事实 —— 同一段数据用不用双脚，
+    估计池就不一样，而报告必须说得出这件事。
+    """
+    feet = dual_walk(duration_s=30.0)
+    left = feet["L"]
+    stride = 120.0 / WalkSpec().cadence
+
+    without = detect_stance(left.accel, left.gyro, left.fs)
+    with_prior = detect_stance(
+        left.accel, left.gyro, left.fs, period_prior_samples=stride * left.fs
+    )
+
+    assert "crosscorrelation" not in dict(without.period.estimates)
+    assert "crosscorrelation" in dict(with_prior.period.estimates)
+
+
+def test_without_a_prior_nothing_changes():
+    """不传先验时，`detect_stance` 与它存在之前逐比特相同。
+
+    单脚路径必须保持完整可用：双脚只是在有条件时多给一票，不是新的前提。RAY-325 的
+    周期路径、`cli/v3prime.py`、以及所有既有测试都走这一条，它们一个字都不该受影响。
+    """
+    feet = dual_walk(duration_s=30.0)
+    left = feet["L"]
+    baseline = detect_stance(left.accel, left.gyro, left.fs)
+    again = detect_stance(left.accel, left.gyro, left.fs, period_prior_samples=None)
+
+    assert baseline.period.estimates == again.period.estimates
+    assert baseline.period.period_samples == again.period.period_samples
+    assert np.array_equal(baseline.zupt, again.zupt)
+
+
+@pytest.mark.parametrize("factor", [2.0, 0.5])
+def test_a_harmonic_prior_is_folded_before_it_votes(factor):
+    """先验锁到 ×2 / ÷2 的谐波上时，折回基频再投票。
+
+    与另外三个估计一样折 —— 谐波是量化的歧义，不是"估歪了一点"，而拿一个差整整一倍
+    的值去参与中位数，会把一个本来正确的池整个拽偏。
+    """
+    feet = dual_walk(duration_s=30.0)
+    left = feet["L"]
+    stride = 120.0 / WalkSpec().cadence
+    truth = detect_stance(
+        left.accel, left.gyro, left.fs, period_prior_samples=stride * left.fs
+    )
+    harmonic = detect_stance(
+        left.accel, left.gyro, left.fs, period_prior_samples=factor * stride * left.fs
+    )
+    assert dict(harmonic.period.estimates)["crosscorrelation"] == pytest.approx(
+        dict(truth.period.estimates)["crosscorrelation"], rel=0.02
+    )
+
+
+def test_a_prior_outside_the_plausible_range_is_dropped_not_clamped():
+    """先验落在 `stance_period_*` 之外就整票作废，不夹回边界。
+
+    夹回边界会造出一个"看起来合理"的估计并让它参与中位数 —— 而一个 10 s 的周期先验
+    说明的是上游算错了，不是这个人走得特别慢。
+    """
+    feet = dual_walk(duration_s=30.0)
+    left = feet["L"]
+    detection = detect_stance(
+        left.accel, left.gyro, left.fs, period_prior_samples=30.0 * left.fs
+    )
+    assert "crosscorrelation" not in dict(detection.period.estimates)
+
+
+def test_the_cross_correlation_recovers_the_period_and_the_antiphase():
+    """合成双足：T_x 复原 stride 时长，φ/T 落在 0.5 附近且判为反相。"""
+    feet = dual_walk(duration_s=40.0)
+    stride = 120.0 / WalkSpec().cadence
+    phase = cross_foot_phase(
+        np.linalg.norm(feet["L"].gyro, axis=1),
+        feet["L"].arrival,
+        np.linalg.norm(feet["R"].gyro, axis=1),
+        feet["R"].arrival,
+        stride,
+    )
+    assert phase.period_s == pytest.approx(stride, rel=0.05)
+    assert phase.phase_fraction == pytest.approx(0.5, abs=0.1)
+    assert phase.in_antiphase is True
+    assert phase.band == (0.35, 0.65)
+
+
+def test_two_feet_in_step_are_flagged_as_a_phase_anomaly():
+    """左右**同相**（把同一只脚喂两遍）必须被判为反相异常。
+
+    这正是本判据要抓的失效：左右配对彻底错了 —— 两路数据其实来自同一只脚，或者标签
+    接反又被别处纠正过一次。它让 φ/T 跑到 0 或 1 附近，而不是"这个人走得不太对称"。
+    """
+    feet = dual_walk(duration_s=40.0)
+    stride = 120.0 / WalkSpec().cadence
+    swing = np.linalg.norm(feet["L"].gyro, axis=1)
+    phase = cross_foot_phase(swing, feet["L"].arrival, swing, feet["L"].arrival, stride)
+    assert phase.in_antiphase is False
+
+
+def test_the_antiphase_band_is_deliberately_wide():
+    """带宽是实测散布的 6 倍，而且这是刻意的。
+
+    实测 12 趟全部落在 0.46~0.51（散布 0.05），带宽给到 0.30。收窄到实测散布上会让
+    偏瘫、假肢这些相位系统性偏离 0.5 的人被判成"同步坏了"，而那是步态参数要报的结论，
+    不是同步自检该否决的东西。
+    """
+    cfg = AlgoConfig()
+    assert (cfg.xcorr_antiphase_min, cfg.xcorr_antiphase_max) == (0.35, 0.65)
+    assert cfg.xcorr_antiphase_max - cfg.xcorr_antiphase_min >= 5 * (0.51 - 0.46)
+
+
+@pytest.mark.parametrize(
+    ("low", "high"), [(0.65, 0.35), (0.0, 0.65), (0.35, 1.0), (0.5, 0.5)]
+)
+def test_a_reversed_or_unbounded_antiphase_band_is_refused(low, high):
+    with pytest.raises(ConfigError):
+        replace(AlgoConfig(), xcorr_antiphase_min=low, xcorr_antiphase_max=high)
+
+
+def test_a_span_shorter_than_four_periods_gives_no_phase():
+    """跨度不足四个周期时相关函数的峰间距是噪声，返回 None 而不是一个数。
+
+    与 `stance_min_cycles` 同一个道理：那个量还没成形，给出一个"看起来正常"的值比
+    不给更坏。
+    """
+    feet = dual_walk(duration_s=40.0)
+    stride = 120.0 / WalkSpec().cadence
+    short = slice(0, int(2.0 * stride * feet["L"].fs))
+    assert (
+        cross_foot_phase(
+            np.linalg.norm(feet["L"].gyro[short], axis=1),
+            feet["L"].arrival[short],
+            np.linalg.norm(feet["R"].gyro[short], axis=1),
+            feet["R"].arrival[short],
+            stride,
+        )
+        is None
+    )
+
+
+def test_the_two_passes_end_with_the_prior_in_both_feet():
+    """两遍跑完：互相关先验进了两只脚的估计池，`seeded` 为真。"""
+    feet = dual_walk(duration_s=40.0)
+    result = plan_dual_foot_periods(feet["L"], feet["R"], 200.0)
+
+    assert result.seeded is True
+    for detection in (result.left, result.right):
+        assert "crosscorrelation" in dict(detection.period.estimates)
+    assert result.phase.in_antiphase is True
+    assert result.plan.plannable is True
+    assert result.snapshot()["seeded"] is True
+
+
+def test_seeded_is_false_when_the_prior_never_materialised():
+    """没有步态可辨认时，第二遍与第一遍相同，而报告直说先验没用上。
+
+    `seeded` 为假而一切正常是可能的。缺了这个字段，"双脚版本"与"单脚版本"给出同一个
+    数时，读的人无从知道是双脚没帮上忙，还是双脚压根没参与。
+    """
+    n = 4000
+    still = FootSeriesInput(
+        arrival=np.arange(n) / 200.0,
+        accel=np.tile([0.0, 0.0, 9.80665], (n, 1)),
+        gyro=np.zeros((n, 3)),
+        fs=200.0,
+    )
+    result = plan_dual_foot_periods(still, still, 200.0)
+    assert result.seeded is False
+    assert result.left.period is None
