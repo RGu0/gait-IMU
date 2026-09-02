@@ -58,7 +58,11 @@ import numpy as np
 from wt901 import BleTransport, DiscoveredDevice, ReturnRate, WT901Device, scan
 from wt901.transport.recording import RecordingTransport
 
-from gait.analysis.events import detect_stance_intervals, segment_cycles
+from gait.analysis.events import (
+    StanceEdges,
+    detect_stance_intervals,
+    segment_cycles,
+)
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel
 from gait.core.zupt import detect_stance
@@ -225,12 +229,28 @@ def _cycles(capture: FootCapture, foot: FootLabel, nominal_fs: float, cfg: AlgoC
     # 剔前导仍然在 ZUPT 边界上做（见上），因为那一步依赖"前导比典型支撑相长得多"
     # 这个比值，而两种口径的典型支撑相差一个数量级。
     edges = detect_stance_intervals(accel, timebase.report.fs, stance, cfg)
-    kept_edges = edges[len(edges) - kept :] if kept <= len(edges) else edges
+    # 前导按**区间自己的**尺度剔。`drop_still_lead` 的判据是"比典型支撑相长 2.5 倍"，
+    # 它自己算中位数，所以对两种口径都成立 —— 但**不能**拿零速区间那边剩下的个数去切
+    # 这一边：两条路的区间数不一样（真机实测 35~42 vs 34~37），个数对不上，切掉的就
+    # 不是前导那一段。
+    kept_edges = _drop_lead_edges(timebase.t, edges, cfg)
     cycles, _edges = segment_cycles(
         foot, timebase.t, accel, gyro, stances, position=None, cfg=cfg,
         stance_edges=kept_edges if len(kept_edges) >= 2 else None,
     )
     return cycles, timebase, stances
+
+
+def _drop_lead_edges(
+    t: np.ndarray, edges: list[StanceEdges], cfg: AlgoConfig
+) -> list[StanceEdges]:
+    """按支撑相**区间自己的**时长剔起步前导，判据复用 `drop_still_lead`。"""
+    if not edges:
+        return edges
+    spans = [
+        (float(t[edge.ic]), float(t[min(edge.to, t.size - 1)])) for edge in edges
+    ]
+    return edges[len(edges) - len(drop_still_lead(spans, cfg)) :]
 
 
 def _slice_capture(capture: FootCapture, window: tuple[float, float]) -> FootCapture:
