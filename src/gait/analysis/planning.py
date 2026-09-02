@@ -33,10 +33,16 @@ from typing import Any
 import numpy as np
 
 from gait.config import AlgoConfig
-from gait.core.dualfoot import CrossFootPeriod, check_cross_foot_period
+from gait.core.dualfoot import (
+    AlternationDecoding,
+    CrossFootPeriod,
+    check_cross_foot_period,
+    decode_alternation,
+)
 from gait.core.zupt import PeriodReport, StanceDetection, detect_stance
 from gait.sync.integrity import IntegrityReport
-from gait.sync.planning import DualNetWindow, plan_dual_net_window
+from gait.sync.planning import DualNetWindow, cycle_is_net, plan_dual_net_window
+from gait.sync.selfcheck import stance_spans
 
 __all__ = [
     "CrossFootPhase",
@@ -318,6 +324,9 @@ class DualFootPeriodPlan:
     right: StanceDetection
     phase: CrossFootPhase | None
     plan: PeriodPlan
+    #: 双净窗内的 L,R 交替解码。`None` 表示没有可用的 stride（两脚都没估出周期），
+    #: 此时"这个间隔算几步"问不出来，解码不成立。
+    alternation: AlternationDecoding | None = None
 
     @property
     def seeded(self) -> bool:
@@ -341,6 +350,7 @@ class DualFootPeriodPlan:
             "seeded": self.seeded,
             "cycles_left": self.left.period.cycles if self.left.period else None,
             "cycles_right": self.right.period.cycles if self.right.period else None,
+            "alternation": self.alternation.snapshot() if self.alternation else None,
             **self.plan.snapshot(),
         }
 
@@ -424,6 +434,31 @@ def plan_dual_foot_periods(
         nominal_fs,
         cfg,
     )
+    stride_s = _median_period_s(second["L"], second["R"], left.fs, right.fs)
+    alternation = None
+    if stride_s is not None:
+        alternation = decode_alternation(
+            _net_stance_spans(left, second["L"], plan.window),
+            _net_stance_spans(right, second["R"], plan.window),
+            stride_s,
+            cfg,
+        )
     return DualFootPeriodPlan(
-        left=second["L"], right=second["R"], phase=phase, plan=plan
+        left=second["L"],
+        right=second["R"],
+        phase=phase,
+        plan=plan,
+        alternation=alternation,
     )
+
+
+def _net_stance_spans(
+    series: FootSeriesInput, detection: StanceDetection, window: DualNetWindow
+) -> list[tuple[float, float]]:
+    """这只脚落在双净窗内的支撑相，换成时刻区间。
+
+    只留整个落在净窗内的：跨过空洞的间隔里，"另一只脚漏检了几次"与"这段时间根本
+    没有数据"看起来一模一样，而前者该补槽、后者补了就是编造。
+    """
+    spans = stance_spans(np.asarray(series.arrival, dtype=np.float64), detection.stances)
+    return [span for span in spans if cycle_is_net(span[0], span[1], window)]

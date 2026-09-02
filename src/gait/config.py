@@ -36,6 +36,8 @@ from typing import Any, Final, Literal
 #: 它写进每一份快照。`from_snapshot` 拒绝不认识的版本，否则"版本化"（FR-09）
 #: 只是把一个数字存下来而已，没有任何东西依赖它。
 #:
+#: 2.2（RAY-328 `alternation-decoding`）：`AlgoConfig` 增加交替解码的取整容差。
+#:
 #: 2.1（RAY-328 `xcorr-period-prior`）：`AlgoConfig` 增加反相自检的相位带。互相关
 #: 给出的周期 T_x 不需要新参数 —— 它进的是既有的估计池，受 `stance_period_*` 那几个
 #: 已有的闸管着，而那正是"进池不是特权通道"的意思。
@@ -70,7 +72,7 @@ from typing import Any, Final, Literal
 #: `from_snapshot` 要求快照字段与当前字段完全一致（缺一个就拒），所以一份 1.0 的快照
 #: 在 1.1 的代码下本来就读不回来。不升版本的话，报出来的是"缺少字段"这种像文件损坏的
 #: 错误，而实际原因是版本不匹配 —— 后者才是使用者需要看到的那句话。
-CONFIG_VERSION: Final[str] = "2.1"
+CONFIG_VERSION: Final[str] = "2.2"
 
 #: PRD §7：默认 180 s，可配 60/120/180。**时长是系统配置项，服务方预设，机构侧
 #: 不可改**，因此校验拒绝预设之外的值 —— 一个"差不多"的 175 s 会产生一份既不能与
@@ -424,6 +426,14 @@ class AlgoConfig:
     #: 结论，不是同步自检该否决的东西。
     xcorr_antiphase_min: float = 0.35
     xcorr_antiphase_max: float = 0.65
+    #: 交替解码里"这个间隔算几个 stride"的容差，单位是 stride 的比例。
+    #:
+    #: 同足相邻说明另一只脚在这中间漏检了。漏了几个由间隔除以 stride 取整给出，而
+    #: 取整要有容差 —— 周期本身有 ±5% 的散布，支撑相的起点还带着检测抖动。
+    #:
+    #: 取 0.35 是因为它必须**小于 0.5**：到了 0.5，"1.5 个 stride"既能读成 1 也能
+    #: 读成 2，取整就不再是判断而是抛硬币。留 0.15 的余地给上面那两项散布。
+    alternation_slot_tolerance: float = 0.35
 
     # ── 同步质量自检（RAY-211）。PRD §8、§13 ───────────────────────────────
 
@@ -539,6 +549,7 @@ class AlgoConfig:
             "planning_min_coverage",
             "xcorr_antiphase_min",
             "xcorr_antiphase_max",
+            "alternation_slot_tolerance",
             "selfcheck_stride_period_tolerance",
             "selfcheck_offset_consistency_s",
             "selfcheck_offset_warn_s",
@@ -574,6 +585,12 @@ class AlgoConfig:
                 "cross_foot_period_ratio_max 是两脚周期的最大比值，必须大于 1，"
                 f"收到 {self.cross_foot_period_ratio_max}。等于 1 要求两脚周期逐比特相同，"
                 "那会把每一趟都标成降级，戳也就不再有信息。"
+            )
+        if not 0.0 < self.alternation_slot_tolerance < 0.5:
+            raise ConfigError(
+                f"alternation_slot_tolerance 必须落在 (0, 0.5)，收到 "
+                f"{self.alternation_slot_tolerance}。取 0.5 会让 1.5 个 stride 既能读成 1 "
+                "也能读成 2，取整就不再是判断而是抛硬币。"
             )
         if not 0.0 < self.xcorr_antiphase_min < self.xcorr_antiphase_max < 1.0:
             raise ConfigError(

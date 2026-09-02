@@ -11,6 +11,7 @@
 """
 
 from dataclasses import replace
+from itertools import pairwise
 
 import numpy as np
 import pytest
@@ -23,7 +24,12 @@ from gait.analysis.planning import (
     plan_periods,
 )
 from gait.config import AlgoConfig, ConfigError
-from gait.core.dualfoot import DualFootError, check_cross_foot_period
+from gait.core.dualfoot import (
+    CONFLICT_NOT_A_MULTIPLE,
+    DualFootError,
+    check_cross_foot_period,
+    decode_alternation,
+)
 from gait.core.zupt import PeriodReport, detect_stance
 from gait.sync.integrity import assess
 from gait.sync.planning import (
@@ -659,3 +665,240 @@ def test_swapping_the_feet_does_not_change_the_antiphase_verdict():
     assert forward.in_antiphase is backward.in_antiphase is True
     assert forward.phase_fraction + backward.phase_fraction == pytest.approx(1.0, abs=0.05)
     assert forward.period_s == pytest.approx(backward.period_s, rel=0.02)
+
+
+# ── 判据 4：交替解码零冲突或显式标记 ────────────────────────────────────────
+
+
+def alternating(n: int, stride: float = 2.0, support: float = 0.3) -> tuple[list, list]:
+    """一段严格交替的双脚支撑相。右脚落在半个 stride 处（反相）。"""
+    left = [(index * stride, index * stride + support) for index in range(n)]
+    right = [
+        (index * stride + 0.5 * stride, index * stride + 0.5 * stride + support)
+        for index in range(n)
+    ]
+    return left, right
+
+
+def test_a_clean_sequence_decodes_untouched():
+    """本来就交替的序列：不补、不冲突、一个槽不多。"""
+    left, right = alternating(6)
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.same_foot_adjacencies == 0
+    assert decoding.conflicts == ()
+    assert decoding.inferred == decoding.merged == 0
+    assert decoding.detected == len(decoding.slots) == 12
+    feet = [slot.foot for slot in decoding.slots]
+    assert feet == ["L", "R"] * 6
+
+
+def test_one_missing_stance_becomes_one_inferred_slot():
+    """另一只脚漏了一步 → 补一个槽，位置落在两个同足支撑相的中点。
+
+    中点就是反相位置：对称步态里另一只脚的触地在半个 stride 处（实测 φ/T =
+    0.46~0.51，12 趟全部反相）。
+    """
+    left, right = alternating(4)
+    del right[1]  # 右脚第二步没检出来
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.same_foot_adjacencies == 0
+    assert decoding.conflicts == ()
+    assert decoding.inferred == 1
+    inferred = next(slot for slot in decoding.slots if slot.inferred)
+    assert inferred.foot == "R"
+    assert inferred.span[0] == pytest.approx(3.0)
+
+
+def test_two_missing_stances_in_a_row_become_two_slots():
+    """间隔是两个 stride 就补两个槽，等分。
+
+    补一个是最常见的情形，但"补的个数由间隔除以 stride 读出来"才是规则本身。只处理
+    一个的实现会在连漏两步时静静地少补一个，而那时序列**仍然**是交替的 —— 错误因此
+    不会被 `same_foot_adjacencies` 抓到。
+    """
+    left = [(0.0, 0.3), (2.0, 2.3), (6.0, 6.3)]
+    right = [(1.0, 1.3)]
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.same_foot_adjacencies == 0
+    assert decoding.inferred == 2
+    starts = sorted(slot.span[0] for slot in decoding.slots if slot.inferred)
+    assert starts == pytest.approx([3.0, 5.0])
+
+
+def test_a_split_stance_is_merged_because_a_foot_cannot_land_twice():
+    """同一只脚在半个 stride 之内出现两次 → 合并成一个槽，不记冲突。
+
+    这不是宽容，是**推理**：一只脚落不了两次地，所以半个 stride 内的两段按物理只能
+    是同一个支撑相被 ZUPT 断开了（阈值在支撑相中段被瞬时越过一次就够）。把交替当
+    约束用，就意味着"这两段其实是一段"是推得出来的结论，而不是要记一笔的疑难。
+
+    真机上这是主要成因：24 格里合并了 0~10 段，S1-flat/slow-b 一格就有 10 段
+    （检出 82 段 vs 周期 36+36）。第一版把它记成冲突，结果 12 格里 11 格"不达标"，
+    而数据本身没有任何问题。
+    """
+    left, right = alternating(4)
+    left.append((0.4, 0.6))  # 第一个支撑相被劈成两段
+    decoding = decode_alternation(sorted(left), right, 2.0)
+
+    assert decoding.same_foot_adjacencies == 0
+    assert decoding.conflicts == ()
+    assert decoding.merged == 1
+    merged_slot = decoding.slots[0]
+    assert merged_slot.fragments == 2
+    # 合并后取外包络：比任何一段都长。它是**规划**用的位置，中间那段空隙不得被当作
+    # 静止喂给滤波器 —— 误检的代价是毁掉整条轨迹。
+    assert merged_slot.span == (0.0, 0.6)
+
+
+def test_a_gap_that_is_not_a_whole_number_of_strides_is_a_conflict():
+    """间隔不是整数个 stride → 补几个都成了猜，记一笔冲突。
+
+    猜出来的槽会以"这里本该有一步"的身份进报告，比缺一步更坏。
+    """
+    left = [(0.0, 0.3), (3.0, 3.3)]  # 同足相邻，间隔 1.5 个 stride
+    right = [(5.0, 5.3)]
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert [conflict.reason for conflict in decoding.conflicts] == [
+        CONFLICT_NOT_A_MULTIPLE
+    ]
+    assert decoding.same_foot_adjacencies == 1
+    assert decoding.inferred == 0
+
+
+def test_every_remaining_break_has_a_conflict_of_its_own():
+    """解码后剩下的每一处同足相邻，都必须在 `conflicts` 里有对应的一条。
+
+    两个数对不上就说明有破缺被静静吞掉了 —— 而"静静吞掉"正是本设计相对
+    `DoubleSupport.same_foot_adjacencies` 那个事后指标要改掉的东西。判据 4 的
+    "零冲突**或**显式标记"里，不达标的只有一种情形：破缺发生了而没人记。
+    """
+    # 两处 1.5 个 stride 的同足间隔：既不小于半个 stride（不能合并），也不接近整数
+    # （不能补槽）。
+    left = [(0.0, 0.3), (3.0, 3.3), (6.0, 6.3), (9.0, 9.3)]
+    right = [(12.0, 12.3)]
+    decoding = decode_alternation(left, right, 2.0)
+    assert decoding.same_foot_adjacencies == len(decoding.conflicts) == 3
+    assert {conflict.reason for conflict in decoding.conflicts} == {
+        CONFLICT_NOT_A_MULTIPLE
+    }
+
+
+def test_decoding_accounts_for_every_stance_it_was_given():
+    """一段检出都不会凭空消失：要么自己占一个槽，要么被并进相邻的同足槽里。
+
+    **判据 4 的"步数不回退"就靠这条账目恒等式**：
+
+        len(slots) == detected − merged + inferred
+
+    对着一段乱七八糟的输入也要成立：这里混进了劈开的支撑相、漏检、和非整数间隔。
+    """
+    left = [(0.0, 0.3), (0.4, 0.6), (2.0, 2.3), (6.0, 6.3), (7.1, 7.4)]
+    right = [(1.0, 1.3), (5.0, 5.3)]
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.detected == len(left) + len(right)
+    assert len(decoding.slots) == (
+        decoding.detected - decoding.merged + decoding.inferred
+    )
+    # 每一段检出的起点都还能在某个槽的区间里找到 —— 合并只扩区间，不丢起点。
+    for start, _stop in left + right:
+        assert any(
+            slot.span[0] <= start <= slot.span[1]
+            for slot in decoding.slots
+            if not slot.inferred
+        )
+
+
+def test_an_empty_input_decodes_to_nothing_without_complaint():
+    """没有支撑相不是错误，是"这一段没有步"。"""
+    decoding = decode_alternation([], [], 2.0)
+    assert decoding.slots == ()
+    assert decoding.conflicts == ()
+    assert decoding.detected == 0
+
+
+@pytest.mark.parametrize("stride", [0.0, -1.0])
+def test_a_non_positive_stride_is_refused(stride):
+    """stride ≤ 0 会让"这个间隔算几步"变成除以零或负数，而结果仍是个有限的整数。"""
+    with pytest.raises(DualFootError):
+        decode_alternation(*alternating(3), stride)
+
+
+@pytest.mark.parametrize("tolerance", [0.0, 0.5, 0.9])
+def test_a_tolerance_at_or_beyond_half_a_stride_is_refused(tolerance):
+    with pytest.raises(ConfigError):
+        replace(AlgoConfig(), alternation_slot_tolerance=tolerance)
+
+
+def test_the_synthetic_dual_walk_decodes_without_a_single_conflict():
+    """合成双足端到端：双净窗内解码后同足相邻为 0，且严格 L,R 交替。"""
+    feet = dual_walk(duration_s=40.0)
+    result = plan_dual_foot_periods(feet["L"], feet["R"], 200.0)
+
+    assert result.alternation is not None
+    assert result.alternation.same_foot_adjacencies == 0
+    assert result.alternation.conflicts == ()
+    feet_sequence = [slot.foot for slot in result.alternation.slots]
+    assert all(a != b for a, b in pairwise(feet_sequence))
+    assert result.snapshot()["alternation"]["same_foot_adjacencies"] == 0
+
+
+def test_stances_outside_the_net_window_do_not_reach_the_decoder():
+    """跨过空洞的支撑相不进解码。
+
+    空洞里"另一只脚漏检了几次"与"这段时间根本没有数据"看起来一模一样。前者该补槽，
+    后者补了就是编造 —— 而编造出来的槽会以"这里本该有一步"的身份进报告。
+    """
+    feet = dual_walk(duration_s=40.0)
+    holed = np.ones(feet["L"].arrival.size, dtype=bool)
+    holed[int(20.0 * 200.0) : int(21.0 * 200.0)] = False
+    punched = FootSeriesInput(
+        arrival=feet["L"].arrival[holed],
+        accel=feet["L"].accel[holed],
+        gyro=feet["L"].gyro[holed],
+        fs=feet["L"].fs,
+    )
+    result = plan_dual_foot_periods(punched, feet["R"], 200.0)
+
+    assert result.plan.window.left.gaps == 1
+    assert all(
+        cycle_is_net(slot.span[0], slot.span[1], result.plan.window)
+        for slot in result.alternation.slots
+        if not slot.inferred
+    )
+
+
+def test_the_dead_band_just_above_half_a_stride_is_a_conflict():
+    """0.5 ~ 0.65 个 stride 的同足间隔既不能合并也不能补槽 —— 记冲突。
+
+    **真机上残留的冲突全都长这样**：24 格里剩下 5 处，间隔 0.54~0.60 个 stride，
+    而且全部落在每趟的头 2%（起步段，步频还没稳）。合并要求"落不了两次地"这个物理
+    论断，0.55 个 stride 已经够一步了，论断不成立；补槽要求间隔接近整数个 stride，
+    0.55 也不是。两边都不成立时**记一笔**，而不是挑一个看起来顺眼的处理 —— 这正是
+    判据 4「零冲突或显式标记」里的第二支。
+    """
+    left = [(0.0, 0.3), (1.1, 1.4)]  # 0.55 个 stride
+    right = [(4.0, 4.3)]
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.merged == 0
+    assert decoding.inferred == 0
+    assert [conflict.reason for conflict in decoding.conflicts] == [
+        CONFLICT_NOT_A_MULTIPLE
+    ]
+    assert decoding.conflicts[0].strides == pytest.approx(0.55)
+
+
+def test_the_decoding_says_which_stride_it_used():
+    """解码结果带着它用的 stride。
+
+    每一个合并、每一个补槽、每一条冲突都是相对那个 stride 成立的，而 stride 是上游
+    估出来的量、会随算法演进而变。说不出自己用了哪个 stride 的结果没法复核。
+    """
+    decoding = decode_alternation(*alternating(4), 2.0)
+    assert decoding.stride_s == 2.0
+    assert decoding.snapshot()["stride_s"] == 2.0
