@@ -46,13 +46,14 @@ RAY-204 量到：6 轴下航向是**弱可观测**的 —— 导航系 1σ 从�
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 
 from gait.config import AlgoConfig
-from gait.contracts import NavResult
+from gait.contracts import FootLabel, NavResult
 from gait.core import quaternion as quat
+from gait.core.zupt import PeriodReport
 
 #: 静立时两脚的横向间距，m。见模块文档"初始足间偏置从哪来"。
 DEFAULT_STEP_WIDTH: Final[float] = 0.12
@@ -519,3 +520,289 @@ def swapped(left: NavResult, right: NavResult) -> tuple[NavResult, NavResult]:
     据换过来等于把一次真实的操作错误藏起来 —— 而下一次采集它还会发生。
     """
     return right, left
+
+
+# ── 跨脚周期校验（RAY-328 L0）──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CrossFootPeriod:
+    """两脚步态周期的一致性。**周期域的量，免跨脚对齐。**
+
+    这是本仓库里唯一一个不花钱的跨足校验：周期是**时长**，而时长与两条时间轴的零点
+    无关 —— 左右各自估出 T_L、T_R 就能比，不需要先把两条轴对齐，也就不欠 `sync` 层
+    任何东西。相位域的量（谁先着地、差多少）没有这个性质，它们要等对齐。
+
+    ## 它只加票，不否决
+
+    `agrees=False` 的唯一后果是**盖一个戳**：检出、置信度、周期边界一个不动。理由不是
+    保守，是**没有数据能区分两种成因** —— 同一个 1.17 的比值，可能是一只脚的周期估计
+    跑掉了（实测 S1-flat/slow-a：T_L 估成 3.79 s，真值约 3.06 s），也可能是这个人两脚
+    的周期真的不同（偏瘫、疼痛回避、假肢）。而后者恰恰是目标人群。用一个分不开这两者
+    的判据去**丢**数据，丢掉的会系统性地偏向病理步态。
+
+    所以这里的产出是给人看的证据，不是给流程用的开关：`ratio` 与两脚各自的单脚一致性
+    结论一起带出来，读报告的人能自己判断"是估计坏了还是人就是这样"。
+    """
+
+    #: 左脚周期，s。
+    left_period_s: float
+    #: 右脚周期，s。
+    right_period_s: float
+    #: max/min。恒 ≥ 1，与哪只脚更慢无关 —— 这个量不该有方向，有方向就会诱使调用方
+    #: 去解读"哪只脚有问题"，而它分不出来。
+    ratio: float
+    #: 判定用的上限，来自 `AlgoConfig.cross_foot_period_ratio_max`。落进报告是因为
+    #: 阈值会随数据演进，而一份历史报告要能自证它当时用的是哪个数。
+    threshold: float
+    #: `ratio <= threshold`。False = 标记降级，**不是**判定不可用。
+    agrees: bool
+    #: 两脚各自的单脚一致性闸（`PeriodReport.consistent`）结论，原样带出。
+    #:
+    #: 它在这里不是装饰：跨脚闸的价值全在"单脚闸放过、跨脚闸抓住"那一格上
+    #: （实测 12 趟只出了一个，S1-flat/slow-a）。两个结论并排放着，读的人才看得出
+    #: 这一票是**新增**的信息，还是只在重复单脚闸已经说过的话。
+    left_consistent: bool
+    right_consistent: bool
+
+    @property
+    def new_information(self) -> bool:
+        """跨脚闸说了单脚闸没说的话：两脚各自自洽，但彼此对不上。"""
+        return not self.agrees and self.left_consistent and self.right_consistent
+
+    def snapshot(self) -> dict[str, float | bool]:
+        """可落盘的读数。字段名与属性同名，读回时不必翻译。"""
+        return {
+            "left_period_s": self.left_period_s,
+            "right_period_s": self.right_period_s,
+            "ratio": self.ratio,
+            "threshold": self.threshold,
+            "agrees": self.agrees,
+            "left_consistent": self.left_consistent,
+            "right_consistent": self.right_consistent,
+            "new_information": self.new_information,
+        }
+
+
+def check_cross_foot_period(
+    left: PeriodReport | None,
+    left_fs: float,
+    right: PeriodReport | None,
+    right_fs: float,
+    cfg: AlgoConfig | None = None,
+) -> CrossFootPeriod | None:
+    """比较两脚的周期估计。任一脚没有周期时返回 `None`。
+
+    `PeriodReport.period_samples` 是**样本**数，而两脚的实测 fs 并不相同（BLE 丢包让
+    它们各差零点几个百分点）。所以两个 fs 都要传：拿一个 fs 换算两脚，等于把两脚 fs
+    之差整个记到周期比值上去 —— 实测 fs_L/fs_R 最大差 1.1%，而要判的阈只有 1.15，
+    那是把七分之一的余量白白送掉。
+
+    返回 `None` 而不是一个 `agrees=True` 的结果：没有周期是"这一票弃权"，不是"这一票
+    赞成"。两者对下游的意思完全不同，用同一个值表示会让"两脚都没估出周期"看起来像
+    "两脚完全一致"。
+    """
+    cfg = cfg or AlgoConfig()
+    if left is None or right is None:
+        return None
+    for name, value in (("left_fs", left_fs), ("right_fs", right_fs)):
+        if not value > 0.0:
+            raise DualFootError(f"{name} 必须为正，收到 {value}")
+    left_period = float(left.period_samples) / float(left_fs)
+    right_period = float(right.period_samples) / float(right_fs)
+    ratio = max(left_period, right_period) / min(left_period, right_period)
+    return CrossFootPeriod(
+        left_period_s=left_period,
+        right_period_s=right_period,
+        ratio=ratio,
+        threshold=float(cfg.cross_foot_period_ratio_max),
+        agrees=ratio <= cfg.cross_foot_period_ratio_max,
+        left_consistent=bool(left.consistent),
+        right_consistent=bool(right.consistent),
+    )
+
+
+# ── 交替解码（RAY-328 L2）──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class AlternationSlot:
+    """解码后的一个槽位。"""
+
+    #: 这一步的支撑相区间，s。`inferred` 为真时是**推出来的**位置，不是量到的。
+    span: tuple[float, float]
+    foot: FootLabel
+    #: 这个槽位没有对应的检出，是按交替约束补上的。
+    #:
+    #: 补出来的槽**不是**一次检出，也不该被当成一次检出用。它的用处是让"这里本该
+    #: 有一步"这件事可见 —— 一个只有 33 个槽的序列和一个 36 个槽里 3 个是推出来的
+    #: 序列，对下游的意思完全不同，而前者说不出后者那句话。
+    inferred: bool
+    #: 这个槽由几段检出合并而成。1 = 没有合并。
+    #:
+    #: 大于 1 说明 ZUPT 把一个支撑相断成了几截（阈值在支撑相中段被瞬时越过一次就够
+    #: 了）。合并**不是**在猜：一只脚在半个 stride 之内落不了两次地，所以这几截按物理
+    #: 只能是同一个支撑相。合并后的区间取几段的**外包络**，因此它比任何一段都长 ——
+    #: 这个槽是**规划**用的位置，不是零速观测，中间那段空隙不得被当作静止喂给滤波器。
+    fragments: int = 1
+
+
+@dataclass(frozen=True)
+class AlternationConflict:
+    """一处解不开的交替破缺。"""
+
+    #: 破缺处前后两个同足支撑相的起点，s。
+    between: tuple[float, float]
+    foot: FootLabel
+    #: 间隔除以 stride。解不开正是因为它离整数太远，或者小于半个 stride。
+    strides: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class AlternationDecoding:
+    """双脚 ZUPT 时刻按 L,R 交替解出来的槽格点。
+
+    ## 从事后指标变成事前约束
+
+    `sync/selfcheck.py` 的 `DoubleSupport.same_foot_adjacencies` 是**事后**观测：
+    排完序发现同一只脚连着出现两次，就记一笔然后**跳过这一对**。它诚实，但那一笔
+    之后什么也没发生 —— 漏掉的那一步就那么没了。
+
+    这里把同一个事实当**约束**用：左右严格交替是步行的定义（不是统计规律），所以
+    同足相邻不是"数据有点怪"，而是"另一只脚在这中间漏检了 n 次"，而 n 由间隔除以
+    stride 直接读出来。读得出就补一个槽，读不出就**显式记一笔冲突**。
+
+    ## 只补位置，不补数据
+
+    补出来的槽只有时间位置，没有任何观测量。它进不了零速观测，也不该被下游当成
+    检出用 —— 那会给滤波器注入一个编造的零速，而误检的代价是毁掉整条轨迹
+    （`core/zupt.py` 模块文档的第一段）。
+    """
+
+    slots: tuple[AlternationSlot, ...]
+    #: 解码**之后**仍然存在的同足相邻次数。每一次都必须在 `conflicts` 里有对应的
+    #: 一条 —— 两个数对不上就说明有破缺被静静吞掉了，而那正是本设计要排除的。
+    same_foot_adjacencies: int
+    conflicts: tuple[AlternationConflict, ...]
+    #: 喂进来的支撑相个数。**一段都不会丢**：每一段要么自己占一个槽，要么被并进
+    #: 相邻的同足槽里（那时 `fragments` 记着它）。账目恒等式：
+    #: `len(slots) == detected - merged + inferred`。
+    detected: int
+    #: 解码时用的 stride，s。
+    #:
+    #: 它决定"这个间隔算几步"，因此**每一个合并、每一个补槽、每一条冲突都是相对它
+    #: 成立的**。一份说不出自己用了哪个 stride 的解码结果没法复核 —— 而 stride 是
+    #: 上游估出来的量，会随算法演进而变。
+    stride_s: float = float("nan")
+
+    @property
+    def inferred(self) -> int:
+        return sum(1 for slot in self.slots if slot.inferred)
+
+    @property
+    def merged(self) -> int:
+        """被并掉的检出段数。"""
+        return sum(slot.fragments - 1 for slot in self.slots)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "slots": len(self.slots),
+            "detected": self.detected,
+            "stride_s": self.stride_s,
+            "inferred": self.inferred,
+            "merged": self.merged,
+            "same_foot_adjacencies": self.same_foot_adjacencies,
+            "conflicts": [
+                {
+                    "between": list(conflict.between),
+                    "foot": conflict.foot,
+                    "strides": conflict.strides,
+                    "reason": conflict.reason,
+                }
+                for conflict in self.conflicts
+            ],
+        }
+
+
+#: 解不开的破缺只剩这一种：间隔既不小于半个 stride（那样是断成几截，合并即可），
+#: 也不接近整数个 stride（那样是漏检，补槽即可）。落在中间就没有物理解释可依，
+#: 补几个都成了猜 —— 而猜出来的槽会以"这里本该有一步"的身份进报告，比缺一步更坏。
+CONFLICT_NOT_A_MULTIPLE: Final[str] = "gap_is_not_a_whole_number_of_strides"
+
+
+def decode_alternation(
+    left: list[tuple[float, float]],
+    right: list[tuple[float, float]],
+    stride_s: float,
+    cfg: AlgoConfig | None = None,
+) -> AlternationDecoding:
+    """把两脚的支撑相区间解成一条 L,R 交替的槽序列。时刻同轴，s。
+
+    `stride_s` 是同一只脚两次连续触地的间隔（周期规划给出的那个 T）。它决定"这个
+    间隔算几步"，因此必须是**已经过校验的**周期 —— 拿一个锁到谐波上的 stride 进来，
+    补出来的槽数会整整差一倍。
+
+    调用方应当只把**双净窗内**的支撑相传进来（`sync.planning.cycle_is_net`）：跨过
+    空洞的间隔里，"另一只脚漏检了几次"与"这段时间根本没有数据"看起来一模一样，而
+    前者该补槽，后者补了就是编造。
+    """
+    cfg = cfg or AlgoConfig()
+    if not stride_s > 0.0:
+        raise DualFootError(f"stride_s 必须为正，收到 {stride_s}")
+    tagged: list[tuple[float, float, FootLabel]] = sorted(
+        [(start, stop, "L") for start, stop in left]
+        + [(start, stop, "R") for start, stop in right]
+    )
+    slots: list[AlternationSlot] = []
+    conflicts: list[AlternationConflict] = []
+    unresolved = 0
+    for start, stop, foot in tagged:
+        previous = slots[-1] if slots else None
+        if previous is None or previous.foot != foot:
+            slots.append(AlternationSlot(span=(start, stop), foot=foot, inferred=False))
+            continue
+
+        gap = start - previous.span[0]
+        strides = gap / stride_s
+        count = round(strides)
+        if count < 1:
+            # 同一只脚在半个 stride 之内出现了两次。**一只脚落不了两次地** —— 半个
+            # stride 内的两段按物理只能是同一个支撑相被 ZUPT 断开了（阈值在支撑相
+            # 中段被瞬时越过一次就够）。所以这里合并，而不是记一笔冲突：交替是步行
+            # 的定义，把它当约束用就意味着"这两段其实是一段"是**推得出来**的结论。
+            slots[-1] = replace(
+                previous,
+                span=(previous.span[0], max(previous.span[1], stop)),
+                fragments=previous.fragments + 1,
+            )
+            continue
+        if abs(strides - count) > cfg.alternation_slot_tolerance:
+            conflicts.append(
+                AlternationConflict(
+                    between=(previous.span[0], start),
+                    foot=foot,
+                    strides=strides,
+                    reason=CONFLICT_NOT_A_MULTIPLE,
+                )
+            )
+            unresolved += 1
+        else:
+            # 另一只脚在这中间漏了 `count` 次。它们落在两个同足支撑相之间的反相
+            # 位置上 —— 对称步态里另一只脚的触地就在半个 stride 处（RAY-328 实测
+            # φ/T = 0.46~0.51，12 趟全部反相）。
+            other: FootLabel = "R" if foot == "L" else "L"
+            for index in range(count):
+                moment = previous.span[0] + (index + 0.5) * gap / count
+                slots.append(
+                    AlternationSlot(span=(moment, moment), foot=other, inferred=True)
+                )
+        slots.append(AlternationSlot(span=(start, stop), foot=foot, inferred=False))
+
+    return AlternationDecoding(
+        slots=tuple(slots),
+        same_foot_adjacencies=unresolved,
+        conflicts=tuple(conflicts),
+        detected=len(tagged),
+        stride_s=float(stride_s),
+    )

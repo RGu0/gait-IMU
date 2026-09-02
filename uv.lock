@@ -77,7 +77,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.1" },
-    { name = "wt901", git = "https://github.com/RGu0/WT901.git?rev=ad98ceab981503a9b82ac6881b09cae64d96842d" },
+    { name = "wt901", git = "https://github.com/RGu0/WT901.git?tag=v0.3.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -428,8 +428,8 @@ wheels = [
 
 [[package]]
 name = "wt901"
-version = "0.1.0"
-source = { git = "https://github.com/RGu0/WT901.git?rev=ad98ceab981503a9b82ac6881b09cae64d96842d#ad98ceab981503a9b82ac6881b09cae64d96842d" }
+version = "0.3.0"
+source = { git = "https://github.com/RGu0/WT901.git?tag=v0.3.0#80b03c9ede1b54cd9d8582ba867cd00c465d1c44" }
 dependencies = [
     { name = "bleak" },
 ]

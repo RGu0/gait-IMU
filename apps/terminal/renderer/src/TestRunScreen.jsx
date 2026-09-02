@@ -116,12 +116,21 @@ export function TestRunScreen({
   // the entire page. This is the one interruption worth making: continuing to
   // count down would produce a session the operator believes in and the
   // analysis cannot use.
+  // 文案来自 sidecar，这里只排版。
+  //
+  // 这一屏原先把「测试已安全停止（{code}）／数据已保存但不完整」写死在界面里，只把
+  // 错误码插进去 —— 那违反 RAY-248 验收第二条（渲染进程不得自造错误文案）。代价是
+  // 具体的：sidecar 给 E-BLE-1020 附的动作是「请检查磁盘剩余空间后重新检测」，而写死
+  // 的那句话把它丢掉了，于是一个**可执行**的错误显示成了一个只能干瞪眼的错误。
+  //
+  // 不做兜底：缺文案时宁可显示不出来，也不要用一句通用话把「sidecar 少给了文案」
+  // 这件事盖住（同 `@gait/terminal-contract` 的 checkError）。
   if (live.aborted) {
     return (
       <div className="abort-page">
         <div className="abort-card" role="alert">
-          <h1>测试已安全停止（{live.aborted.code}）</h1>
-          <p>数据已保存但不完整，本次不生成报告。</p>
+          <h1>{live.aborted.message}（{live.aborted.code}）</h1>
+          <p>{live.aborted.action}</p>
           <Button size="lg" onClick={onAbort}>返回工作台</Button>
         </div>
       </div>

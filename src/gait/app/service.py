@@ -30,13 +30,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
+from gait.app.transportloop import TransportLoop
 from gait.config import ProtocolConfig
+from gait.contracts import CONTRACT_VERSION, SessionMeta
+from gait.device.capture import SessionCapture
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
     LinkOutcome,
@@ -44,15 +49,19 @@ from gait.device.orchestration import (
     summarize_session,
 )
 from gait.io.session import (
+    create_session,
     list_sessions,
+    new_session_id,
     new_subject_uuid,
     read_meta,
     session_directory,
+    write_meta,
 )
 from gait.protocolflow.timed_walk import (
     CHECK_FAIL,
     CHECK_PASS,
     CHECK_UNKNOWN,
+    TERMINAL,
     VERDICT_INVALID,
     TimedWalk,
 )
@@ -81,6 +90,14 @@ class TerminalService:
         self.config = config or ProtocolConfig()
         self.session_root = session_root
         self.operator: dict[str, Any] | None = None
+        self.capture: SessionCapture | None = None
+        self.session_id: str | None = None
+        self.loop = TransportLoop()
+        self._wrapped: dict[str, Any] = {}
+        #: 每只脚的写盘错误，来自 `CaptureStatus.problems`。它必须一路进到会话
+        #: 结论里去（`LinkOutcome.recording_error`），否则「这次采集有一半没落盘」
+        #: 就停在一个事件里，而事件是会被错过的。
+        self._recording_errors: dict[str, str] = {}
         self.walk: TimedWalk | None = None
         self._event_seq = 0
         self._aborted: dict[str, Any] | None = None
@@ -244,22 +261,137 @@ class TerminalService:
         now = float(params.get("now", 0.0))
         self.walk = TimedWalk(self.config)
         self._aborted = None
+        self._recording_errors = {}
         self.walk.start_baseline(now)
         self.walk.start_calibration(now)
         self.walk.start_walking(now)
         self._walk_started_at = now
+        self._open_capture()
         return {
             "totalSeconds": self.config.duration_s,
             "instruction": "请按平时走路的速度，在两个标志之间来回走",
             "steps": self._steps(),
             "link": self._links(),
             "remainingSeconds": self.config.duration_s,
+            "sessionId": self.session_id,
         }
+
+    def _open_capture(self) -> None:
+        """建会话目录、写元数据、把两条传输包上录制层。
+
+        ## 顺序就是 G-04 本身
+
+        目录与元数据先落，再包传输，再开始收字节 —— 「先落盘再计算再上传」（原则 6）
+        在这里是一个可以被 kill 打断并检验的顺序，不是一句口号。进程若在任何一点
+        被杀，磁盘上留下的都是一份**能被认出来的、未完成的**会话。
+
+        没有 `session_root` 就不落盘：那是「这次运行不写盘」的显式配置，
+        而不是悄悄地什么也没写。
+        """
+        if self.session_root is None:
+            return
+        self.session_id = new_session_id()
+        create_session(self.session_root, self._meta_at_start())
+        self.capture = SessionCapture(self.session_root, self.session_id)
+        # 顺序要紧：先 wrap 再 connect。`RecordingTransport` 在 `connect()` 里才
+        # 接上 `on_data` —— 反过来做，字节会先到 inner，录制静悄悄地录不到东西。
+        self.loop.start()
+        self._wrapped = {
+            label: self.capture.wrap(label, transport)
+            for label, transport in self.source.transports().items()
+        }
+        for wrapped in self._wrapped.values():
+            self.loop.submit(wrapped.connect())
+        # 流最后开：在录制层接好之前开流，最早那几帧会绕过录制。
+        self.source.begin_stream()
+
+    def _meta_at_start(self) -> SessionMeta:
+        """会话开始时能诚实写下的元数据。
+
+        ## 三个字段此刻还不知道，于是写「尚未产出」而不是写零
+
+        `sync_report`（锚点、残差、实测采样率）与 `integrity_report`（逐秒缺失率、
+        空洞）只有会话结束后才存在；`calib_snapshot` 需要会话标定，而它还没实现
+        （RAY-208）。契约要求这些字段**非空** —— 「空值与缺席对复现而言是一回事」——
+        所以不能留 `{}`。
+
+        写一个 `{"loss_rate": 0.0}` 之类的零值会更糟：那是一个**看起来已经算过**
+        的结论。写 `state: pending` 则说的是实话，而且有一个额外的好处：**进程若在
+        中途被杀，磁盘上那份元数据会永远停在 pending** —— 一份未完成的会话因此自己
+        就说得清楚，不需要任何外部记录来判断它完没完成。
+
+        `provenance` 随元数据落盘：一份 stub 产生的会话与一份真机会话在磁盘上长得
+        一模一样，没有它就再也分不开。
+        """
+        return SessionMeta(
+            session_id=self.session_id or new_session_id(),
+            created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            subject_uuid=new_subject_uuid(),
+            scenario="walk",
+            devices={label: {"device_id": t.device_id} for label, t in self.source.transports().items()},
+            config_snapshot={"state": "pending", "reason": "配置下发快照在会话结束时补齐"},
+            calib_snapshot={"state": "unimplemented", "issue": "RAY-208"},
+            algo_version=f"gait-contract-{CONTRACT_VERSION}",
+            algo_params=self.config.snapshot() if hasattr(self.config, "snapshot") else {"duration_s": self.config.duration_s},
+            sync_report={"state": "pending", "reason": "同步报告在会话结束后才存在"},
+            integrity_report={"state": "pending", "reason": "完整性报告在会话结束后才存在"},
+            protocol_config=self.walk.protocol_snapshot() if self.walk else {"duration_s": self.config.duration_s},
+            contract_version=CONTRACT_VERSION,
+            notes="本地采集会话；元数据在会话结束时改写。停在 pending 即表示未正常结束。",
+            extra={"provenance": self.source.provenance()},
+        )
 
     def _do_stopSession(self, params: dict[str, Any]) -> dict[str, Any]:
         walk = self._require_walk()
         walk.stop(float(params.get("now", 0.0)))
-        return {"state": walk.state, "validSeconds": round(walk.valid_seconds, 3)}
+        status = self._close_capture()
+        return {
+            "state": walk.state,
+            "validSeconds": round(walk.valid_seconds, 3),
+            "capture": _capture_snapshot(status),
+        }
+
+    def _close_capture(self) -> Any:
+        """收尾落盘，并把元数据从 pending 改写成真实结论。
+
+        改写在 `capture.close()` **之后**：那一步排空写队列并定下 `CaptureStatus`，
+        在它之前写元数据，写下的就是一个还不成立的结论。
+        """
+        if self.capture is None or self.session_root is None or self.session_id is None:
+            return None
+        # 停流 → 断开 → close。每一步都让「还会有新字节吗」这个答案更确定，
+        # 顺序反了就会有字节落在一个已经定了终态的 capture 上。
+        self.source.end_stream()
+        for wrapped in self._wrapped.values():
+            try:
+                self.loop.submit(wrapped.disconnect())
+            except (RuntimeError, TimeoutError):
+                # 断不开不该挡住收尾 —— 已经落盘的数据比一次干净的断开重要。
+                pass
+        self._wrapped = {}
+        status = self.capture.close()
+        self.loop.stop()
+        # 把每只脚的写盘失败挑出来，供 `sessionResult` 构造 `LinkOutcome`。
+        for problem in status.problems:
+            for label in ("L", "R"):
+                if problem.startswith(f"{label} 的原始数据写盘失败"):
+                    self._recording_errors[label] = problem
+        directory = session_directory(self.session_root, self.session_id)
+        meta = read_meta(directory)
+        write_meta(
+            directory,
+            replace(
+                meta,
+                integrity_report={
+                    "complete": status.complete,
+                    "chunks_written": dict(status.chunks_written),
+                    "problems": list(status.problems),
+                },
+                sync_report={"state": "not_computed", "reason": "主机侧同步在离线重算阶段产出"},
+            ),
+        )
+        self.capture = None
+        return status
 
     def _do_sessionResult(self, params: dict[str, Any]) -> dict[str, Any]:
         """会话有效性 + 双足完整性。两者分开记账，因为它们判的不是一件事。"""
@@ -269,6 +401,8 @@ class TerminalService:
                 foot=label,  # type: ignore[arg-type]
                 disconnected_at=(params.get("disconnectedAt") or {}).get(label),
                 reconnects=int((params.get("reconnects") or {}).get(label, 0)),
+                # 写盘失败由 sidecar 自己知道，不该等调用方转述 —— 转述会漏。
+                recording_error=self._recording_errors.get(label),
             )
             for label in ("L", "R")
         )
@@ -347,12 +481,34 @@ class TerminalService:
     # ── 事件流 ────────────────────────────────────────────────────────────
 
     def tick(self, now: float) -> dict[str, Any]:
-        """P-08 每拍推给渲染进程的三样东西，一样不多。
+        r"""P-08 每拍推给渲染进程的三样东西，一样不多 —— 外加一次写盘巡检。
 
         FR-07：采集中链路健康只以到达率表达；PRD §6.1：采集中只显示剩余时间、步数、
         链路三档，不显示专业指标、不显示上传进度。所以这个 payload 是有意贫瘠的。
+
+        ## 为什么巡检长在这里
+
+        `capture.py` 的模块文档写明：「写线程里的错误不会自己冒到事件循环，所以必须
+        有人主动看」。在此之前**没人看** —— `grep -rn "\.check()" src/` 只搜得到那句
+        文档本身。后果不是报错，是磁盘写满之后倒计时照常走完：操作员陪着受试者走完
+        三分钟，结束时才发现什么都没采到。
+
+        tick 是唯一一个「采集期间会反复发生」的调用点，所以巡检长在这里。发现失败时
+        本方法**返回 `session.aborted` 而不是 tick** —— 渲染端据此整页接管（UI 设计
+        §7：写盘错误是阻断级，不是侧栏图标级）。
         """
-        self._require_walk()  # 未开始就问剩余时间，是调用方的错，不是 0 秒
+        walk = self._require_walk()  # 未开始就问剩余时间，是调用方的错，不是 0 秒
+        if walk.state in TERMINAL:
+            # 已经停了还在 tick，说明调用方没有理会上一条 `session.aborted`。
+            # 继续发 tick 会让倒计时在一个已经安全停止的会话上照常往下走 ——
+            # 那正是本 scope 要消灭的那个画面，只是换了个成因。
+            raise protocol.ProtocolError(
+                f"会话已处于终态 {walk.state!r}，不能再 tick。"
+                "收到 session.aborted 之后应当停止推进。"
+            )
+        aborted = self._check_writes(now)
+        if aborted is not None:
+            return aborted
         started = self._walk_started_at
         if started is None:  # pragma: no cover - start_walking 保证已设
             raise protocol.ProtocolError("会话尚未开走")
@@ -368,12 +524,40 @@ class TerminalService:
             },
         )
 
+    def _check_writes(self, now: float) -> dict[str, Any] | None:
+        """巡检写盘。有失败就安全停止，返回中止事件；否则返回 `None`。"""
+        if self.capture is None:
+            return None
+        problems = self.capture.failures()
+        if not problems:
+            return None
+        return self.abort(
+            now,
+            TerminalError(
+                code="E-BLE-1020",
+                message="原始数据写盘失败，测试已安全停止。" + "".join(problems),
+                action="请检查磁盘剩余空间后重新检测。本次数据已尽可能保留，但不完整，不会生成报告。",
+            ),
+        )
+
     def notice(self, text: str) -> dict[str, Any]:
         self._event_seq += 1
         return protocol.event("session.notice", self._event_seq, {"text": text})
 
     def abort(self, now: float, failure: TerminalError) -> dict[str, Any]:
+        """安全停止。
+
+        ## 「安全」指的是收尾的顺序，不是「没出事」
+
+        PRD §6.1：断连或写盘错误即安全停止并标记会话不完整。所以这里必须先把采集
+        收尾 —— 停流、断开、close、把真实结论改写进元数据 —— 再中止流程。
+
+        在此之前 `abort()` 只中止 `TimedWalk`，采集就那么挂着：写线程还在跑，元数据
+        永远停在 pending，而 pending 的含义是「进程没了」。一个被安全停止的会话与一个
+        被杀掉的进程在磁盘上因此长得一样，那正好把上个 scope 建立的判据毁掉。
+        """
         walk = self._require_walk()
+        self._close_capture()
         walk.abort(now, failure.message)
         self._aborted = failure.snapshot()
         self._event_seq += 1
@@ -426,6 +610,22 @@ class TerminalService:
             "hint": pass_hint if passed else None,
             "error": None if passed else fail.snapshot(),
         }
+
+
+def _capture_snapshot(status: Any) -> dict[str, Any] | None:
+    """`CaptureStatus` 没有自己的 `snapshot()`，在这里成形。
+
+    `complete` 为假**不表示数据不可用** —— 与 `SessionOutcome` 同理：已经落盘的
+    那部分照样在，不可用的是「这是一份完整会话」这个说法。所以 problems 要原样
+    带出去，而不是压成一个布尔。
+    """
+    if status is None:
+        return None
+    return {
+        "complete": status.complete,
+        "chunks_written": dict(status.chunks_written),
+        "problems": list(status.problems),
+    }
 
 
 class _Unimplemented:

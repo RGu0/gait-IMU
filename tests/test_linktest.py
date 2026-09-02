@@ -33,6 +33,7 @@ from gait.cli.linktest import (
     DeviceRun,
     _consume,
     _finalize,
+    _markdown,
     _rssi_cell,
     _verdict,
     analyze_recordings,
@@ -288,6 +289,7 @@ def test_replay_wires_bytes_through_to_report_files(tmp_path: Path) -> None:
     devices = report["devices"]
     assert [d["samples"] for d in devices] == [expected_a, expected_b]
     assert [d["device_stats"]["dropped_samples"] for d in devices] == [0, 0]
+    assert [d["device_stats"]["dropped_before_ready"] for d in devices] == [0, 0]
     assert [d["device_stats"]["resync_count"] for d in devices] == [0, 0]
     assert all(d["disconnected_at"] is None for d in devices)
     assert all(d["recording_error"] is None for d in devices)
@@ -692,6 +694,109 @@ def test_verdict_flags_recording_error_alongside_integrity_problems() -> None:
 
     assert not verdict["pass"]
     assert any("写盘失败" in problem for problem in verdict["problems"])
+
+
+class TestDroppedBeforeReady:
+    """RAY-334：wt901 v0.3.0 新增的 `DeviceStats.dropped_before_ready`。
+
+    它**没有**并进 `dropped_samples`，两者说的是两件事：那条是消费者跟不上
+    （队列压力），这条是流还没开始（链路刚建立，配置可能还没重放）。判据把它们
+    分开报，是因为处方不同 —— 对后者调大队列毫无用处。
+    """
+
+    @staticmethod
+    def _clean_run(device_id: str = "d0") -> DeviceRun:
+        arrival = np.arange(400, dtype=np.float64) / 200.0  # 2 s 干净的 200 Hz。
+        run = DeviceRun(device_id=device_id)
+        run.arrivals = list(arrival)
+        run.arrival_array = arrival
+        run.integrity = assess(arrival, 200.0)
+        return run
+
+    def test_nonzero_before_ready_fails_the_verdict(self) -> None:
+        run = self._clean_run()
+        run.stats = {"dropped_samples": 0, "dropped_before_ready": 7}
+
+        verdict = _verdict(
+            [run], timing_valid=True, nominal_fs=200.0, clock_resolution=_FINE_CLOCK
+        )
+
+        assert not verdict["pass"]
+        assert any("就绪前丢弃" in problem for problem in verdict["problems"])
+
+    def test_the_two_counters_are_reported_separately(self) -> None:
+        """两者都不为零时是**两条** problem，不是一条。
+
+        合成一条会让读报告的人以为调大队列能一起解决，而其中一半与队列无关。
+        """
+        run = self._clean_run()
+        run.stats = {"dropped_samples": 3, "dropped_before_ready": 5}
+
+        problems = _verdict(
+            [run], timing_valid=True, nominal_fs=200.0, clock_resolution=_FINE_CLOCK
+        )["problems"]
+
+        assert sum("队列溢出" in problem for problem in problems) == 1
+        assert sum("就绪前丢弃" in problem for problem in problems) == 1
+
+    def test_a_historical_report_without_the_field_still_passes(self) -> None:
+        """离线解码路径与升级前的报告都没有这个键，`.get` 必须落到 0。
+
+        缺字段是「这条路径不产生该计数」，不是「计数为零的告警」——把它读成
+        非零会让所有旧报告一夜之间变成不达标。
+        """
+        run = self._clean_run()
+        run.stats = {"frames": 400, "resync_count": 0, "dropped_bytes": 0}
+
+        verdict = _verdict(
+            [run], timing_valid=True, nominal_fs=200.0, clock_resolution=_FINE_CLOCK
+        )
+
+        assert verdict["pass"]
+
+    def test_the_report_table_carries_its_own_column(self, tmp_path: Path) -> None:
+        """走真实报告路径生成，再注入一个非零值渲染 —— 不手搓 report 字典。
+
+        手搓的那份迟早与 `_emit_report` 的真实形状分叉，那时这条测试会在一份
+        现实中不存在的输入上通过。
+        """
+        path = tmp_path / "a.jsonl"
+        _write_synthetic_recording(path, chunks=8)
+        report = _run(tmp_path / "out", [path], speed=None)
+        report["devices"][0]["device_stats"]["dropped_before_ready"] = 4
+
+        table = _markdown(report)
+
+        assert "就绪前丢弃" in table
+        # 表头、分隔行与数据行的列数必须一致，否则 Markdown 表会散架。
+        rows = [line for line in table.splitlines() if line.startswith("| 设备 |")]
+        assert len(rows) == 1
+        widths = {
+            line.count("|")
+            for line in table.splitlines()
+            if line.startswith("|") and line.rstrip().endswith("|")
+        }
+        assert len(widths) == 1, f"报告表列数不一致：{widths}"
+
+    def test_the_short_row_keeps_the_same_column_count(self, tmp_path: Path) -> None:
+        """「样本不足」那条短行是另一个分支，加列时最容易漏掉它。
+
+        漏掉的表现不是报错，是报告里那一行整体左移一格——`扫描期 RSSI` 的值出现
+        在 `电量前→后` 底下。渲染器不会抱怨，读表的人也未必立刻看出来。
+        """
+        path = tmp_path / "a.jsonl"
+        _write_synthetic_recording(path, chunks=8)
+        report = _run(tmp_path / "out", [path], speed=None)
+        report["devices"][0]["integrity"] = None
+
+        table = _markdown(report)
+
+        widths = {
+            line.count("|")
+            for line in table.splitlines()
+            if line.startswith("|") and line.rstrip().endswith("|")
+        }
+        assert len(widths) == 1, f"短行与表头列数不一致：{widths}"
 
 
 

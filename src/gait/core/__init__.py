@@ -12,8 +12,8 @@ Modules, and the Issue that delivers each::
                    -> RAY-203
     eskf.py        F4.3 15-state error-state Kalman filter
                    -> RAY-204
-    dualfoot.py    F4.4 dual-foot distance constraint
-                   -> RAY-205
+    dualfoot.py    F4.4 dual-foot distance constraint, cross-foot period check
+                   -> RAY-205, RAY-328
 
 RED LINE: this package must not import gait.io, gait.device or
 gait.sync. An ``open()`` or a ``bleak`` import appearing here means the

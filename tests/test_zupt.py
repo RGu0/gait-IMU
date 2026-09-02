@@ -18,12 +18,13 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from gait.config import AlgoConfig
+from gait.config import AlgoConfig, ConfigError
 from gait.core.ins import GRAVITY_STANDARD
 from gait.core.zupt import (
     StanceDetection,
     ZuptError,
     _autocorrelation_period,
+    _refine_from_events,
     _runs,
     detect_stance,
     lowpass,
@@ -605,3 +606,161 @@ class TestRejections:
         acc, gyr = still_signal(cfg.zupt_window_samples - 1)
         with pytest.raises(ZuptError, match="短于检测窗口"):
             detect_stance(acc, gyr, FS, cfg)
+
+
+# ── 事件域周期精修（RAY-339 `event-interval-estimator`）────────────────────
+
+
+def accelerating(spec: WalkSpec, ratio: float, *, seed: int = 5):
+    """把一段等步频的行走**时间弯曲**成步频逐渐加快的一段。
+
+    合成器只给一个恒定 `cadence`，而本 scope 要证的恰恰是"步频在一趟内变化时会怎样"。
+    弯曲时间轴而不是重新合成：这样支撑相的形状、幅值、噪声全部原样保留，唯一变化的
+    就是它们在时间上的疏密 —— 被测的量因此是干净的。
+
+    `ratio` 是末段步频相对首段的倍数（>1 表示加快）。实测一趟内最大到 1.18
+    （后 1/3 中位周期比前 1/3 短 15.1%）。
+    """
+    series, _truth = generate_walk(spec, noise=NoiseModel(seed=seed))
+    n = series.acc.shape[0]
+    source = np.arange(n, dtype=np.float64)
+    # 采样位置按二次曲线拉伸：起点不动，终点仍落在 n-1 上，中间越走越快。
+    warped = np.linspace(0.0, 1.0, n)
+    warped = warped * (1.0 + (ratio - 1.0) * 0.5 * warped) / (1.0 + (ratio - 1.0) * 0.5)
+    picks = warped * (n - 1)
+    bend = lambda channel: np.column_stack(
+        [np.interp(picks, source, channel[:, axis]) for axis in range(3)]
+    )
+    return bend(series.acc), bend(series.gyr), series.fs
+
+
+def test_the_event_estimate_is_adopted_not_merely_pooled():
+    """事件域估计**被采纳**，而且报告说得出它在场。
+
+    进池投票是不够的：实测把它当第四票喂进估计池，24 格的周期 RMS 只从 4.1% 动到
+    4.0% —— 中位数把它稀释掉了。所以这里断言的是 `period_samples` 真的等于那一票，
+    而不只是 `estimates` 里多了一项。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+
+    estimates = dict(detection.period.estimates)
+    assert "events" in estimates
+    assert detection.period.period_samples == estimates["events"]
+
+
+@pytest.mark.parametrize("ratio", [1.0, 1.18, 1.35])
+def test_synthetic_drift_alone_does_not_move_the_estimate(ratio):
+    """**负结果，写成测试钉住**：合成数据上步频漂移复现不出真机那个偏差。
+
+    真机 24 格里网格 T 最差偏 **+23.9%**（`flat/slow-a/L`），而这里把步频在趟内拉快
+    到 35%，网格仍然只偏 1.9%，精修给出的值与它**逐比特相同** —— 事件域没有可纠正
+    的东西。
+
+    所以"趟内步频漂移"虽然与那一格相关（它的漂移也是 24 格里最大的，−15.1%），
+    **单靠漂移不足以造成那个偏差**；另一半来自真机上摆动峰本身的微弱与不规则，而
+    合成器给出的峰干净得多。
+
+    这条留在这里是为了让下一个人不必再去合成数据里找那个偏差 —— 找不到。本 scope 的
+    精度结论只在真机验收里成立，见 `evidence/ray-339/event-interval-estimator/acceptance/`。
+    """
+    spec = WalkSpec(duration_s=40.0)
+    acc, gyr, fs = accelerating(spec, ratio=ratio)
+    truth = 120.0 / spec.cadence * fs
+
+    off = detect_stance(acc, gyr, fs, replace(AlgoConfig(), period_refine_min_intervals=10**6))
+    on = detect_stance(acc, gyr, fs)
+
+    assert on.period.period_samples == off.period.period_samples
+    assert abs(on.period.period_samples - truth) / truth < 0.02
+
+
+def test_a_constant_cadence_is_not_made_worse():
+    """步频不变时精修不该把好好的估计弄坏。
+
+    改进的代价必须付在它该付的地方。等步频正是网格模型完全成立的情形，精修在这里
+    只能持平 —— 若这条红了，说明精修引入的是噪声而不是信息。
+    """
+    spec = WalkSpec(duration_s=30.0)
+    series, _ = generate_walk(spec, noise=NoiseModel(seed=5))
+    truth = 120.0 / spec.cadence * series.fs
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    assert detection.period.period_samples == pytest.approx(truth, rel=0.03)
+
+
+def test_the_refinement_runs_exactly_once():
+    """精修一次，不迭代到收敛。
+
+    第二遍的标记会给出又一个事件域估计，第三遍再给一个 —— 那之后每一步都在拿自己的
+    输出喂自己，收敛到哪里由初值决定而不是由数据决定。`estimates` 里只允许出现一项
+    `events` 就是这条的可断言形式。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    names = [name for name, _ in detection.period.estimates]
+    assert names.count("events") == 1
+
+
+def test_too_few_intervals_means_no_adoption():
+    """支持度不够就不采纳 —— 保留网格自己的估计，而不是拿一个没有支撑的中位数。
+
+    事件域的软肋是支撑相检出本身不规则：实测最差一格 37 个间隔里只有 11 个像一个
+    stride，那时中位数已经不是中位数了。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    cfg = replace(AlgoConfig(), period_refine_min_intervals=10**6)
+    detection = detect_stance(series.acc, series.gyr, series.fs, cfg)
+    assert "events" not in dict(detection.period.estimates)
+    assert detection.period is not None  # 不采纳 ≠ 丢掉周期
+
+
+@pytest.mark.parametrize("factor", [0.5, 2.0])
+def test_the_autocorrelation_still_guards_the_octave(factor):
+    """自相关退成谐波守卫：它不再决定周期是多少，只决定周期在哪一个**八度**上。
+
+    直接喂给精修一串间距为真周期 ×0.5（每个支撑相被断成两段）或 ×2（另一只脚的那
+    半拍整体漏检）的支撑相。这两种失效是**量化**的，所以折得回来；折不回来就意味着
+    周期数会整整差一倍，而那正是整个周期路径在结构上要排除的失效。
+    """
+    spec = WalkSpec(duration_s=30.0)
+    series, _ = generate_walk(spec, noise=NoiseModel(seed=5))
+    base = detect_stance(series.acc, series.gyr, series.fs)
+    swing = np.linalg.norm(series.gyr, axis=1)
+    truth = base.period.period_samples
+
+    step = round(truth * factor)
+    stances = [(index, index + 5) for index in range(0, swing.size - step, step)]
+    refined = _refine_from_events(swing, stances, base.period, series.fs, AlgoConfig())
+
+    assert refined is not None
+    assert refined.period_samples == pytest.approx(truth, rel=0.1)
+
+
+@pytest.mark.parametrize(
+    ("low", "high"),
+    [(1.2, 1.6), (0.6, 0.9), (0.4, 1.6), (0.6, 2.5)],
+)
+def test_an_interval_band_that_cannot_do_its_job_is_refused(low, high):
+    """带必须夹住 1，且落在 (0.5, 2.0) 里 —— 那正是要挡的两种量化失效的位置。"""
+    with pytest.raises(ConfigError):
+        replace(AlgoConfig(), period_refine_low=low, period_refine_high=high)
+
+
+def test_two_intervals_are_not_a_median():
+    with pytest.raises(ConfigError):
+        replace(AlgoConfig(), period_refine_min_intervals=2)
+
+
+def test_consistency_became_a_reading_not_a_switch():
+    """一致性闸仍然报出来，但它不再左右周期取值。
+
+    它原本决定"取中位数还是退回自相关"，而现在周期由事件域直接给出 —— 那个二选一
+    没有了。`consistent` 因此是读报告的人要看的事实（几个估计彼此差多少），不是开关。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    values = [value for _, value in detection.period.estimates]
+    assert detection.period.ratio == pytest.approx(max(values) / min(values))
+    assert isinstance(detection.period.consistent, bool)
+    # 无论 consistent 是真是假，周期都等于事件域那一票。
+    assert detection.period.period_samples == dict(detection.period.estimates)["events"]
