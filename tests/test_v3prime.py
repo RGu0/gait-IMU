@@ -859,3 +859,33 @@ def test_delta_gate_judges_the_tap_window_not_the_whole_trial():
         "可信度须由测量区间的完整性决定"
     )
     assert "delta_region_integrity" in source, "测量区间的完整性须落进报告，便于复核"
+
+
+def test_both_devices_are_configured_before_either_starts_streaming():
+    """两台的非速率配置必须全部下完，才允许任何一台开流（RAY-333）。
+
+    **写速率寄存器就是开流。** 逐台走完整配置时，第一台写完速率即满速推流，
+    而第二台还要走完自己那 3~5 秒的配置（四次写事务各
+    `2×write_delay + save_delay = 0.7 s`，加四次回读）——
+    **第一台独自推流的这几秒，正是第二台开流后过渡期的成因**：
+    实测第 2~6 秒掉到 160~184 样本/秒（稳态 200），7/7 复现，
+    且跟随**连接顺序**而非器件（`T-213-02`）。
+
+    本测试是**结构性**的（读源码而非跑设备）—— `_run_live` 需要真实 BLE 连接，
+    而这里要钉的是**调用顺序**这个不变量。顺序一旦被改回"配置完一台就开流"，
+    过渡期会静默回归：链路、速率、丢包这些可观测量在采集当时全都正常，
+    只有事后算时基才看得出来。
+    """
+    import inspect
+
+    from gait.cli.v3prime import _run_live
+
+    source = inspect.getsource(_run_live)
+    configure_at = source.index("configure_streaming(")
+    start_at = source.index("start_streaming(")
+
+    assert "defer_rate=True" in source, "配置阶段必须延后速率写入"
+    assert configure_at < start_at, "两台配置完毕之前不得开流"
+    assert "asyncio.gather(" in source[start_at - 400 : start_at], (
+        "两次速率写入应并发，把间隔压到一次 BLE 写的往返"
+    )

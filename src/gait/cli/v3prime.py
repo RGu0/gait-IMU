@@ -62,7 +62,7 @@ from gait.analysis.events import segment_cycles
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel
 from gait.core.zupt import detect_stance
-from gait.device.ble import StreamConfig, configure_streaming
+from gait.device.ble import StreamConfig, configure_streaming, start_streaming
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.anchor import FootSignal, measure_offsets
 from gait.sync.integrity import assess
@@ -528,11 +528,35 @@ async def _run_live(
             echo(f"{foot} 足已连接：{discovered.name} {discovered.address}")
 
         stream_config = _stream_config(nominal_fs)
+        # 先把两台的**非速率**配置全部下完，最后再一起开流。
+        #
+        # 写速率寄存器就是开流。逐台走完整配置时，第一台写完速率即满速推流，
+        # 而第二台还要走完自己那 3~5 秒的配置（四次写事务各 0.7 s，加四次回读）——
+        # 第一台独自推流的这几秒，正是第二台开流后过渡期的成因：实测第 2~6 秒
+        # 掉到 160~184 样本/秒（稳态 200），7/7 复现，且跟随连接顺序而非器件
+        # （T-213-02）。
+        applied_configs = []
         for device, capture in zip(devices, captures, strict=True):
-            applied = await configure_streaming(device, stream_config)
+            applied = await configure_streaming(device, stream_config, defer_rate=True)
             if not applied.verified:
                 raise HarnessError(
                     f"{capture.device_id} 配置校验失败：{applied.mismatches}。中止本趟。"
+                )
+            applied_configs.append(applied)
+
+        # 两次速率写入尽量靠拢：间隔从 3~5 s 降到一次 BLE 写的往返。
+        # 只并发**速率写入**，建链仍是顺序的 —— CoreBluetooth 对并发 connect 的
+        # 行为未验，一次只改一个变量。
+        started = await asyncio.gather(
+            *(
+                start_streaming(device, stream_config, applied)
+                for device, applied in zip(devices, applied_configs, strict=True)
+            )
+        )
+        for applied, capture in zip(started, captures, strict=True):
+            if not applied.verified:
+                raise HarnessError(
+                    f"{capture.device_id} 速率校验失败：{applied.mismatches}。中止本趟。"
                 )
         echo(f"两台均已配置 {nominal_fs:.0f} Hz")
 

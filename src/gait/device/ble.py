@@ -61,7 +61,7 @@ PRD 的列举是「解锁→200 Hz→带宽→6 轴→保存」。手册 §6 明
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from wt901 import (
     AlgorithmMode,
@@ -81,6 +81,7 @@ __all__ = [
     "StreamConfig",
     "configure_streaming",
     "read_battery_at_low_rate",
+    "start_streaming",
 ]
 
 #: 手册 §4.2 带宽档位表的 42 Hz 编码。尚未在真机核实（见模块 docstring）。
@@ -167,10 +168,63 @@ async def _read_back(
         return None
 
 
+async def _write_rate(
+    device: WT901Device, config: StreamConfig, mismatches: list[str]
+) -> int | None:
+    """写速率寄存器并回读。**这一步就是开流** —— 设备自此满速推流。"""
+    await device.registers.set_output_rate(config.rate)
+    try:
+        rate_readback = await device.registers.read_output_rate()
+    except TransportTimeoutError:
+        # 200 Hz 下读指令来不及回复（手册 §6），是预期行为而不是故障。
+        return None
+    if rate_readback != config.rate:
+        mismatches.append(f"rate: 写 0x{config.rate:02X}，读回 0x{rate_readback:02X}")
+    return rate_readback
+
+
+async def start_streaming(
+    device: WT901Device, config: StreamConfig, applied: AppliedConfig
+) -> AppliedConfig:
+    """写速率寄存器开流，把结果并回 `configure_streaming(defer_rate=True)` 的产出。
+
+    与 `defer_rate` 配套：双设备先各自配置完毕，再由调用方**同时**调用本函数，
+    使两条流的启动间隔降到一次 BLE 写的往返（原为 3~5 s，见 `configure_streaming`）。
+
+    返回**合并后**的 `AppliedConfig` 而不是只返回回读值 —— `config_snapshot`
+    （PRD §6.1 可观测性）要求配置下发的结果是完整的一份；拆成两半后若不合并，
+    快照里就会少掉 `rate_readback`，而那正是「速率写对没有」的唯一证据。
+    """
+    mismatches = list(applied.mismatches)
+    rate_readback = await _write_rate(device, config, mismatches)
+    return replace(applied, rate_readback=rate_readback, mismatches=tuple(mismatches))
+
+
 async def configure_streaming(
-    device: WT901Device, config: StreamConfig = _DEFAULT_STREAM_CONFIG
+    device: WT901Device,
+    config: StreamConfig = _DEFAULT_STREAM_CONFIG,
+    *,
+    defer_rate: bool = False,
 ) -> AppliedConfig:
     """按 PRD §6.1 的固定时序下发流式配置并回读校验。
+
+    ## `defer_rate`：把「开流」从「配置」里拆出来
+
+    **写速率寄存器就是开流** —— 设备从那一刻起满速推流。而本函数在写速率**之前**
+    有四次写事务（带宽、算法、输出模式、安装方向）加四次回读；每次写事务是
+    `2 × write_delay + save_delay = 0.7 s`，四次即 **2.8 s**，再加回读与 BLE 往返。
+
+    双设备**逐台**调用本函数时，第一台写完速率就开始满速推流，而第二台还要走完
+    自己那 3~5 秒的配置 —— **第一台独自推流的这几秒，正是第二台开流后过渡期的成因**。
+    实测：第二台在开流后第 2~6 秒掉到 160~184 样本/秒（稳态 200），**7/7 复现**，
+    且跟随**连接顺序**而非器件（RAY-213 `T-213-02`）。
+
+    `defer_rate=True` 跳过速率写入，由调用方在**两台都配置完毕后**用
+    `start_streaming` 一起开流，把两条流的启动间隔从 3~5 s 压到一次 BLE 写的往返。
+
+    默认 `False` —— 单设备场景没有这个问题，不该为它增加调用方的负担。
+
+    ## 写与回读的约定
 
     每一项都走 wt901 的原子写事务（解锁→写→保存，间隔 100 ms ≥ PRD 的 50 ms
     下限）。回读对不上或超时都记进 `AppliedConfig.mismatches`，**不抛异常**：
@@ -221,18 +275,7 @@ async def configure_streaming(
             "继续采集会得到一份被静默解析错的数据。"
         )
 
-    await registers.set_output_rate(config.rate)
-    rate_readback: int | None = None
-    try:
-        rate_readback = await registers.read_output_rate()
-    except TransportTimeoutError:
-        # 200 Hz 下读指令来不及回复（手册 §6），是预期行为而不是故障。
-        pass
-    else:
-        if rate_readback != config.rate:
-            mismatches.append(
-                f"rate: 写 0x{config.rate:02X}，读回 0x{rate_readback:02X}"
-            )
+    rate_readback = None if defer_rate else await _write_rate(device, config, mismatches)
 
     return AppliedConfig(
         requested=config,
