@@ -14,3 +14,7 @@ dist/
 
 # OS noise
 .DS_Store
+
+# 工程模式工装（cli/linktest、cli/v3prime）的采集产出。原始数据体量大且属于
+# 实验证据 —— 归 .project-context/evidence/，不进版本库。
+out/
