@@ -617,25 +617,45 @@ def test_a_span_shorter_than_four_periods_gives_no_phase():
     )
 
 
-def test_the_two_passes_end_with_the_prior_in_both_feet():
-    """两遍跑完：互相关先验进了两只脚的估计池，`seeded` 为真。"""
+def test_the_cross_correlation_no_longer_feeds_the_period_pool():
+    """互相关**不再**把 T_x 喂进周期估计池，但 φ 反相自检照常。
+
+    RAY-328 的 L1 曾经这么做，那时主估计是网格、T_x 比它准。RAY-339 之后主估计换成了
+    事件域精修，比 T_x 更准，先验就只剩扰动 —— 24 格实测每一项都变差（周期 RMS
+    2.0% → 2.3%、步数 RMSE 0.82 → 0.96），所以摘掉。
+
+    这条钉的是"摘干净了"：估计池里不许再出现 `crosscorrelation`。
+    """
     feet = dual_walk(duration_s=40.0)
     result = plan_dual_foot_periods(feet["L"], feet["R"], 200.0)
 
-    assert result.seeded is True
     for detection in (result.left, result.right):
-        assert "crosscorrelation" in dict(detection.period.estimates)
+        assert "crosscorrelation" not in dict(detection.period.estimates)
+    # φ 那一半原样保留 —— 它没有竞争者，没有第二个东西能回答"两脚是不是反相"。
     assert result.phase.in_antiphase is True
     assert result.plan.plannable is True
-    assert result.snapshot()["seeded"] is True
+    assert result.snapshot()["phase"]["in_antiphase"] is True
 
 
-def test_seeded_is_false_when_the_prior_never_materialised():
-    """没有步态可辨认时，第二遍与第一遍相同，而报告直说先验没用上。
+def test_the_single_foot_path_and_the_dual_path_now_agree():
+    """摘掉先验之后，双脚路径给出的周期与单脚直接检测**逐比特相同**。
 
-    `seeded` 为假而一切正常是可能的。缺了这个字段，"双脚版本"与"单脚版本"给出同一个
-    数时，读的人无从知道是双脚没帮上忙，还是双脚压根没参与。
+    这是"摘干净了"的另一面，而且它是可断言的：双脚编排此后只**增加**判据
+    （宽闸、跨脚校验、交替解码、公共窗计数、反相自检），不再改动周期本身。
+    读报告的人因此可以确定，两条路径上的周期数字是同一个东西。
     """
+    feet = dual_walk(duration_s=40.0)
+    result = plan_dual_foot_periods(feet["L"], feet["R"], 200.0)
+
+    for foot, detection in (("L", result.left), ("R", result.right)):
+        alone = detect_stance(feet[foot].accel, feet[foot].gyro, feet[foot].fs)
+        assert detection.period.period_samples == alone.period.period_samples
+        assert detection.period.cycles == alone.period.cycles
+        assert np.array_equal(detection.zupt, alone.zupt)
+
+
+def test_no_gait_means_every_dual_foot_verdict_abstains():
+    """没有可辨认的步态时，各条判据各自弃权，而不是给出一个编造的结论。"""
     n = 4000
     still = FootSeriesInput(
         arrival=np.arange(n) / 200.0,
@@ -644,8 +664,10 @@ def test_seeded_is_false_when_the_prior_never_materialised():
         fs=200.0,
     )
     result = plan_dual_foot_periods(still, still, 200.0)
-    assert result.seeded is False
     assert result.left.period is None
+    assert result.phase is None
+    assert result.alternation is None
+    assert result.common_window is None
 
 
 def test_swapping_the_feet_does_not_change_the_antiphase_verdict():

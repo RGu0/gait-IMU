@@ -333,26 +333,9 @@ class DualFootPeriodPlan:
     #: 替代谁 —— 比值看不见"周期像而步数数不齐"，整数看不见"两脚一起偏"。
     common_window: CommonWindowCount | None = None
 
-    @property
-    def seeded(self) -> bool:
-        """第二遍是否真的用上了互相关先验。
-
-        它可以为假而一切正常：跨度不足四个周期、相关函数没有峰、或先验折完谐波仍在
-        `stance_period_*` 的范围外。此时结果与单脚路径逐比特相同，而**报告必须说得出
-        这件事** —— 否则"双脚版本"与"单脚版本"给出同一个数时，读的人无从知道是双脚
-        没帮上忙，还是双脚压根没参与。
-        """
-        return any(
-            name == "crosscorrelation"
-            for detection in (self.left, self.right)
-            if detection.period is not None
-            for name, _ in detection.period.estimates
-        )
-
     def snapshot(self) -> dict[str, Any]:
         return {
             "phase": self.phase.snapshot() if self.phase else None,
-            "seeded": self.seeded,
             "cycles_left": self.left.period.cycles if self.left.period else None,
             "cycles_right": self.right.period.cycles if self.right.period else None,
             "alternation": self.alternation.snapshot() if self.alternation else None,
@@ -378,25 +361,50 @@ def plan_dual_foot_periods(
     nominal_fs: float,
     cfg: AlgoConfig | None = None,
 ) -> DualFootPeriodPlan:
-    """双脚周期规划：**两遍**。
+    """双脚周期规划：检测一遍，互相关只用来做**反相自检**。
 
-    1. 各自单脚检测，得到量级先验；
-    2. 用它把两脚 swing 重采样到公共栅格上做互相关，取峰间距 T_x 与相位差 φ；
-    3. 把 T_x 作为周期先验**再检测一遍**，最后跑宽闸与跨脚校验。
+    1. 各自单脚检测；
+    2. 用检出的周期量级把两脚 swing 重采样到公共栅格上做互相关，取相位差 φ；
+    3. 跑宽闸、跨脚校验、交替解码、公共窗计数。
 
-    为什么必须两遍：互相关要先知道周期的量级才能定搜索范围与峰间距（慢走 2.5 s 与
-    快走 1.0 s 差 2.5 倍，一个定死的范围两头都错），而周期的量级只能先由单脚估出来。
-    这不是迭代求精 —— 只有两遍，第二遍不会再喂回第一遍。
+    ## 为什么互相关的 T_x 不再进周期估计
+
+    RAY-328 的 L1 曾经把互相关峰间距 T_x 作为周期先验喂回 `detect_stance`，那时它是
+    有价值的 —— **因为当时的主估计是网格**（自相关 + 摆动峰 + 冲击峰的中位数），而
+    T_x 比网格更接近真周期。
+
+    RAY-339 之后主估计换成了事件域精修（`core.zupt._refine_from_events`），它比 T_x
+    更准。此时先验只是在扰动第一遍，而第一遍的结论随后就被精修覆盖 —— 留下的只有它
+    对谐波锚点与初始网格范围的残余影响，而那个影响是**净负**的。24 格实测（RAY-343，
+    受控真值 38）：
+
+    | | 周期 RMS | 最差单格 | 步数（对齐后）RMSE | 误差 ≤ 1 的格 |
+    | -- | -- | -- | -- | -- |
+    | 带 T_x 先验 | 2.3% | +4.6% | 0.96 | 21/24 |
+    | 不带（现在） | **2.0%** | **−4.3%** | **0.82** | **23/24** |
+
+    每一项都更好，没有一项更差；差别集中在 `S1-flat/slow-a`，先验把它推离真值一步。
+
+    **`detect_stance(period_prior_samples=)` 这个参数保留**：它是 core 的通用入口，
+    不是 L1 专用。将来若有别的、比事件域更准的外部周期源（例如 RAY-337 的健侧网格），
+    它仍然是那个源该走的门。
+
+    ## φ 留着，而且它才是互相关真正给出的东西
+
+    互相关一次给出两个量，可信度完全不同（见 `CrossFootPhase`）：峰间距对两条时间轴
+    的公共偏移免疫，绝对峰位不免疫。**被摘掉的是前者，留下的是后者** —— 听起来反直觉，
+    但那是因为 T_x 现在有了更准的竞争者，而 φ 没有：没有第二个东西能回答"两脚是不是
+    反相"。
 
     第一遍算不出周期时**不报错**：那说明这一段没有可辨认的步态（静立、段太短），
-    此时第二遍与第一遍相同，`seeded` 为假。
+    此时 `phase` 为 `None`，后面的判据各自弃权。
     """
     cfg = cfg or AlgoConfig()
-    first = {
+    detection = {
         foot: detect_stance(series.accel, series.gyro, series.fs, cfg)
         for foot, series in (("L", left), ("R", right))
     }
-    seed_s = _median_period_s(first["L"], first["R"], left.fs, right.fs)
+    seed_s = _median_period_s(detection["L"], detection["R"], left.fs, right.fs)
 
     phase: CrossFootPhase | None = None
     if seed_s is not None:
@@ -410,50 +418,34 @@ def plan_dual_foot_periods(
             grid_fs=nominal_fs,
         )
 
-    prior_s = phase.period_s if phase is not None else None
-    second = {
-        foot: (
-            first[foot]
-            if prior_s is None
-            else detect_stance(
-                series.accel,
-                series.gyro,
-                series.fs,
-                cfg,
-                period_prior_samples=prior_s * series.fs,
-            )
-        )
-        for foot, series in (("L", left), ("R", right))
-    }
-
     plan = plan_periods(
         FootPlanInput(
             arrival=left.arrival,
-            period=second["L"].period,
+            period=detection["L"].period,
             fs=left.fs,
             integrity=left.integrity,
         ),
         FootPlanInput(
             arrival=right.arrival,
-            period=second["R"].period,
+            period=detection["R"].period,
             fs=right.fs,
             integrity=right.integrity,
         ),
         nominal_fs,
         cfg,
     )
-    stride_s = _median_period_s(second["L"], second["R"], left.fs, right.fs)
+    stride_s = _median_period_s(detection["L"], detection["R"], left.fs, right.fs)
     alternation = None
     if stride_s is not None:
         alternation = decode_alternation(
-            _net_stance_spans(left, second["L"], plan.window),
-            _net_stance_spans(right, second["R"], plan.window),
+            _net_stance_spans(left, detection["L"], plan.window),
+            _net_stance_spans(right, detection["R"], plan.window),
             stride_s,
             cfg,
         )
     return DualFootPeriodPlan(
-        left=second["L"],
-        right=second["R"],
+        left=detection["L"],
+        right=detection["R"],
         phase=phase,
         plan=plan,
         alternation=alternation,
