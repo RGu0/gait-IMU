@@ -26,8 +26,11 @@ from gait.analysis.planning import (
 from gait.config import AlgoConfig, ConfigError
 from gait.core.dualfoot import (
     CONFLICT_NOT_A_MULTIPLE,
+    AlternationDecoding,
+    AlternationSlot,
     DualFootError,
     check_cross_foot_period,
+    count_common_window,
     decode_alternation,
 )
 from gait.core.zupt import PeriodReport, detect_stance
@@ -902,3 +905,130 @@ def test_the_decoding_says_which_stride_it_used():
     decoding = decode_alternation(*alternating(4), 2.0)
     assert decoding.stride_s == 2.0
     assert decoding.snapshot()["stride_s"] == 2.0
+
+
+# ── 判据 3：公共窗整数计数约束（RAY-339 `common-interval-count-check`）──────
+
+
+def decoding_of(left: list[float], right: list[float]) -> AlternationDecoding:
+    """按给定的触地时刻直接搭一份解码结果。
+
+    不走 `decode_alternation`：那个函数会**按交替约束把漏掉的槽补回来**，于是"故意挖
+    掉几个槽"在它手里根本留不下来。要测的是 `count_common_window` 自己怎么数，所以
+    输入必须由测试说了算。补槽那条路径由 `decode_alternation` 自己的测试守着。
+    """
+    slots = sorted(
+        [AlternationSlot(span=(t, t + 0.3), foot="L", inferred=False) for t in left]
+        + [AlternationSlot(span=(t, t + 0.3), foot="R", inferred=False) for t in right],
+        key=lambda slot: slot.span[0],
+    )
+    return AlternationDecoding(
+        slots=tuple(slots),
+        same_foot_adjacencies=0,
+        conflicts=(),
+        detected=len(slots),
+        stride_s=2.0,
+    )
+
+
+def test_the_integer_check_sees_what_the_ratio_gate_cannot():
+    """两脚周期一模一样，但公共窗里的触地次数差 3 —— 比值闸一个字都不会说。
+
+    这正是真机 `S1-sport/fast-a` 的形状：跨脚比 **1.010**（阈 1.15，差得远），而槽
+    33 对 30。比值比的是**周期**，它对"周期估得像、但步数就是数不齐"完全免疫。
+    """
+    left = [index * 2.0 for index in range(9)]
+    right = [1.0, 3.0, 5.0, 15.0, 17.0, 19.0]  # 中段整片没检出
+    count = count_common_window(decoding_of(left, right))
+
+    assert count.difference >= 2
+    assert count.agrees is False
+    # 同一份数据上，比值闸看到的是两个**相等**的周期。
+    same = check_cross_foot_period(period(2.0, 200.0), 200.0, period(2.0, 200.0), 200.0)
+    assert same.agrees is True
+
+
+def test_both_gates_share_one_blind_spot():
+    """两脚**一起**偏时，两道闸都看不见。**这条是限制，不是特性。**
+
+    比值是两脚之比，一起偏就约掉了；公共窗计数是两个整数之差，一起偏就一起变、差仍
+    为 0。真机上这正是 `flat/slow-a` 在 L1 之前的样子：两脚的网格一起偏长约 10%，
+    跨脚闸按定义看不见。
+
+    钉住它是为了不让下一个人以为"加了整数约束就覆盖了两脚一起错" —— 那需要外部真值
+    （受控步数、走廊长度），不是任何一道跨脚闸能给的。
+    """
+    scale = 1.10
+    left = [index * 2.0 * scale for index in range(8)]
+    right = [moment + 1.0 * scale for moment in left]
+    count = count_common_window(decoding_of(left, right))
+
+    assert count.agrees is True  # 整数约束：没看见
+    ratio = check_cross_foot_period(
+        period(2.0 * scale, 200.0), 200.0, period(2.0 * scale, 200.0), 200.0
+    )
+    assert ratio.agrees is True  # 比值闸：也没看见
+
+
+@pytest.mark.parametrize(("missing", "flagged"), [(1, False), (2, True), (3, True)])
+def test_the_threshold_of_one_is_structural_not_tuned(missing, flagged):
+    """差 1 不标记，差 2 起标记 —— 而这个 1 是**推出来的**。
+
+    两脚反相，所以任意一段共同时间窗里两脚的触地次数至多差 1（窗口两端各可能多切进
+    或少切进半个周期）。差 ≥ 2 因此不是"有点多"，是"这中间至少有一次触地没被数到"。
+    没有容差可调，也就没有"太严还是太松"的问题。
+    """
+    left = [index * 2.0 for index in range(10)]  # 0, 2, … 18
+    # 右脚从**中段**少 `missing` 个 —— 首尾都留着，公共窗因此不受影响，差就等于漏掉的数。
+    full = [1.0 + index * 2.0 for index in range(10)]  # 1, 3, … 19
+    right = [value for index, value in enumerate(full) if not 3 <= index < 3 + missing]
+    count = count_common_window(decoding_of(left, right))
+    assert count.difference == missing
+    assert (not count.agrees) is flagged
+
+
+def test_slots_that_l2_repaired_are_counted():
+    """L2 补出来的槽算数 —— 补齐了就不该再报差。
+
+    这道闸问的是"我们最后有没有得到一致的图景"，不是"原始检出有多少"。补出来的槽是
+    按交替约束推出来的，若缺口补上了，两脚本来就该数得一样多。**补不齐才是要看见的
+    那件事。**
+    """
+    left = [(index * 2.0, index * 2.0 + 0.3) for index in range(6)]
+    right = [(1.0, 1.3), (5.0, 5.3), (9.0, 9.3)]  # 中间整整齐齐漏了两次
+    decoding = decode_alternation(left, right, 2.0)
+
+    assert decoding.inferred == 2
+    assert count_common_window(decoding).agrees is True
+
+
+def test_no_slots_on_one_foot_abstains():
+    """一只脚一个槽都没有 → `None`，不是 `agrees=True`。
+
+    弃权与"两脚数得一样多"是两回事，用同一个值表示会让前者看起来像后者。
+    """
+    assert count_common_window(decoding_of([0.0, 2.0, 4.0], [])) is None
+    assert count_common_window(decoding_of([], [])) is None
+
+
+def test_slot_sequences_that_do_not_overlap_abstain():
+    """两脚的槽序列不重叠 → 根本没有公共窗可数，弃权。
+
+    （真实解码不会给出这种输入 —— `decode_alternation` 会按交替把中间补满。这里直接
+    构造，是为了守住 `count_common_window` 自己那条防御分支。）
+    """
+    left = [0.0, 2.0, 4.0, 6.0]
+    right = [100.0, 102.0, 104.0]
+    assert count_common_window(decoding_of(left, right)) is None
+
+
+def test_the_plan_reports_both_gates_side_by_side():
+    """两道闸并列出现在同一份报告里，谁也不替代谁。"""
+    feet = dual_walk(duration_s=40.0)
+    result = plan_dual_foot_periods(feet["L"], feet["R"], 200.0)
+    snapshot = result.snapshot()
+
+    assert snapshot["common_window"] is not None
+    assert snapshot["cross_foot"] is not None
+    assert result.common_window.agrees is True
+    assert result.plan.cross_foot.agrees is True
