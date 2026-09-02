@@ -259,7 +259,7 @@ def lowpass(
     )
 
 
-def _window_sums(x: np.ndarray, window: int) -> np.ndarray:
+def window_sums(x: np.ndarray, window: int) -> np.ndarray:
     """中心对齐滑窗的和，输出与输入等长。边界用边缘复制。
 
     用累积和而不是 `np.convolve`：O(n) 而不是 O(n·W)，而 180 s × 200 Hz × 两足下
@@ -275,7 +275,7 @@ def _window_sums(x: np.ndarray, window: int) -> np.ndarray:
     return cumulative[window:] - cumulative[:-window]
 
 
-def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+def runs(mask: np.ndarray) -> list[tuple[int, int]]:
     """布尔掩码里的连续 True 区间，半开。"""
     if not mask.any():
         return []
@@ -799,10 +799,10 @@ def detect_stance(
         specific_force, fs, cfg.detection_lowpass_hz, max_taps=window
     )
 
-    acc_sum = _window_sums(detection_acc, window)
-    acc_square_sum = _window_sums(np.sum(detection_acc**2, axis=1), window)[:, 0]
-    gyr_sum = _window_sums(omega, window)
-    gyr_square_sum = _window_sums(np.sum(omega**2, axis=1), window)[:, 0]
+    acc_sum = window_sums(detection_acc, window)
+    acc_square_sum = window_sums(np.sum(detection_acc**2, axis=1), window)[:, 0]
+    gyr_sum = window_sums(omega, window)
+    gyr_square_sum = window_sums(np.sum(omega**2, axis=1), window)[:, 0]
 
     acc_mean = acc_sum / window
     gyr_mean = gyr_sum / window
@@ -868,7 +868,7 @@ def detect_stance(
         # 再给一个 —— 但那之后的每一步都在拿自己的输出喂自己，收敛到哪里由初值决定，
         # 而不是由数据决定。一次精修是"用数据定的位置回头修一次格子宽度"，再多就是
         # 让格子和标记互相说服。
-        refined = _refine_from_events(swing, _runs(zupt), period, fs, cfg)
+        refined = _refine_from_events(swing, runs(zupt), period, fs, cfg)
         if refined is not None:
             period = refined
             degraded = _period_stance(swing, hard, unit_acc, reference, period, cfg)
@@ -886,7 +886,7 @@ def detect_stance(
         zupt=zupt,
         zaru=zaru,
         degraded=degraded,
-        stances=_runs(zupt),
+        stances=runs(zupt),
         score=score,
         confidence=confidence,
         period=period,
@@ -901,7 +901,7 @@ def _drop_short_runs(mask: np.ndarray, minimum: int) -> np.ndarray:
     不对称：误检毁轨迹，漏检只损失一步。
     """
     cleaned = mask.copy()
-    for start, end in _runs(mask):
+    for start, end in runs(mask):
         if end - start < minimum:
             cleaned[start:end] = False
     return cleaned
@@ -918,14 +918,14 @@ def _soft_stance(score: np.ndarray, hard: np.ndarray, cfg: AlgoConfig) -> np.nda
     一步没检到；在那里硬塞一个零速观测是凭空发明数据。
     """
     soft = np.zeros_like(hard)
-    runs = _runs(hard)
-    if len(runs) < 2:
+    hard_runs = runs(hard)
+    if len(hard_runs) < 2:
         # 一个硬支撑相都没有，或只有一个：没有"两次之间"，也就无从判断中间漏了几步。
         # 这种情形应当由上层当作检测失败处理，而不是靠软零速把它填成看起来正常。
         return soft
 
     half = cfg.soft_zupt_span_samples // 2
-    for (_, gap_start), (gap_end, _) in pairwise(runs):
+    for (_, gap_start), (gap_end, _) in pairwise(hard_runs):
         if gap_end - gap_start <= cfg.soft_zupt_gap_samples:
             continue
         # 搜索范围从空档两端各让开一个检测窗口。

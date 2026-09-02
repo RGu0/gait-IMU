@@ -92,6 +92,7 @@ RAY-296 已让它在 ZUPT 边界上剔（**在细化之前**：细化把典型�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -101,6 +102,7 @@ import numpy as np
 
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel, GaitCycle
+from gait.core import zupt
 from gait.core.ins import GRAVITY_STANDARD
 
 #: 事件报告的结构版本。
@@ -183,6 +185,229 @@ def refine_stance_edges(
     return refined
 
 
+def _flat_foot_runs(
+    acc: np.ndarray, fs: float, cfg: AlgoConfig
+) -> tuple[list[list[int]], np.ndarray]:
+    """足底平放的区间，以及所用的静立参考方向。
+
+    判据是**姿态**而不是角速度：`‖ω‖` 是率，接近零有两种情形 —— 真站住了，以及摆动
+    相里角速度反向的那一瞬，两者用 `‖ω‖` 分不开。而足底平放的姿态是摆动相**不会经过**
+    的状态，无论走多快每一步都必然经过它（T-230-04）。
+
+    `|‖ā‖ − g|` 那一条缺不得：加计方向只有在线加速度足够小时才代表重力方向。只看夹角
+    会在摆动相某些瞬间误判；只看模值就是零速检测的粗筛门 1，它自己放过 37~62%。
+    """
+    window = cfg.zupt_window_samples
+    smoothed = zupt.lowpass(acc, fs, cfg.detection_lowpass_hz, max_taps=window)
+    mean = zupt.window_sums(smoothed, window) / window
+    norm = np.linalg.norm(mean, axis=1)
+    unit = mean / np.maximum(norm[:, None], 1e-9)
+    quasi_static = np.abs(norm - GRAVITY_STANDARD) < cfg.zupt_acc_threshold
+    if not quasi_static.any():
+        return [], np.array([0.0, 0.0, 1.0])
+    # 参考方向取**中位**而不是均值：一个混进来的摆动相样本能把均值拽走，拽不动中位数。
+    reference = np.median(unit[quasi_static], axis=0)
+    reference = reference / max(float(np.linalg.norm(reference)), 1e-9)
+    limit = math.cos(math.radians(cfg.stance_attitude_tolerance_deg))
+    flat = quasi_static & (unit @ reference >= limit)
+
+    merged: list[list[int]] = []
+    for start, stop in zupt.runs(flat):
+        if stop - start < cfg.min_stance_samples:
+            continue
+        if merged and (start - merged[-1][1]) / fs < cfg.stance_merge_gap_s:
+            merged[-1][1] = stop
+        else:
+            merged.append([start, stop])
+    return merged, reference
+
+
+def _one_per_cycle(
+    merged: Sequence[Sequence[int]], detection: zupt.StanceDetection
+) -> list[tuple[int, int]]:
+    """每个步态周期取一个平放段 —— **个数由构造定死，不由检测定**。
+
+    这是整个设计的要害，与 `core/zupt.py::_period_stance` 同一条：周期数由
+    `round(时长/周期)` 给出之后，"两周期并成一个"或"一周期劈成两个"在结构上不可能
+    发生。合并之后仍然过检的那一格（`L/slow-a` 实测 52 段 vs 真值 38）正是被这一步
+    收住的。
+
+    没有周期报告时退回到零速时刻本身：`_period_stance` 保证一周期一个，所以它同样
+    是"每周期一次"的锚，只是少了周期边界这层保护。
+    """
+    starts = np.array([run[0] for run in merged])
+    stops = np.array([run[1] for run in merged])
+    picked: list[tuple[int, int]] = []
+
+    def take(index: int) -> None:
+        candidate = (int(starts[index]), int(stops[index]))
+        if candidate not in picked:
+            picked.append(candidate)
+
+    if detection.period is not None:
+        for start, stop in detection.period.bounds:
+            overlap = np.minimum(stops, stop) - np.maximum(starts, start)
+            if overlap.max(initial=0) > 0:
+                take(int(np.argmax(overlap)))
+        return picked
+    for start, stop in detection.stances:
+        centre = (start + stop) // 2
+        inside = (starts <= centre) & (centre < stops)
+        distance = np.where(inside, 0, np.minimum(abs(starts - centre), abs(stops - centre)))
+        take(int(np.argmin(distance)))
+    return picked
+
+
+def _impact(deviation: np.ndarray, max_width: float) -> int | None:
+    """回溯窗里的触地撞击，没有就返回 `None`。
+
+    **判据是形状，不是幅值。** 撞击是瞬态；摆动相的加速度隆起是持续的。幅值分不开
+    两者 —— 真机触地峰 14~79 m/s²、合成步行的摆动峰 19~58 m/s²，区间重叠，任何绝对
+    门（试过 3 g 的 `anchor_threshold_m_s2`）都会在慢/中档漏掉 40%~97% 的真触地。
+    半高宽分得开：真机 3~9 样本，合成 15~31 样本。
+
+    没找到撞击时返回 `None` 而不是退而求其次给个峰值：**这正是这条判据存在的理由**。
+    合成步行本身不建模触地撞击，那里最大的峰就在摆动相里 —— 采用它会把 IC 提前
+    70~370 ms（相对合成数据的真值实测），而重力门自己的落点误差只有 ±3.3 ms。
+    宁可不动，不可动错。
+    """
+    if deviation.size == 0:
+        return None
+    peak = int(np.argmax(deviation))
+    half = deviation[peak] / 2.0
+    low = peak
+    while low > 0 and deviation[low - 1] >= half:
+        low -= 1
+    high = peak
+    while high + 1 < deviation.size and deviation[high + 1] >= half:
+        high += 1
+    return peak if (high - low + 1) <= max_width else None
+
+
+def detect_stance_intervals(
+    acc: np.ndarray,
+    fs: float,
+    detection: zupt.StanceDetection,
+    cfg: AlgoConfig | None = None,
+) -> list[StanceEdges]:
+    """支撑相**区间**（IC/TO 边界），不是零速时刻。
+
+    ## 为什么不能拿零速时刻当支撑相
+
+    `core/zupt.py` 产出的是**一周期一个零速时刻**，跨度中位数 15~58 ms（占周期
+    0.7%~2.1%）。真实支撑相占周期 45%~56%（本函数实测）。用两个近似零宽的区间算
+    重叠，`double_support()` 的 `fraction` 必然趋近 −1 个 step 时长 —— 实测基线
+    −0.62~−0.92 正是这个量，**那不是双支撑期读数，是零宽区间的算术**。
+
+    两者要的东西不同，所以是两条路而不是一条：零速时刻要的是"哪一刻速度真的为零"
+    （喂 ESKF，误检毁掉整条轨迹）；支撑相区间要的是"脚从什么时候到什么时候在地上"
+    （喂步态事件指标）。`core/zupt.py::detect_stance` 不该也不会返回后者。
+
+    ## 三步
+
+    1. **平放段**（`_flat_foot_runs`）：姿态判据，摆动相不会经过足底平放。
+    2. **每周期一个**（`_one_per_cycle`）：个数由周期栅格定死。
+    3. **推到 IC/TO**（下面）：平放段是支撑相的**真子集** —— 承重反应期与蹬伸期都在
+       支撑相里而脚并不平。所以向外推的方向一定是对的，只剩推多远的问题。
+
+    ## 向外推的判据里**没有** `‖ω‖`
+
+    `refine_stance_edges` 的逐样本判据是 `|‖a‖−g| < γ 且 ‖ω‖ < 0.3 rad/s`。后半条
+    在这里必须去掉：终末支撑相绕跖趾关节转动，实测 `‖ω‖` 达 **150~290 °/s** 而脚
+    **仍然在地上**（`|‖a‖−g|` 全程 < 0.6 —— 传感器离转轴近，转动不产生多少线加速度）。
+    要求 `‖ω‖ < 17 °/s` 就是 RAY-325 的老毛病：**判据要求一个不发生的状态**。
+
+    ## 两端判据不同，因为两个事件不同
+
+    * **TO 是释放**：`‖a‖` 平滑地离开重力。逐样本前推到第一个越门的样本即可，实测
+      落点与目视判读差 2 个样本（10 ms）。
+    * **IC 是撞击**：`|‖a‖−g|` 冲到 38 m/s²，而**余振落在支撑相内部**。同一条前推
+      判据会停在余振之后（实测迟到约 50 ms），所以还要回到那之前的撞击峰。
+
+    对称地处理两端会系统性地把支撑相削短 —— 而 `double_support` 读的正是两足支撑相
+    的**重叠**，每侧削掉 δ 就让重叠少掉 2δ。
+
+    ## 实测（RAY-230 六格 × 两鞋 × 两足，健康受试者 1 名）
+
+    | | 基线（`refine_stance_edges`） | 本函数 |
+    | --- | --- | --- |
+    | 支撑相占周期 | 1%~16% | **38%~56%** |
+    | `double_support_fraction` | −0.62~−0.92（**12 格全为负**） | −0.069~+0.123（**10 格为正**） |
+    | `same_foot_adjacencies` | 0~6 | **0~1** |
+    | 区间数（真值 38） | 35~42 | 34~37 |
+
+    ## 合成数据（**有** IC/TO 真值）：与既有路径逐格持平
+
+    三档步频 × 两档支撑比，BS-BT91 噪声模型：IC 中位 0.0~1.7 ms、TO 中位 1.0~5.0 ms，
+    最大 |IC| 3.9 ms、|TO| 6.7 ms —— 与 `refine_stance_edges` **完全相同**，且还原出的
+    支撑相占比与 `WalkSpec.stance_ratio` 逐格相等。本模块 20 ms 的验收线因此没有被这条
+    新路径放松。
+
+    ## 尚未验证，以及已知偏窄的两格
+
+    **真机没有 IC/TO 真值** —— 本批次无测力台、无压力垫、无录像。真机支撑相占比
+    38%~56% 低于文献的 60%~75%，而 `double_support_fraction` 落在 −0.069~+0.123、
+    生理带宽是 0.10~0.25。两者是同一件事的两种说法（占比 S 与 step 口径的双支撑期满足
+    `DS = 2(S − 0.5)`），**都指向仍然偏窄**。方向已知、量未知。
+
+    偏窄集中在**快档 + 厚软中底**（HOKA Bondi）那两格：占比 38%~42%，`fraction`
+    仍为 −0.069/−0.068。机理一致 —— 厚软中底本来就是用来**把撞击摊长**的，于是触地峰
+    的半高宽 p90 涨到 17~19 样本（85~95 ms），越过 `stance_impact_max_width_s`，那些步
+    退回重力门的落点。平底鞋同档没有这个问题（占比 45%~50%，`fraction` +0.038/+0.067）。
+
+    放宽那个宽度能把这两格救回来（实测 `fraction` +0.047/+0.025），但会一并放进合成
+    数据里的摆动隆起，IC 掉到 −70~−370 ms —— **拿一条已验证的保证去换一条没验证的**。
+    所以宁可留着这两格，把它记在这里。
+    """
+    cfg = cfg or AlgoConfig()
+    acc = np.asarray(acc, dtype=np.float64)
+    if acc.ndim != 2 or acc.shape[1] != 3:
+        raise EventError(f"acc 应为 (n,3)，收到 shape={acc.shape}")
+    if not np.isfinite(fs) or fs <= 0:
+        raise EventError(f"fs 必须是正的有限值，收到 {fs}")
+
+    merged, _reference = _flat_foot_runs(acc, fs, cfg)
+    if not merged:
+        return []
+    picked = _one_per_cycle(merged, detection)
+    if not picked:
+        return []
+
+    if detection.period is not None:
+        period = detection.period.period_samples
+    else:
+        centres = np.array([(start + stop) / 2 for start, stop in detection.stances])
+        period = float(np.median(np.diff(centres))) if centres.size > 1 else float(acc.shape[0])
+    reach = max(int(cfg.stance_impact_search_fraction * period), 1)
+    max_width = max(cfg.stance_impact_max_width_s * fs, 1.0)
+    deviation = np.abs(np.linalg.norm(acc, axis=1) - GRAVITY_STANDARD)
+    total = acc.shape[0]
+
+    refined: list[StanceEdges] = []
+    for index, (start, stop) in enumerate(picked):
+        # 下界是上一步的离地，上界是下一步的平放：两步的支撑相不会被推到一起，
+        # 也就不会出现"同一只脚连着两个支撑相"之外的另一种病 —— 区间重叠。
+        lower = refined[-1].to if refined else 0
+        upper = picked[index + 1][0] if index + 1 < len(picked) else total
+        to = stop
+        while to < upper and deviation[to] < cfg.zupt_acc_threshold:
+            to += 1
+        ic = start
+        while ic > lower and deviation[ic - 1] < cfg.zupt_acc_threshold:
+            ic -= 1
+        back = max(lower, start - reach)
+        if back < ic:
+            peak = _impact(deviation[back:ic], max_width)
+            if peak is not None:
+                ic = back + peak
+        if ic >= to:
+            continue
+        refined.append(
+            StanceEdges(ic=ic, to=to, expanded_start=start - ic, expanded_stop=to - stop)
+        )
+    return refined
+
+
 @dataclass(frozen=True)
 class DoubleSupport:
     """双支撑期。**跨足指标，强制附同步质量**（PRD §13）。"""
@@ -261,12 +486,18 @@ def segment_cycles(
     *,
     position: np.ndarray | None = None,
     cfg: AlgoConfig | None = None,
+    stance_edges: Sequence[StanceEdges] | None = None,
 ) -> tuple[list[GaitCycle], list[StanceEdges]]:
     """从零速区间切出步态周期。返回 `(周期, 细化后的支撑相)`。
 
     `position` 是导航系位置（`NavResult.p`）。没有它也能算全部**时间**参数 ——
     步长与步速会是 `nan`，而不是一个编造的数。区分这两者很重要：一次只做事件分割的
     调用不该被迫先跑一遍惯导。
+
+    `stance_edges` 传入时跳过 `refine_stance_edges`，直接用给定的支撑相 —— 那是
+    `detect_stance_intervals` 的出口。它是**显式参数**而不是内部分支：两条路给出的
+    支撑相宽度差一个数量级（1%~16% vs 43%~56% 的周期占比），调用方必须知道自己拿的
+    是哪一条，读报告的人也得能从调用点看出来。传了它，`stances` 就只用于校验长度。
     """
     times = np.asarray(t, dtype=np.float64)
     if times.ndim != 1:
@@ -278,7 +509,11 @@ def segment_cycles(
         if position.shape[0] != times.size:
             raise EventError("position 与 t 的长度不一致")
 
-    edges = refine_stance_edges(acc, gyr, stances, cfg)
+    edges = (
+        list(stance_edges)
+        if stance_edges is not None
+        else refine_stance_edges(acc, gyr, stances, cfg)
+    )
     if len(edges) < 2:
         return [], edges
     return _cycles_from_edges(foot, times, position, edges), edges

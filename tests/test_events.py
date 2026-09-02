@@ -18,12 +18,15 @@ from gait.analysis.events import (
     EVENTS_VERSION,
     STEPS_PER_STRIDE,
     EventError,
+    StanceEdges,
+    detect_stance_intervals,
     double_support,
     refine_stance_edges,
     segment_cycles,
     summarize,
 )
 from gait.config import AlgoConfig
+from gait.core.ins import GRAVITY_STANDARD
 from gait.core.zupt import detect_stance
 from gait.validate.synthetic import (
     NoiseModel,
@@ -473,3 +476,195 @@ def test_summarizing_nothing_is_an_error_not_a_row_of_zeros():
     """零不是"没有数据"的答案 —— 它是一个会被当真的读数。"""
     with pytest.raises(EventError, match="没有步态周期"):
         summarize("L", [])
+
+
+# ── 支撑相**区间**：触地/离地边界，不是零速时刻（RAY-325） ────────────────────
+#
+# 这一组守的是一件比"更准"更基本的事：`detect_stance_intervals` 量的是**脚在地上的
+# 那一段**，而 `core/zupt.py` 量的是**速度为零的那一刻**。两者差一个数量级（真机实测
+# 占周期 1%~16% vs 38%~56%），把后者当前者用，`double_support_fraction` 会读到
+# −0.62~−0.92 —— 那不是双支撑期，是两个近似零宽的区间取重叠的算术。
+
+
+def interval_errors(series, truth, cfg=None):
+    """`detect_stance_intervals` 的 IC/TO 误差，ms。配对规则同 `event_errors`。"""
+    cfg = cfg or CFG
+    detection = detect_stance(series.acc, series.gyr, series.fs, cfg)
+    edges = detect_stance_intervals(series.acc, series.fs, detection, cfg)
+    ic_err, to_err, ratio = [], [], []
+    for edge in edges:
+        t_ic = float(series.t[edge.ic])
+        t_to = float(series.t[min(edge.to, series.t.size - 1)])
+        middle = 0.5 * (t_ic + t_to)
+        stride = next((s for s in truth.strides if s.t_ic <= middle < s.t_ic_next), None)
+        if stride is None:
+            continue
+        ic_err.append(1000 * (t_ic - stride.t_ic))
+        to_err.append(1000 * (t_to - stride.t_to))
+        ratio.append((t_to - t_ic) / (stride.t_ic_next - stride.t_ic))
+    return np.array(ic_err), np.array(to_err), np.array(ratio)
+
+
+@pytest.mark.parametrize("label,noise", NOISE_CASES, ids=[case[0] for case in NOISE_CASES])
+@pytest.mark.parametrize("cadence", [90.0, 108.0, 125.0])
+def test_the_stance_intervals_meet_the_same_twenty_millisecond_line(label, noise, cadence):
+    """新路径**不放松**本模块原有的 20 ms 验收线。
+
+    这条是整组的前提。真机上没有 IC/TO 真值（本批次无测力台、无压力垫、无录像），
+    所以"这条路给出的边界是对的"只能在合成数据上说 —— 而那里必须一分不让。
+    """
+    series, truth = generate_walk(
+        WalkSpec(duration_s=24.0, cadence=cadence, stance_ratio=0.60),
+        foot="L",
+        noise=noise,
+    )
+    ic_err, to_err, _ = interval_errors(series, truth)
+
+    assert ic_err.size >= 10, f"{label} 只配上 {ic_err.size} 步，不足以判断"
+    assert np.max(np.abs(ic_err)) < EVENT_TOLERANCE_MS
+    assert np.max(np.abs(to_err)) < EVENT_TOLERANCE_MS
+
+
+@pytest.mark.parametrize("stance_ratio", [0.60, 0.65])
+def test_the_intervals_recover_the_stance_ratio_not_the_flat_foot_sub_phase(stance_ratio):
+    """还原的是**支撑相**，不是足底平放段。
+
+    平放段只是支撑相的一个子相 —— 承重反应期与蹬伸期都在支撑相里而脚并不平。真机上
+    平放段占周期 25%~52%，支撑相占 38%~56%，差的正是这两段。只用姿态判据而不向外推，
+    读出来的就是子相；而 `double_support` 读的是两足支撑相的**重叠**，每侧少算 δ 就
+    让重叠少掉 2δ —— 这正是占比与双支撑期同时偏低的原因。
+    """
+    series, truth = generate_walk(
+        WalkSpec(duration_s=24.0, cadence=108.0, stance_ratio=stance_ratio),
+        foot="L",
+        noise=NoiseModel.bs_bt91(seed=0),
+    )
+    _, _, ratio = interval_errors(series, truth)
+
+    assert np.median(ratio) == pytest.approx(stance_ratio, abs=0.02)
+
+
+def test_the_outward_reach_does_not_ask_the_foot_to_stop_turning():
+    """向外推的判据里**没有** `‖ω‖` —— 这条钉住 RAY-325 的根因不再复发。
+
+    `refine_stance_edges` 的逐样本判据带着 `‖ω‖ < zupt_gyr_threshold`（0.3 rad/s
+    ≈ 17 °/s）。终末支撑相绕跖趾关节转动，真机实测 `‖ω‖` 达 **150~290 °/s** 而脚
+    **仍然在地上**（`|‖a‖−g|` 全程 < 0.6 —— 传感器离转轴近，转动不产生多少线加速度）。
+    要求它停下来转，就是"判据要求一个物理上不发生的状态"。
+
+    这里造的正是那一段：比力恒等于重力，角速度 200 °/s。它必须留在支撑相里。
+    """
+    fs = 200.0
+    still, turning = 200, 60
+    acc = np.tile([0.0, 0.0, GRAVITY_STANDARD], (still + turning, 1))
+    gyr = np.zeros_like(acc)
+    gyr[still:, 1] = np.radians(200.0)
+
+    quiet = (
+        np.abs(np.linalg.norm(acc, axis=1) - GRAVITY_STANDARD) < CFG.zupt_acc_threshold
+    ) & (np.linalg.norm(gyr, axis=1) < CFG.zupt_gyr_threshold)
+    assert not quiet[still:].any(), "构造前提：旧判据把这一段判成运动"
+
+    edges = refine_stance_edges(acc, gyr, [(0, still)], CFG)
+    assert edges[0].to <= still + 1, "旧路径应当在脚开始转的地方就停下（对照）"
+
+    from gait.analysis.events import _flat_foot_runs
+
+    merged, _ = _flat_foot_runs(acc, fs, CFG)
+    assert merged, "姿态判据应当认出这一整段都是足底平放"
+    assert merged[-1][1] >= still + turning - CFG.zupt_window_samples, (
+        "转动那一段的比力仍是重力、姿态仍是平放 —— 它必须留在平放段里"
+    )
+
+
+def test_an_impact_is_recognised_by_its_shape_not_its_height():
+    """撞击是**瞬态**；摆动相的加速度隆起是**持续的**。判据必须是形状。
+
+    幅值分不开两者：真机触地峰 14~79 m/s²、合成步行的摆动峰 19~58 m/s²，区间重叠 ——
+    3 g 那道门（`anchor_threshold_m_s2`）在慢/中档漏掉 40%~97% 的真触地。
+    """
+    from gait.analysis.events import _impact
+
+    width = CFG.stance_impact_max_width_s * 200.0
+    index = np.arange(120)
+
+    spike = np.full(120, 0.1)
+    spike[60:63] = [20.0, 40.0, 20.0]
+    assert _impact(spike, width) == 61
+
+    # 更**高**但更**宽**的隆起：不是撞击，宁可不动
+    hump = 60.0 * np.exp(-(((index - 60) / 25.0) ** 2))
+    assert _impact(hump, width) is None
+    assert hump.max() > spike.max(), "构造前提：隆起比尖峰还高"
+
+
+def test_one_interval_per_cycle_so_a_step_cannot_be_split_or_merged():
+    """区间数由周期栅格定死，且区间升序不重叠。
+
+    "两周期并成一个"或"一周期劈成两个"是致命失效 —— 它让左右配对整体错位，
+    `same_foot_adjacencies` 与 `double_support_fraction` 一起失真。个数由构造给出
+    之后，这两种失效在结构上不可能发生。
+    """
+    series, _truth = generate_walk(
+        WalkSpec(duration_s=24.0, cadence=108.0, stance_ratio=0.60),
+        foot="L",
+        noise=NoiseModel.bs_bt91(seed=0),
+    )
+    detection = detect_stance(series.acc, series.gyr, series.fs, CFG)
+    edges = detect_stance_intervals(series.acc, series.fs, detection, CFG)
+
+    assert detection.period is not None
+    assert len(edges) <= detection.period.cycles
+    for current, following in pairwise(edges):
+        assert current.ic < current.to <= following.ic
+
+
+def test_double_support_from_the_intervals_is_positive_not_a_negative_artefact():
+    """**这条守的是那个曾经恒为负的读数。**
+
+    真机基线 −0.62~−0.92（12 格全为负）。那不是双支撑期，是拿两个跨度 15~58 ms 的
+    零速时刻算重叠得到的负一个 step 时长。换成支撑相区间之后，真机 10/12 格转正
+    （−0.069~+0.123），合成数据上落回生理带宽。
+    """
+    spec = WalkSpec(duration_s=30.0, cadence=108.0, stance_ratio=0.60)
+    data = generate_dual_walk(spec)
+    cycles = {}
+    for foot in ("L", "R"):
+        series, truth = data[foot]
+        detection = detect_stance(series.acc, series.gyr, series.fs, CFG)
+        edges = detect_stance_intervals(series.acc, series.fs, detection, CFG)
+        # 前导要按**区间自己的**口径剔：`drop_still_lead` 的判据是"比典型支撑相长
+        # 2.5 倍"，而两条路的典型支撑相差一个数量级，拿零速区间的个数去切对不上。
+        typical = float(np.median([edge.samples for edge in edges]))
+        while edges and edges[0].samples > 2.5 * typical:
+            edges = edges[1:]
+        cycles[foot], _ = segment_cycles(
+            foot, series.t, series.acc, series.gyr, detection.stances,
+            position=truth.p, stance_edges=edges,
+        )
+    report = double_support(
+        cycles["L"], cycles["R"], sync_quality={"offset_estimate": 0.0, "determinate": True}
+    )
+
+    assert report.fraction > 0.0
+    assert 0.10 <= report.fraction <= 0.25
+
+
+def test_passing_the_edges_in_skips_the_refinement_entirely():
+    """`stance_edges` 是**显式**参数：传了它，`refine_stance_edges` 就不再参与。
+
+    两条路给出的支撑相宽度差一个数量级，调用方必须知道自己拿的是哪一条 —— 所以是
+    参数而不是内部分支。
+    """
+    series, _truth, spans = walk()
+    handmade = [
+        StanceEdges(ic=start, to=stop, expanded_start=0, expanded_stop=0)
+        for start, stop in spans
+    ]
+    cycles, edges = segment_cycles(
+        "L", series.t, series.acc, series.gyr, spans, cfg=CFG, stance_edges=handmade
+    )
+
+    assert edges == handmade
+    assert all(edge.expanded_start == 0 and edge.expanded_stop == 0 for edge in edges)
+    assert cycles
