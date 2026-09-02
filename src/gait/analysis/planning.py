@@ -35,8 +35,10 @@ import numpy as np
 from gait.config import AlgoConfig
 from gait.core.dualfoot import (
     AlternationDecoding,
+    CommonWindowCount,
     CrossFootPeriod,
     check_cross_foot_period,
+    count_common_window,
     decode_alternation,
 )
 from gait.core.zupt import PeriodReport, StanceDetection, detect_stance
@@ -327,6 +329,9 @@ class DualFootPeriodPlan:
     #: 双净窗内的 L,R 交替解码。`None` 表示没有可用的 stride（两脚都没估出周期），
     #: 此时"这个间隔算几步"问不出来，解码不成立。
     alternation: AlternationDecoding | None = None
+    #: 公共窗内两脚各自的触地计数。与 `plan.cross_foot` 的比值闸**并列**，谁也不
+    #: 替代谁 —— 比值看不见"周期像而步数数不齐"，整数看不见"两脚一起偏"。
+    common_window: CommonWindowCount | None = None
 
     @property
     def seeded(self) -> bool:
@@ -351,6 +356,9 @@ class DualFootPeriodPlan:
             "cycles_left": self.left.period.cycles if self.left.period else None,
             "cycles_right": self.right.period.cycles if self.right.period else None,
             "alternation": self.alternation.snapshot() if self.alternation else None,
+            "common_window": (
+                self.common_window.snapshot() if self.common_window else None
+            ),
             **self.plan.snapshot(),
         }
 
@@ -449,6 +457,7 @@ def plan_dual_foot_periods(
         phase=phase,
         plan=plan,
         alternation=alternation,
+        common_window=count_common_window(alternation) if alternation else None,
     )
 
 

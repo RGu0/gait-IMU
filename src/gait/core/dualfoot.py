@@ -806,3 +806,84 @@ def decode_alternation(
         detected=len(tagged),
         stride_s=float(stride_s),
     )
+
+
+# ── 公共窗整数计数约束（RAY-339 L2 之上）────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CommonWindowCount:
+    """两脚在**公共窗**内各自触地了几次，以及这两个整数对不对得上。
+
+    ## 为什么这道闸看得见跨脚比值看不见的东西
+
+    跨脚比值比的是两脚各自估出来的**周期**，它对"周期估得像、但步数就是数不齐"完全
+    免疫。实测 `S1-sport/fast-a`：两脚周期比只有 **1.010**（阈 1.15，差得远），而同一个
+    公共窗里 L 有 33 次触地、R 只有 30 次 —— **差 3**。比值闸一个字都不会说。
+
+    反过来这道闸也有它的盲区：两脚**一起**偏时，两个整数照样相等。所以它与比值闸
+    **并列上报，谁也不替代谁**。
+
+    ## 阈是推出来的，不是调的
+
+    两脚反相，所以在任意一段共同的时间窗里，两只脚的触地次数按构造**至多差 1**
+    （窗口两端各可能多切进或少切进半个周期）。差 ≥ 2 因此不是"有点多"，是"这中间
+    至少有一次触地没被数到"。
+
+    这是本仓库偏爱的那类判据：没有容差可调，也就没有"太严还是太松"的问题。
+    """
+
+    #: 公共窗，`(两脚首个槽的较晚者, 两脚末个槽的较早者)`，s。
+    window: tuple[float, float]
+    left: int
+    right: int
+
+    @property
+    def difference(self) -> int:
+        return abs(self.left - self.right)
+
+    @property
+    def agrees(self) -> bool:
+        """`difference <= 1`。False = 标记，不是判定不可用。"""
+        return self.difference <= 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "window": list(self.window),
+            "left": self.left,
+            "right": self.right,
+            "difference": self.difference,
+            "agrees": self.agrees,
+        }
+
+
+def count_common_window(decoding: AlternationDecoding) -> CommonWindowCount | None:
+    """数两脚在公共窗内各自的槽。任一脚没有槽时返回 `None`。
+
+    数的是**解码之后**的槽 —— 检出的与补出来的都算。理由是这道闸要回答的是"我们最后
+    有没有得到一致的图景"，而不是"原始检出有多少"：L2 补出来的槽是按交替约束推出来
+    的，若它把缺口补齐了，两脚本来就该数得一样多。补不齐才是这里要看见的事
+    （实测 `S1-sport/fast-a` 就是补不齐的那一格 —— 间隔不是整数个 stride，L2 只能记
+    冲突而无法补槽，于是 33 对 30 的差留了下来）。
+
+    返回 `None` 而不是一个 `agrees=True`：没有槽是"这一票弃权"，与"两脚数得一样多"
+    是两回事。
+    """
+    starts: dict[FootLabel, list[float]] = {"L": [], "R": []}
+    for slot in decoding.slots:
+        starts[slot.foot].append(slot.span[0])
+    if not starts["L"] or not starts["R"]:
+        return None
+
+    window = (
+        max(starts["L"][0], starts["R"][0]),
+        min(starts["L"][-1], starts["R"][-1]),
+    )
+    if window[1] < window[0]:
+        # 两脚的槽序列不重叠。这不是"数不齐"，是根本没有公共窗可数。
+        return None
+    counts = {
+        foot: sum(1 for moment in value if window[0] <= moment <= window[1])
+        for foot, value in starts.items()
+    }
+    return CommonWindowCount(window=window, left=counts["L"], right=counts["R"])
