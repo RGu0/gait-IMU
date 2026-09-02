@@ -25,16 +25,24 @@ dependencies = [
 # 而锁文件的全部意义就是排除这种可能。换版本 = 改这里的 rev + 重新 uv lock，
 # 是一次显式的、会进 diff 的动作。
 #
-# ad98ceab = WT901#19 "RAY-291 [mounting] 安装方向（0x23）纳入具名配置"。
-# 相对上一钉（9ccb834c）带进三件，都是本仓库开的上游 Issue：
+# cb88cee5 = WT901#20 "RAY-293 [zero-serial] 全零序列号不再伪装成空字符串"。
+# 相对上一钉（ad98ceab）只带一件：
 #
-#   RAY-279  Telemetry.read_mac() / DeviceInfo.mac / Register.MAC
-#            —— 可跨主机持久化的设备身份，RAY-196 的绑定键等的就是它。
-#   RAY-280  read_recording(..., tolerate_truncated_tail=True) / Recording.truncated
-#            —— 崩溃截断的录制不再整份失效，RAY-198 的 crash-recovery 等的是它。
-#   RAY-291  Mounting / Settings.mounting / set_mounting / read_mounting
-#            —— 本 scope 用的就是这一件，补上配置序列的第 ⑥ 步。
-wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "ad98ceab981503a9b82ac6881b09cae64d96842d" }
+#   RAY-293  新增 SerialNumber（raw / value / is_plausible）；read_serial_number
+#            由返回 str 改为返回它，全零回读的 value 是 None 而不是 ""；
+#            DeviceInfo 新增 serial_number_raw 区分「没读到」与「读到了但全零」。
+#
+# 这是一次破坏性变更，但**本仓库没有调用点**：升级时对全部 .py 逐文件 grep
+# read_serial_number / serial_number_raw / SerialNumber / DeviceInfo，命中为 0；
+# 唯一的 telemetry 调用是 device/ble.py 的 read_battery()。身份绑定走的是
+# RAY-279 的 read_mac()，不是序列号 —— device/binding.py 的模块文档已写明它只
+# 消费注入的 DeviceIdentity，而 DeviceIdentity 本就拒空值。
+#
+# 那为什么还要升：上游那个全零读数在真机上出现过（两台主机、两台设备），旧行为
+# 把它变成 ""，下游一旦拿它当绑定键就会让每台设备的键都相同 —— 一种不报错的
+# 互相冒充。现在没人踩不等于将来没人踩，把已知会静默出错的读数留在依赖里没有
+# 好处（RAY-329）。
+wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "cb88cee5dab014656bec638a9fdb69c3b17075cd" }
 
 [dependency-groups]
 dev = [
