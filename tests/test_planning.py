@@ -891,3 +891,14 @@ def test_the_dead_band_just_above_half_a_stride_is_a_conflict():
         CONFLICT_NOT_A_MULTIPLE
     ]
     assert decoding.conflicts[0].strides == pytest.approx(0.55)
+
+
+def test_the_decoding_says_which_stride_it_used():
+    """解码结果带着它用的 stride。
+
+    每一个合并、每一个补槽、每一条冲突都是相对那个 stride 成立的，而 stride 是上游
+    估出来的量、会随算法演进而变。说不出自己用了哪个 stride 的结果没法复核。
+    """
+    decoding = decode_alternation(*alternating(4), 2.0)
+    assert decoding.stride_s == 2.0
+    assert decoding.snapshot()["stride_s"] == 2.0

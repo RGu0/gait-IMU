@@ -689,6 +689,12 @@ class AlternationDecoding:
     #: 相邻的同足槽里（那时 `fragments` 记着它）。账目恒等式：
     #: `len(slots) == detected - merged + inferred`。
     detected: int
+    #: 解码时用的 stride，s。
+    #:
+    #: 它决定"这个间隔算几步"，因此**每一个合并、每一个补槽、每一条冲突都是相对它
+    #: 成立的**。一份说不出自己用了哪个 stride 的解码结果没法复核 —— 而 stride 是
+    #: 上游估出来的量，会随算法演进而变。
+    stride_s: float = float("nan")
 
     @property
     def inferred(self) -> int:
@@ -703,6 +709,7 @@ class AlternationDecoding:
         return {
             "slots": len(self.slots),
             "detected": self.detected,
+            "stride_s": self.stride_s,
             "inferred": self.inferred,
             "merged": self.merged,
             "same_foot_adjacencies": self.same_foot_adjacencies,
@@ -797,4 +804,5 @@ def decode_alternation(
         same_foot_adjacencies=unresolved,
         conflicts=tuple(conflicts),
         detected=len(tagged),
+        stride_s=float(stride_s),
     )
