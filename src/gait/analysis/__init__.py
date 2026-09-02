@@ -14,5 +14,8 @@ Modules, and the Issue that delivers each::
                    -> RAY-216
     symmetry.py    F5.5 symmetry, CV, fatigue decay, turning metrics
                    -> RAY-217
+    planning.py    dual-foot premises for cycle planning: wide gate + cross-foot
+                   period check, joined here because core must not import sync
+                   -> RAY-328
 
 """

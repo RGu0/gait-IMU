@@ -53,6 +53,7 @@ import numpy as np
 from gait.config import AlgoConfig
 from gait.contracts import NavResult
 from gait.core import quaternion as quat
+from gait.core.zupt import PeriodReport
 
 #: 静立时两脚的横向间距，m。见模块文档"初始足间偏置从哪来"。
 DEFAULT_STEP_WIDTH: Final[float] = 0.12
@@ -519,3 +520,103 @@ def swapped(left: NavResult, right: NavResult) -> tuple[NavResult, NavResult]:
     据换过来等于把一次真实的操作错误藏起来 —— 而下一次采集它还会发生。
     """
     return right, left
+
+
+# ── 跨脚周期校验（RAY-328 L0）──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CrossFootPeriod:
+    """两脚步态周期的一致性。**周期域的量，免跨脚对齐。**
+
+    这是本仓库里唯一一个不花钱的跨足校验：周期是**时长**，而时长与两条时间轴的零点
+    无关 —— 左右各自估出 T_L、T_R 就能比，不需要先把两条轴对齐，也就不欠 `sync` 层
+    任何东西。相位域的量（谁先着地、差多少）没有这个性质，它们要等对齐。
+
+    ## 它只加票，不否决
+
+    `agrees=False` 的唯一后果是**盖一个戳**：检出、置信度、周期边界一个不动。理由不是
+    保守，是**没有数据能区分两种成因** —— 同一个 1.17 的比值，可能是一只脚的周期估计
+    跑掉了（实测 S1-flat/slow-a：T_L 估成 3.79 s，真值约 3.06 s），也可能是这个人两脚
+    的周期真的不同（偏瘫、疼痛回避、假肢）。而后者恰恰是目标人群。用一个分不开这两者
+    的判据去**丢**数据，丢掉的会系统性地偏向病理步态。
+
+    所以这里的产出是给人看的证据，不是给流程用的开关：`ratio` 与两脚各自的单脚一致性
+    结论一起带出来，读报告的人能自己判断"是估计坏了还是人就是这样"。
+    """
+
+    #: 左脚周期，s。
+    left_period_s: float
+    #: 右脚周期，s。
+    right_period_s: float
+    #: max/min。恒 ≥ 1，与哪只脚更慢无关 —— 这个量不该有方向，有方向就会诱使调用方
+    #: 去解读"哪只脚有问题"，而它分不出来。
+    ratio: float
+    #: 判定用的上限，来自 `AlgoConfig.cross_foot_period_ratio_max`。落进报告是因为
+    #: 阈值会随数据演进，而一份历史报告要能自证它当时用的是哪个数。
+    threshold: float
+    #: `ratio <= threshold`。False = 标记降级，**不是**判定不可用。
+    agrees: bool
+    #: 两脚各自的单脚一致性闸（`PeriodReport.consistent`）结论，原样带出。
+    #:
+    #: 它在这里不是装饰：跨脚闸的价值全在"单脚闸放过、跨脚闸抓住"那一格上
+    #: （实测 12 趟只出了一个，S1-flat/slow-a）。两个结论并排放着，读的人才看得出
+    #: 这一票是**新增**的信息，还是只在重复单脚闸已经说过的话。
+    left_consistent: bool
+    right_consistent: bool
+
+    @property
+    def new_information(self) -> bool:
+        """跨脚闸说了单脚闸没说的话：两脚各自自洽，但彼此对不上。"""
+        return not self.agrees and self.left_consistent and self.right_consistent
+
+    def snapshot(self) -> dict[str, float | bool]:
+        """可落盘的读数。字段名与属性同名，读回时不必翻译。"""
+        return {
+            "left_period_s": self.left_period_s,
+            "right_period_s": self.right_period_s,
+            "ratio": self.ratio,
+            "threshold": self.threshold,
+            "agrees": self.agrees,
+            "left_consistent": self.left_consistent,
+            "right_consistent": self.right_consistent,
+            "new_information": self.new_information,
+        }
+
+
+def check_cross_foot_period(
+    left: PeriodReport | None,
+    left_fs: float,
+    right: PeriodReport | None,
+    right_fs: float,
+    cfg: AlgoConfig | None = None,
+) -> CrossFootPeriod | None:
+    """比较两脚的周期估计。任一脚没有周期时返回 `None`。
+
+    `PeriodReport.period_samples` 是**样本**数，而两脚的实测 fs 并不相同（BLE 丢包让
+    它们各差零点几个百分点）。所以两个 fs 都要传：拿一个 fs 换算两脚，等于把两脚 fs
+    之差整个记到周期比值上去 —— 实测 fs_L/fs_R 最大差 1.1%，而要判的阈只有 1.15，
+    那是把七分之一的余量白白送掉。
+
+    返回 `None` 而不是一个 `agrees=True` 的结果：没有周期是"这一票弃权"，不是"这一票
+    赞成"。两者对下游的意思完全不同，用同一个值表示会让"两脚都没估出周期"看起来像
+    "两脚完全一致"。
+    """
+    cfg = cfg or AlgoConfig()
+    if left is None or right is None:
+        return None
+    for name, value in (("left_fs", left_fs), ("right_fs", right_fs)):
+        if not value > 0.0:
+            raise DualFootError(f"{name} 必须为正，收到 {value}")
+    left_period = float(left.period_samples) / float(left_fs)
+    right_period = float(right.period_samples) / float(right_fs)
+    ratio = max(left_period, right_period) / min(left_period, right_period)
+    return CrossFootPeriod(
+        left_period_s=left_period,
+        right_period_s=right_period,
+        ratio=ratio,
+        threshold=float(cfg.cross_foot_period_ratio_max),
+        agrees=ratio <= cfg.cross_foot_period_ratio_max,
+        left_consistent=bool(left.consistent),
+        right_consistent=bool(right.consistent),
+    )
