@@ -12,6 +12,7 @@
 误检的来路。
 """
 
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -19,7 +20,14 @@ import pytest
 
 from gait.config import AlgoConfig
 from gait.core.ins import GRAVITY_STANDARD
-from gait.core.zupt import StanceDetection, ZuptError, detect_stance, lowpass
+from gait.core.zupt import (
+    StanceDetection,
+    ZuptError,
+    _autocorrelation_period,
+    _runs,
+    detect_stance,
+    lowpass,
+)
 from gait.validate.synthetic import NoiseModel, WalkSpec, generate_walk
 
 FS = 200.0
@@ -27,9 +35,15 @@ FS = 200.0
 #: 各档步态。慢跑那一档的支撑相只有约 270 ms，是检测窗口与低通抽头都会被挤压的地方。
 GAIT_CASES = {
     "walk": WalkSpec(duration_s=20.0),
-    "fast_walk": WalkSpec(duration_s=20.0, cadence=150.0, stance_ratio=0.52, stride_length=1.7),
-    "jog": WalkSpec(duration_s=20.0, cadence=170.0, stance_ratio=0.38, stride_length=2.4),
-    "shuffle": WalkSpec(duration_s=20.0, cadence=60.0, stride_length=0.35, stance_ratio=0.75),
+    "fast_walk": WalkSpec(
+        duration_s=20.0, cadence=150.0, stance_ratio=0.52, stride_length=1.7
+    ),
+    "jog": WalkSpec(
+        duration_s=20.0, cadence=170.0, stance_ratio=0.38, stride_length=2.4
+    ),
+    "shuffle": WalkSpec(
+        duration_s=20.0, cadence=60.0, stride_length=0.35, stance_ratio=0.75
+    ),
 }
 
 
@@ -40,7 +54,9 @@ def truth_mask(length: int, stance: list[tuple[int, int]]) -> np.ndarray:
     return mask
 
 
-def detected_and_truth(spec: WalkSpec, cfg: AlgoConfig | None = None, noise: NoiseModel | None = None):
+def detected_and_truth(
+    spec: WalkSpec, cfg: AlgoConfig | None = None, noise: NoiseModel | None = None
+):
     series, truth = generate_walk(spec, noise=noise or NoiseModel.bs_bt91())
     detection = detect_stance(series.acc, series.gyr, series.fs, cfg or AlgoConfig())
     return detection, truth, truth_mask(len(series.t), truth.stance)
@@ -70,7 +86,9 @@ class TestDetectionOnSyntheticGait:
         # 末尾被记录长度截断的那一段不算：它不是漏检，是记录在那里停了。
         complete = [(a, b) for a, b in truth.stance if b < len(detection.zupt)]
         missed = [(a, b) for a, b in complete if not detection.zupt[a:b].any()]
-        assert not missed, f"{name}: 漏检 {len(missed)}/{len(complete)} 个支撑相：{missed[:3]}"
+        assert not missed, (
+            f"{name}: 漏检 {len(missed)}/{len(complete)} 个支撑相：{missed[:3]}"
+        )
 
     @pytest.mark.parametrize("name", sorted(GAIT_CASES))
     def test_there_are_no_false_positives(self, name):
@@ -94,7 +112,9 @@ class TestDetectionOnSyntheticGait:
 
     def test_noiseless_data_behaves_the_same(self):
         """无噪声不该让结论变好也不该让它变坏 —— 否则说明判据吃的是噪声不是信号。"""
-        clean, _, clean_mask = detected_and_truth(GAIT_CASES["walk"], noise=NoiseModel())
+        clean, _, clean_mask = detected_and_truth(
+            GAIT_CASES["walk"], noise=NoiseModel()
+        )
         noisy, _, _ = detected_and_truth(GAIT_CASES["walk"])
         assert int((clean.zupt & ~clean_mask).sum()) == 0
         assert abs(clean.zupt.sum() - noisy.zupt.sum()) < 0.05 * clean.zupt.sum()
@@ -169,8 +189,12 @@ class TestKnownBlindSpot:
         """
         detector = AlgoConfig()
         n = 1000
-        below = detect_stance(*still_signal(n, acc=(1.5, 0.0, GRAVITY_STANDARD)), FS, detector)
-        above = detect_stance(*still_signal(n, acc=(2.0, 0.0, GRAVITY_STANDARD)), FS, detector)
+        below = detect_stance(
+            *still_signal(n, acc=(1.5, 0.0, GRAVITY_STANDARD)), FS, detector
+        )
+        above = detect_stance(
+            *still_signal(n, acc=(2.0, 0.0, GRAVITY_STANDARD)), FS, detector
+        )
         assert below.zupt.all(), "1.5 m/s² 落在盲区内 —— 这是当前的已知行为"
         assert not above.zupt.any(), "2.0 m/s² 应当被拒"
 
@@ -184,6 +208,114 @@ class TestKnownBlindSpot:
             detector,
         )
         assert not rescued.zupt.any()
+
+
+class TestPeriodSegmentation:
+    """RAY-325 的替代结构：按**周期**划步，而不是按阈值判静。
+
+    本 Issue 的根因是"GLRT 要求一个物理上不发生的状态"：实测周期内最低 `‖ω‖` 为
+    1.08~11.59 °/s，而判据要求约 1 °/s —— 慢速差 2 倍、快速差 12 倍，脚**从来**不
+    满足它。改参数不起作用本身就是诊断信号：判据落错了物理量。
+
+    这里守住新结构的三条性质。合成步态里脚是**真的**停住的，硬路径自己就检得出来，
+    所以这些性质主要靠"周期分段本身算得对不对"来验；判据 4 在真机数据上的读数记在
+    `evidence/ray-325/period-stance-detection/`。
+    """
+
+    @pytest.mark.parametrize("case", sorted(GAIT_CASES))
+    def test_the_cycle_count_matches_the_number_of_steps_actually_taken(self, case):
+        """周期数是"这一趟走了几步"，由构造定死。
+
+        它是整个设计的承重墙：`N = round(时长/周期)` 一旦定下，把两步并成一步或把
+        一步劈成两步在结构上就不可能发生 —— 而那正是阈值法最致命的失效。
+        """
+        detection, truth, _ = detected_and_truth(
+            GAIT_CASES[case], noise=NoiseModel.bs_bt91()
+        )
+        assert detection.period is not None, "合成步态应当估得出周期"
+        # 首尾各允许差一个：记录两端的截断本来就装不下完整周期，宁可不要那个尾巴。
+        assert abs(detection.period.cycles - len(truth.stance)) <= 1
+
+    @pytest.mark.parametrize("case", sorted(GAIT_CASES))
+    def test_a_cycle_boundary_never_falls_inside_a_true_stance(self, case):
+        """边界必须落在摆动相里。
+
+        边界一旦切进支撑相，那一步就被劈给相邻两个周期，两边的 `argmin` 各自跑到
+        隔壁步上去，那一步谁也不标。这不是精度问题，是整步丢失 —— 而且它只在特定
+        相位下发生，靠合成数据的"平均表现"看不出来。
+        """
+        detection, truth, _ = detected_and_truth(
+            GAIT_CASES[case], noise=NoiseModel.bs_bt91()
+        )
+        # 只看**中间那些步**。首尾两个支撑相是起步前的静立与收尾的截断，不是步：
+        # 静立段长达数百样本且被硬路径整段检出，边界切进去不丢任何东西。要挡的是
+        # "一步被劈给两个周期"，那只对真正的步才有意义。
+        inside = truth_mask(detection.zupt.size, truth.stance[1:-1])
+        interior = [edge for edge, _ in detection.period.bounds[1:]]
+        offenders = [edge for edge in interior if inside[edge]]
+        assert not offenders, f"边界 {offenders[:5]} 落在真实支撑相里"
+
+    def test_the_period_path_stays_out_of_the_way_when_the_hard_path_already_saw_the_step(
+        self,
+    ):
+        """硬检测覆盖到的周期整格让开，不重复标记。
+
+        `‖ω‖` 的真实最低点常落在硬检测跨度**边界外几个样本**（粗筛用窗口统计量，
+        边界系统性内缩）。若按"最低点这一刻是否已被覆盖"来判，每个周期都会在真支撑
+        相紧邻处多标一小截，把一个支撑相裂成两个跨度 —— 实测 20 步会变成 40 个跨度，
+        左右配对因此全线算错。
+        """
+        detection, truth, _ = detected_and_truth(
+            GAIT_CASES["walk"], noise=NoiseModel.bs_bt91()
+        )
+        spans = len(_runs(detection.zupt))
+        assert spans <= len(truth.stance) + 1, (
+            f"{spans} 个跨度 vs {len(truth.stance)} 步：支撑相被裂开了"
+        )
+
+    def test_no_period_is_claimed_for_a_foot_that_is_merely_still(self):
+        """静立不是步态。常量信号没有周期可言，此时必须回落到阈值判据。"""
+        detection = detect_stance(*still_signal(3000), FS, AlgoConfig())
+        assert detection.period is None
+        assert detection.zupt.all(), "静立本来就该被硬路径全检出"
+
+
+class TestTheAutocorrelationIsCheapEnoughForARealRecord:
+    """自相关是周期估计里唯一不依赖峰选的一票，它必须在真机长度上跑得动。"""
+
+    def test_it_agrees_with_a_direct_correlation(self):
+        """FFT 自相关与直接卷积必须给出同一个滞后。
+
+        补零到 ≥ 2n 是这条等价的前提：不补零时循环相关会把尾部绕回来加到头部的
+        滞后上，而那正是周期估计最敏感的一段。
+        """
+        rng = np.random.default_rng(3)
+        n = 2000
+        signal = np.abs(np.sin(2 * np.pi * np.arange(n) / 311.0)) + 0.05 * rng.normal(
+            size=n
+        )
+        centred = signal - signal.mean()
+        direct = np.correlate(centred, centred, mode="full")[n - 1 :]
+        low, high = 100, min(800, n // 2)
+        window = direct[low : high + 1]
+        expected = low + int(np.flatnonzero(window >= 0.9 * window.max())[0])
+        assert _autocorrelation_period(signal, 100, 800) == float(expected)
+
+    def test_a_long_record_does_not_take_quadratic_time(self):
+        """`np.correlate(x, x, "full")` 走直接卷积，O(n²)。
+
+        实测一趟慢速档 23000 样本要 5×10⁸ 次乘加，单趟跑掉好几分钟 —— 而真机记录
+        只会更长（T-230-03 的慢速趟就是 116 s）。它还把全部 23000 个滞后都算出来，
+        可这里只用得上 800 个。这条测试钉住"别再退回去"。
+        """
+        n = 40000
+        signal = np.abs(np.sin(2 * np.pi * np.arange(n) / 611.0))
+        start = time.perf_counter()
+        lag = _autocorrelation_period(signal, 100, 800)
+        elapsed = time.perf_counter() - start
+        assert lag is not None
+        # 宽松到 2 秒：这条要挡的是"几分钟"那个量级，不是做微基准。
+        assert elapsed < 2.0, f"{elapsed:.1f} s —— 自相关退回平方复杂度了"
 
 
 class TestZaru:
@@ -238,12 +370,16 @@ class TestSoftZupt:
     def test_degraded_samples_carry_a_capped_confidence(self):
         """降级的零速是"这一步一定发生了"推出来的，不是测出来的。"""
         acc, gyr, fs, _ = self.build_walk_with_one_ruined_stance()
-        detection = detect_stance(acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150))
+        detection = detect_stance(
+            acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150)
+        )
         assert np.all(detection.confidence[detection.degraded] <= 0.25)
 
     def test_hard_and_degraded_are_disjoint(self):
         acc, gyr, fs, _ = self.build_walk_with_one_ruined_stance()
-        detection = detect_stance(acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150))
+        detection = detect_stance(
+            acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150)
+        )
         assert not (detection.hard & detection.degraded).any()
         assert np.array_equal(detection.zupt, detection.hard | detection.degraded)
 
@@ -256,7 +392,9 @@ class TestSoftZupt:
         用"缺了一步"的那份数据来验，否则 `degraded` 全空，这条测试等于什么都没测。
         """
         acc, gyr, fs, _ = self.build_walk_with_one_ruined_stance()
-        detection = detect_stance(acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150))
+        detection = detect_stance(
+            acc, gyr, fs, replace(AlgoConfig(), soft_zupt_gap_samples=150)
+        )
         assert detection.degraded.any()
         hard_runs = _hard_runs(detection)
         assert not detection.degraded[: hard_runs[0][0]].any()
@@ -283,7 +421,8 @@ class TestPresetHotSwap:
         second = detect_stance(series.acc, series.gyr, series.fs, low)
         for _ in range(3):
             assert np.array_equal(
-                detect_stance(series.acc, series.gyr, series.fs, default).zupt, first.zupt
+                detect_stance(series.acc, series.gyr, series.fs, default).zupt,
+                first.zupt,
             )
             assert np.array_equal(
                 detect_stance(series.acc, series.gyr, series.fs, low).zupt, second.zupt
@@ -307,9 +446,38 @@ class TestSignalSeparation:
     """整体设计 §5.2 第 3 条：检测用信号低通，积分用信号原始。"""
 
     def test_the_filtered_signal_never_leaves_the_detector(self):
-        """滤波结果连出口都没有，下游拿不到，也就没法误用。"""
+        """滤波结果连出口都没有，下游拿不到，也就没法误用。
+
+        判据直接写成"出口里没有任何 `(n, 3)` 的传感器量"。原先写的是"字段名等于一张
+        固定清单"——那是这条性质的**代理量**，它会在加一个诊断字段时误报：`period`
+        报的是周期分段（周期长度、周期数、各周期边界），不是信号，下游拿它无法重建
+        acc/gyr 的任何版本。
+
+        清单仍然留着当第二道闸，但它不再单独定义成败：新字段必须**显式**加进来，
+        且必须同时过得了上面那条形状判据。
+        """
+        length = 600
+        acc = np.tile([0.0, 0.0, GRAVITY_STANDARD], (length, 1))
+        detection = detect_stance(acc, np.zeros((length, 3)), FS, AlgoConfig())
+        for name in StanceDetection.__dataclass_fields__:
+            value = getattr(detection, name)
+            leaked = (
+                isinstance(value, np.ndarray)
+                and value.ndim == 2
+                and value.shape[1] == 3
+            )
+            assert not leaked, f"{name} 把一个三轴传感器量递出了检测器"
+
         fields = set(StanceDetection.__dataclass_fields__)
-        assert fields == {"zupt", "zaru", "degraded", "stances", "score", "confidence"}
+        assert fields == {
+            "zupt",
+            "zaru",
+            "degraded",
+            "stances",
+            "score",
+            "confidence",
+            "period",
+        }
 
     def test_the_lowpass_is_zero_phase(self):
         """对称输入进去，对称输出出来。相位滞后会让检出的支撑相整体后移。
@@ -323,7 +491,9 @@ class TestSignalSeparation:
         signal[centre - 5 : centre + 6, 0] = 1.0
         filtered = lowpass(signal, FS, 8.0)[:, 0]
         offsets = np.arange(1, 60)
-        assert np.allclose(filtered[centre - offsets], filtered[centre + offsets], atol=1e-12)
+        assert np.allclose(
+            filtered[centre - offsets], filtered[centre + offsets], atol=1e-12
+        )
         assert int(np.argmax(filtered)) == centre
 
     def test_the_lowpass_preserves_a_constant(self):
@@ -337,6 +507,7 @@ class TestSignalSeparation:
         step[300:, 0] = 1.0
         wide = lowpass(step, FS, 2.0)
         narrow = lowpass(step, FS, 2.0, max_taps=21)
+
         # 抹开的宽度用「离开 [0.02, 0.98] 区间的样本数」量。
         def smear(x):
             return int(((x[:, 0] > 0.02) & (x[:, 0] < 0.98)).sum())
@@ -364,7 +535,9 @@ class TestScoreSemantics:
         assert np.all(np.isfinite(detection.score))
         assert np.all(detection.score >= 0.0)
         # 序必须成立：支撑相里的统计量显著低于摆动相。
-        assert np.median(detection.score[mask]) < 0.01 * np.median(detection.score[~mask])
+        assert np.median(detection.score[mask]) < 0.01 * np.median(
+            detection.score[~mask]
+        )
 
     def test_confidence_is_zero_off_stance_and_positive_on_it(self):
         detection, _, _ = detected_and_truth(GAIT_CASES["walk"])

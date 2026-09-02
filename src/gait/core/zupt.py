@@ -73,6 +73,7 @@ C2。反过来一次平稳的持续加速能骗过 C2 但骗不过 C1。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import Final
@@ -89,6 +90,30 @@ _MAX_TAPS: Final[int] = 201
 
 class ZuptError(ValueError):
     """零速检测的输入非法。"""
+
+
+@dataclass(frozen=True)
+class PeriodReport:
+    """步态周期的估计，以及"这几个独立估计彼此同意吗"。
+
+    它**必须**能被调用方读到。用户选定的降级路径是"周期不一致时标记并降级，不丢段"，
+    而"标记"只有在下游能看见标记时才有意义 —— 一个只影响 `confidence` 数值、不说明
+    原因的降级，读报告的人无从分辨"这一段本来就难"与"检测器出问题了"。
+    """
+
+    #: 采用的周期（各估计的中位数），样本。
+    period_samples: float
+    #: 周期数。**由 `round(时长/周期)` 定死，不由检测决定** —— 这是全设计的要害：
+    #: "两周期并成一个"或"一周期劈成两个"在结构上不可能发生。
+    cycles: int
+    #: 各法给出的周期（样本）。落进报告供人直接核对，不是调试残留。
+    estimates: tuple[tuple[str, float], ...]
+    #: 各估计的 max/min。实测一致时 1.005~1.058，致命失效时 2.0。
+    ratio: float
+    #: 一致性闸是否通过。False 不代表结果不可用，代表它已被降级标记。
+    consistent: bool
+    #: 周期边界，半开、升序，恰好 `cycles` 个。
+    bounds: tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -119,6 +144,9 @@ class StanceDetection:
     score: np.ndarray
     #: (n,) 0~1 的置信度，非零速样本处为 0。见 `_confidence` 的文档。
     confidence: np.ndarray
+    #: 周期分段的结果。None 表示这一段没有可辨认的步态（静立、或太短），此时零速
+    #: 全部来自阈值判据与既有的软零速降级。
+    period: PeriodReport | None = None
 
     @property
     def hard(self) -> np.ndarray:
@@ -126,7 +154,9 @@ class StanceDetection:
         return self.zupt & ~self.degraded
 
 
-def lowpass(x: np.ndarray, fs: float, cutoff_hz: float, *, max_taps: int = _MAX_TAPS) -> np.ndarray:
+def lowpass(
+    x: np.ndarray, fs: float, cutoff_hz: float, *, max_taps: int = _MAX_TAPS
+) -> np.ndarray:
     """零相位低通，窗口化 sinc FIR。**只供检测使用。**
 
     ## 为什么自己写而不是用 scipy
@@ -217,7 +247,10 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
         return []
     padded = np.concatenate(([False], mask, [False]))
     edges = np.flatnonzero(padded[1:] != padded[:-1])
-    return [(int(start), int(end)) for start, end in zip(edges[::2], edges[1::2], strict=True)]
+    return [
+        (int(start), int(end))
+        for start, end in zip(edges[::2], edges[1::2], strict=True)
+    ]
 
 
 def _confidence(score: np.ndarray, threshold: float) -> np.ndarray:
@@ -231,6 +264,318 @@ def _confidence(score: np.ndarray, threshold: float) -> np.ndarray:
     公式 —— 后者只会让它更容易被误信。
     """
     return np.clip(1.0 - score / threshold, 0.0, 1.0)
+
+
+def _local_peaks(signal: np.ndarray, min_distance: int) -> np.ndarray:
+    """幅值降序的贪心峰选，保证两两间距 ≥ `min_distance`。
+
+    先取**严格**局部极大，否则一个平顶上的每个样本都会成为候选，而贪心会把它们
+    当成一串挨着的峰。相等的一侧用 `>=`、另一侧用 `>`，平台只留最左那个。
+
+    `min_distance` 由估出的周期给（0.5×周期），**不是固定参数**。固定间距会全面
+    失败：慢走周期 2.5 s、快走 1.0 s，实测 sep=0.3 s 给出 120 个峰、sep=0.5 s 给出
+    97 个，而真值 38（T-230-04 追加一）。
+    """
+    min_distance = max(1, min_distance)
+    if signal.size < 3:
+        return np.zeros(0, dtype=int)
+    interior = (
+        np.flatnonzero((signal[1:-1] >= signal[:-2]) & (signal[1:-1] > signal[2:])) + 1
+    )
+    if interior.size == 0:
+        return interior.astype(int)
+    # 占位数组 + 定长切片，而不是"与已选的每一个比距离"。噪声让 ‖ω‖ 上出现几千个
+    # 局部极大（真正的摆动峰只有几十个），逐对比较是 O(k²) —— 实测 36000 样本上要跑
+    # 到分钟量级，而这是每段数据都要走的路径。切片检查是 O(k·min_distance)，两者在
+    # 结果上**完全等价**：都在问"容差内有没有已选的峰"。
+    taken = np.zeros(signal.size, dtype=bool)
+    chosen: list[int] = []
+    for candidate in interior[np.argsort(signal[interior], kind="stable")[::-1]]:
+        index = int(candidate)
+        if taken[max(0, index - min_distance + 1) : index + min_distance].any():
+            continue
+        taken[index] = True
+        chosen.append(index)
+    return np.array(sorted(chosen), dtype=int)
+
+
+def _autocorrelation_period(signal: np.ndarray, low: int, high: int) -> float | None:
+    """自相关的峰所在滞后，样本。估不出时 None。
+
+    它**不依赖任何特征检测**，因此在一致性闸里是一票独立的证据：三个特征都锁错了
+    同一个错误事件时，特征之间仍然彼此一致，只有自相关会不同意。
+    """
+    n = signal.size
+    high = min(high, n // 2)
+    if high <= low or low < 1:
+        return None
+    centred = signal - signal.mean()
+    energy = float(centred @ centred)
+    if energy <= 0.0:
+        # 常量信号：没有周期可言。这不是失败，是"这段没有步态"——
+        # 静立、或足部被固定。调用方应当回落到阈值判据。
+        return None
+    # 经 FFT 算自相关。`np.correlate(x, x, "full")` 走的是直接卷积，O(n²)：实测一趟
+    # 慢速档 23000 样本要 5×10⁸ 次乘加，单趟就跑掉好几分钟，而真机记录只会更长。
+    # 它还把 23000 个滞后全算了出来，可这里只用得上 `high + 1` 个。
+    #
+    # 补零到 ≥ 2n 再变换，是为了让循环相关等于线性相关 —— 不补零的话尾部会绕回来
+    # 加到头部的滞后上，那正是周期估计最敏感的一段。
+    size = 1 << math.ceil(math.log2(2 * n))
+    spectrum = np.fft.rfft(centred, size)
+    correlation = np.fft.irfft(spectrum * np.conj(spectrum), size)
+    window = correlation[low : high + 1]
+    if window.size == 0 or not np.isfinite(window).all():
+        return None
+    # 取**最小**的近极大滞后，而不是全局 argmax。周期为 T 的信号在 2T、3T 上同样有
+    # 强峰，而 argmax 落在哪一个取决于包络衰减这种与步态无关的因素。基频选错成 2T
+    # 会让周期数正好少一半 —— 那正是本设计要在结构上排除的失效，不能让它从种子进来。
+    peak = float(window.max())
+    if peak <= 0.0:
+        return None
+    return float(low + int(np.flatnonzero(window >= 0.9 * peak)[0]))
+
+
+def _fold_harmonic(value: float, seed: float) -> float:
+    """把 ×2 / ×3 / ÷2 / ÷3 的谐波折回基频。
+
+    峰选器锁到"每周期两次冲击"里的另一次时，给出的周期正好是真周期的一半 ——
+    实测 `walk` 上摆动峰给出 112 而真值 222。这不是"估歪了一点"，是**锁到了谐波**，
+    而谐波是量化的：只能是整数倍或整数分之一。
+
+    折叠只允许这几个精确因子，所以它修不好一个真正不一致的估计 —— 那样的估计折完
+    仍然离种子很远，一致性闸照样拦得住。换句话说，折叠拿走的是"谐波"这一种已知的
+    歧义，没有拿走闸门的鉴别力。
+
+    **代价要说清楚**：折叠以自相关种子为锚，因此闸门对"种子自己错了整整一倍"这种
+    情形不再敏感。这是 `_autocorrelation_period` 偏向最小近极大滞后的原因 ——
+    那一条把种子锁在基频上，是本折叠成立的前提，两者必须一起读。
+    """
+    best = value
+    for factor in (1.0, 2.0, 3.0, 0.5, 1.0 / 3.0):
+        candidate = value * factor
+        if abs(math.log(candidate / seed)) < abs(math.log(best / seed)):
+            best = candidate
+    return best
+
+
+def _estimate_period(
+    swing: np.ndarray, impact: np.ndarray, fs: float, cfg: AlgoConfig
+) -> PeriodReport | None:
+    """估步态周期并划出周期边界。不是步态时返回 None。
+
+    四个独立估计（自相关 + 三特征里的两个可算的）互相校验。校验放在**周期域**而不是
+    事件域，理由是失效模式本身是量化的：两周期并成一个 → ×2，一周期劈成两个 → ×0.5，
+    而一致时实测只差 1.005~1.058。要分的两类东西差了一个数量级，所以这道闸有近 20 倍
+    余量（T-230-04 追加二）。
+
+    事件域没有这样的分离：A–B 事件间隔的 IQR 跨趟差 30 倍，"这两个事件相差 80 ms
+    算不算同一个"需要一个精细容差，而那个容差同样面临太严/太松。
+    """
+    low = max(1, round(cfg.stance_period_min_s * fs))
+    high = round(cfg.stance_period_max_s * fs)
+    seed = _autocorrelation_period(swing, low, high)
+    if seed is None:
+        return None
+
+    separation = max(1, round(0.5 * seed))
+    estimates: list[tuple[str, float]] = [("autocorrelation", seed)]
+    for name, signal in (("swing", swing), ("impact", impact)):
+        peaks = _local_peaks(signal, separation)
+        if peaks.size >= 2:
+            interval = _fold_harmonic(float(np.median(np.diff(peaks))), seed)
+            if low <= interval <= high:
+                estimates.append((name, interval))
+
+    values = [value for _, value in estimates]
+    ratio = max(values) / min(values)
+    consistent = ratio < cfg.stance_period_consistency_max
+    # 一致时取中位数（几个估计差不到 6%，取哪个都一样）；**不一致时退回自相关**，
+    # 因为它是唯一不依赖峰选的估计 —— 用户选定的降级路径是"用最可信的单一特征并
+    # 标注"，而不是把一个已知跑掉的估计拌进中位数里。实测 `shuffle`（拖步样步态，
+    # 摆动峰本就微弱）正落在这一支：中位数会给出 259 而真值 400。
+    period = float(np.median(values)) if consistent else seed
+
+    # 周期定了"每格多宽"，还差"格子从哪切"。**相位必须让边界落在摆动相里**：边界一旦
+    # 切进支撑相，那一步就被劈给相邻两个周期，两边的 `argmin` 各自跑到隔壁步上去，那
+    # 一步谁也不标 —— 实测就是这样漏掉的（边界 932/1154 分别落在支撑相 867–1001 与
+    # 1089–1223 里）。
+    #
+    # 不能拿摆动峰当锚点。`‖ω‖` 的最大值出现在蹬离/触地，那是**紧挨着支撑相**的位置，
+    # 不是摆动中段；按峰对齐恰好把边界推到支撑相边上。改为直接搜相位：在 `[0, period)`
+    # 里取让**各边界处 `‖ω‖` 平均值最大**的那一个。这是把"边界要落在脚动得最快的地方"
+    # 直接写成目标函数，不经过任何峰选。两类相位的得分差一个数量级，选起来没有悬念。
+    # 网格的**范围**由摆动峰定：第一个峰到最后一个峰之间必定是走路，之前和之后可能是
+    # 起步前的静立。范围放到整条记录上会把静立段也切成周期并在那里标零速 —— 脚确实是
+    # 静的，不算误检，但那些跨度会混进步相事件里，把左右配对算坏（`generate_dual_walk`
+    # 的 `still_lead_s` 就是这么暴露出来的）。
+    swing_peaks = _local_peaks(swing, max(1, round(0.5 * period)))
+    if swing_peaks.size < 2:
+        return None
+    span_start, span_end = int(swing_peaks[0]), int(swing_peaks[-1])
+    if span_end - span_start <= 0:
+        return None
+
+    # 必须把**整整一个周期**的相位都试到。按 `max(0, span_start - period)` 截断看着无害，
+    # 实则当第一个峰离记录开头不足一个周期时会砍掉一整段相位，最优解恰好落在被砍掉的
+    # 那段里时，选出来的网格是反相的 —— 每条边界都落进支撑相。相位是模周期的量，越界
+    # 的起点往后挪一个周期即可，落在同一个相位上。
+    span = round(period)
+    best_score, best_edges = -1.0, None
+    for offset in range(span):
+        start = span_start - offset
+        while start < 0:
+            start += span
+        count = int((span_end - start) // period)
+        if count < cfg.stance_min_cycles:
+            continue
+        edges = start + np.round(np.arange(count + 1) * period).astype(int)
+        score = float(swing[edges].mean())
+        if score > best_score:
+            best_score, best_edges = score, edges
+    if best_edges is None:
+        return None
+
+    cycles = best_edges.size - 1
+    bounds = tuple(
+        (int(best_edges[index]), int(best_edges[index + 1]))
+        for index in range(cycles)
+        if best_edges[index + 1] > best_edges[index]
+    )
+    if len(bounds) < cfg.stance_min_cycles:
+        return None
+    return PeriodReport(
+        period_samples=period,
+        cycles=len(bounds),
+        estimates=tuple(estimates),
+        ratio=ratio,
+        consistent=consistent,
+        bounds=bounds,
+    )
+
+
+def _flat_foot_reference(unit_acc: np.ndarray, coarse: np.ndarray) -> np.ndarray | None:
+    """静立姿态的参考方向：足底平放时的重力方向。
+
+    取**粗筛通过处**的中位方向。那些样本按定义是"只受重力、不抖、不转"的窗口 ——
+    实测粗筛自己放过 30~38%，作判据毫无区分力（那正是本 Issue 的根因之一），但作
+    "哪些时刻的加计方向可以当重力用"的取样却恰到好处：它挡掉的正是线加速度大的
+    摆动相，而加计方向只有在线加速度足够小时才代表重力方向。
+
+    用中位数而不是均值：一个混进来的摆动相样本能把均值拽走，拽不动中位数。
+    """
+    if not coarse.any():
+        return None
+    reference = np.median(unit_acc[coarse], axis=0)
+    norm = float(np.linalg.norm(reference))
+    if norm <= 0.0:
+        return None
+    return reference / norm
+
+
+def _period_stance(
+    swing: np.ndarray,
+    hard: np.ndarray,
+    unit_acc: np.ndarray,
+    reference: np.ndarray | None,
+    period: PeriodReport,
+    cfg: AlgoConfig,
+) -> np.ndarray:
+    """每个周期里标一个零速时刻：`argmin ‖ω‖`。**一周期一个，由构造保证。**
+
+    没有阈值。三种信号的绝对幅值都随速度与鞋型变（实测周期内最低 `‖ω‖` 为
+    1.08~11.59 °/s），所以任何固定阈值必然在某一档失配；而"周期内哪一点最低"
+    不随速度变 —— 问题不在选哪个信号，在于"用阈值"这件事本身。
+
+    取 `argmin ‖ω‖` 而不是姿态角最小点：姿态最平的那一刻实测 `‖ω‖` 已达 68~97 °/s
+    （快速档），**脚是平的，但正在快速滚过去**。ZUPT 要的是速度为零，不是姿态回正。
+
+    硬检测已经覆盖的周期不重复标记：那里的脚**真的**静止到过阈，是更强的证据。
+    """
+    soft = np.zeros_like(hard)
+    half = cfg.soft_zupt_span_samples // 2
+    limit = math.cos(math.radians(cfg.stance_attitude_tolerance_deg))
+    for start, end in period.bounds:
+        # 这个周期**只要有**硬检测就整格让开。周期路径是用来救"一个硬检测都没有"的
+        # 周期的（实测快速档 87% 的周期就是这样），不是用来给已经检出的那一步加注的。
+        #
+        # 判据不能收窄成"最低点这一刻是否已被硬检测覆盖"。`‖ω‖` 的真实最低点常常落在
+        # 硬检测跨度**边界外几个样本**——硬路径的粗筛用的是窗口统计量，它的边界系统性
+        # 地向内缩（`test_events` 正是守着这条偏置）。于是每个周期都会在真支撑相紧邻处
+        # 多标出一小截，把一个支撑相裂成两个跨度：实测 20 步变成 40 个跨度，左右配对
+        # 因此全线算错。
+        #
+        # 边界现在落在摆动相里，一个支撑相不会被劈给两个周期，所以整格让开不会漏掉
+        # 被劈开的那一步 —— 那正是当初收窄这条判据的理由，现在它不成立了。
+        if hard[start:end].any():
+            continue
+        # 姿态校验（结构第 5 步）先**筛候选**，再在候选里取 `argmin`，而不是取全局
+        # `argmin` 之后再否决它。周期数定死了"有几步"，姿态回答的是"这一步在哪"——
+        # 它是个定位量，用作事后一票否决就浪费了：某一步被噪声搅乱时，全局最低点会
+        # 跑到相邻摆动相的某个偶然安静样本上，否决掉它就等于连**这一步本来落在哪**
+        # 一起丢掉。先筛后取则仍然把它定位回那一步里，只是置信度低。
+        #
+        # 整个周期无一刻脚是平的，才真的没有可信的零速时刻，此时才丢：漏检只损失
+        # 一步，误检毁掉整条轨迹。
+        candidates = np.arange(start, end)
+        if reference is not None:
+            candidates = candidates[unit_acc[candidates] @ reference >= limit]
+        if candidates.size == 0:
+            continue
+        centre = int(candidates[np.argmin(swing[candidates])])
+        # 展开的宽度由**数据**定，不由固定的 `span` 定。固定宽度在候选落到支撑相边缘时
+        # 必然探进摆动相：实测就漏出去一个样本（真值支撑相始于 2600，标到了 2599）。
+        #
+        # 判据是"与最低点相比还分辨不出差别"——比最低点高出不到静止脚本身的噪声底
+        # （`stance_still_reference_rad_s`）就还算同一个零速平台。这不是又一个绝对阈值：
+        # 参照量是**这一周期自己测出的最低值**，随速度与鞋型一起漂。支撑相边缘 `‖ω‖`
+        # 是成 rad/s 地往上窜的，展开在那里自己就停住了。
+        level = float(swing[centre]) + cfg.stance_still_reference_rad_s
+        head = centre
+        while head > max(start, centre - half) and swing[head - 1] <= level:
+            head -= 1
+        tail = centre
+        while tail + 1 < min(end, centre + half + 1) and swing[tail + 1] <= level:
+            tail += 1
+        window = np.arange(head, tail + 1)
+        # 逐样本再验一次姿态：零速时刻本身通过校验，不代表它两侧都还在支撑相里。
+        if reference is not None:
+            window = window[unit_acc[window] @ reference >= limit]
+        soft[window] = True
+    return soft
+
+
+def _period_confidence(
+    swing: np.ndarray, soft: np.ndarray, period: PeriodReport, cfg: AlgoConfig
+) -> np.ndarray:
+    """由**实测的**周期内最低 `‖ω‖` 定权重，而不是二值接受/拒绝。
+
+    现行做法是"不够静就整步丢掉"，实测后果是快速档丢掉全部（87% 漏检）。而最低
+    `‖ω‖` 是连续量，天然适合做观测权重：2 °/s 的周期给得紧，11 °/s 的给得松。
+
+    映射取 `ref / (ref + ω_min)`，在 ω_min = ref 处给半权、单调下降、恒为正。
+    整体再压到 `≤ 0.25`：这些零速是"这一周期一定发生过一步"推出来的，不是测出来的，
+    与既有软零速同一档。周期不一致时再折半 —— 那是降级里的降级。
+
+    **这个数的绝对值没有校准过，它的序才有意义**（与 `_confidence` 同一条声明）。
+    把它接到 ESKF 的观测协方差上是 RAY-204 的事，本模块只表达"多可信"。
+    """
+    confidence = np.zeros(swing.shape, dtype=np.float64)
+    ceiling = 0.25 if period.consistent else 0.125
+    reference = cfg.stance_still_reference_rad_s
+    for start, end in period.bounds:
+        marked = soft[start:end]
+        if not marked.any():
+            continue
+        # 取**被标中的**样本里的最低值，而不是整个周期的最低值。姿态校验否决掉全局
+        # 最低点时（那一刻脚不平，多半在摆动相），用它算权重就等于拿一个**没有采用的**
+        # 时刻去给采用的时刻背书，报出来的置信度会高于实际依据。两者只在姿态否决时
+        # 不同，而那恰恰是最该压低置信度的情形。
+        minimum = float(swing[start:end][marked].min())
+        confidence[start:end] = np.where(
+            marked, ceiling * reference / (reference + minimum), 0.0
+        )
+    return confidence
 
 
 def detect_stance(
@@ -254,7 +599,9 @@ def detect_stance(
         if value.ndim != 2 or value.shape[1] != 3:
             raise ZuptError(f"{name} 应为 (n, 3)，收到 shape={value.shape}")
     if specific_force.shape != omega.shape:
-        raise ZuptError(f"acc 与 gyr 的样本数必须一致：{specific_force.shape} vs {omega.shape}")
+        raise ZuptError(
+            f"acc 与 gyr 的样本数必须一致：{specific_force.shape} vs {omega.shape}"
+        )
     n = specific_force.shape[0]
     window = cfg.zupt_window_samples
     if n < window:
@@ -295,11 +642,14 @@ def detect_stance(
     # GLRT。展开 Σ‖a_i - g·û‖²（û 是窗口均值方向）后只剩窗口和，不必回到逐样本：
     #     Σ‖a_i - g·û‖² = Σ‖a_i‖² - 2·g·W·‖ā‖ + W·g²
     # 因为 û·Σa_i 恰好是 ‖Σa_i‖。
-    residual = acc_square_sum - 2.0 * gravity * window * acc_mean_norm + window * gravity**2
+    residual = (
+        acc_square_sum - 2.0 * gravity * window * acc_mean_norm + window * gravity**2
+    )
     # 浮点相减可能给出一个极小的负数，而它只表示"完全静止"。截到 0，好让 score 保持
     # "越小越静止、下界为 0"这个可以被下游依赖的性质。
     score = np.maximum(
-        (residual / cfg.zupt_sigma_acc**2 + gyr_square_sum / cfg.zupt_sigma_gyr**2) / window,
+        (residual / cfg.zupt_sigma_acc**2 + gyr_square_sum / cfg.zupt_sigma_gyr**2)
+        / window,
         0.0,
     )
 
@@ -315,13 +665,32 @@ def detect_stance(
         # 而不是独立的约束来源。低速/病理预设（PRD §7）才让它自己站住。
         zaru = zaru & hard
 
-    degraded = _soft_stance(score, hard, cfg)
-    zupt = hard | degraded
+    # 周期分段。摆动峰用**逐样本**的 ‖ω‖ 而不是窗口均值：摆动峰是 200~600 °/s 的
+    # 尖锐事件，滑窗平均会把它削矮并向两侧抹开，而这里要的正是它的位置。
+    swing = np.linalg.norm(omega, axis=1)
+    impact = np.abs(np.linalg.norm(detection_acc, axis=1) - gravity)
+    period = _estimate_period(swing, impact, fs, cfg)
 
-    confidence = np.where(zupt, _confidence(score, cfg.zupt_glrt_threshold), 0.0)
-    # 降级样本的置信度另外压一档：它们是"这一步一定发生了"推出来的，不是测出来的。
-    # 压制系数与 ESKF 放大 R 的倍数无关 —— 那是滤波器的事，这里只表达"更不可信"。
-    confidence = np.where(degraded, np.minimum(confidence, 0.25), confidence)
+    if period is None:
+        # 没有可辨认的步态：静立、足部被固定，或段太短。阈值判据在这里是对的 ——
+        # 真正静止的脚**确实**满足 GLRT，失效的只是"走路时也要求它"。
+        degraded = _soft_stance(score, hard, cfg)
+        zupt = hard | degraded
+        confidence = np.where(zupt, _confidence(score, cfg.zupt_glrt_threshold), 0.0)
+        confidence = np.where(degraded, np.minimum(confidence, 0.25), confidence)
+    else:
+        unit_acc = acc_mean / np.maximum(acc_mean_norm[:, None], 1e-9)
+        degraded = _period_stance(
+            swing, hard, unit_acc, _flat_foot_reference(unit_acc, coarse), period, cfg
+        )
+        zupt = hard | degraded
+        confidence = np.where(hard, _confidence(score, cfg.zupt_glrt_threshold), 0.0)
+        # 周期零速的置信度来自**实测的**周期内最低 ‖ω‖，不来自 GLRT：GLRT 在这些
+        # 样本上按定义是超阈的（那正是本 Issue 的根因），拿它算出来的置信度恒为 0，
+        # 而一个恒为 0 的置信度会让下游把每一步都当成不可信。
+        confidence = np.where(
+            degraded, _period_confidence(swing, degraded, period, cfg), confidence
+        )
 
     return StanceDetection(
         zupt=zupt,
@@ -330,6 +699,7 @@ def detect_stance(
         stances=_runs(zupt),
         score=score,
         confidence=confidence,
+        period=period,
     )
 
 
@@ -380,5 +750,7 @@ def _soft_stance(score: np.ndarray, hard: np.ndarray, cfg: AlgoConfig) -> np.nda
         if search_end - search_start < cfg.soft_zupt_span_samples:
             continue
         centre = search_start + int(np.argmin(score[search_start:search_end]))
-        soft[max(search_start, centre - half) : min(search_end, centre + half + 1)] = True
+        soft[max(search_start, centre - half) : min(search_end, centre + half + 1)] = (
+            True
+        )
     return soft
