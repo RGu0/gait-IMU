@@ -427,3 +427,15 @@ def test_the_strict_path_never_reaches_for_the_wide_gate():
 
     assert "gait.sync.planning" not in imported
     assert "gait.analysis.planning" not in imported
+
+
+def test_an_integrity_report_from_another_segment_is_refused():
+    """预算好的完整性报告必须是**这一段**的。
+
+    `Gap.before/after` 是样本序号。拿另一段的序号索引这一段，挖出来的窗口位置全错，
+    而结果仍然是一组形状正常的区间 —— 没有任何东西会报错，覆盖率也照样算得出来。
+    """
+    holed = arrivals(duration_s=60.0, drop=[(20.0, 21.0)])
+    other = assess(arrivals(duration_s=30.0), NOMINAL_FS)
+    with pytest.raises(PlanningError):
+        net_window(holed, NOMINAL_FS, report=other)

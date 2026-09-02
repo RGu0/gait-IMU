@@ -211,6 +211,14 @@ def net_window(
             "空洞切分可能切出这样的碎段；调用方应当整段跳过。"
         )
     integrity = report if report is not None else assess(times, nominal_fs, cfg)
+    if integrity.samples != times.size:
+        # 传进来的报告不是这段数据的。`Gap.before/after` 是**样本序号**，拿另一段的
+        # 序号来索引这一段，挖出来的窗口位置全错 —— 而结果仍然是一组形状正常的区间，
+        # 没有任何东西会报错。这是本模块最容易踩、也最难发现的一种错，所以直接拒。
+        raise PlanningError(
+            f"传入的完整性报告是 {integrity.samples} 个样本的，而 arrival 有 "
+            f"{times.size} 个。空洞的位置以样本序号记，两者必须是同一段数据。"
+        )
     guard = float(cfg.planning_gap_guard_s)
     span: Span = (float(times[0]), float(times[-1]))
     holes = [
