@@ -58,7 +58,7 @@ import numpy as np
 from wt901 import BleTransport, DiscoveredDevice, ReturnRate, WT901Device, scan
 from wt901.transport.recording import RecordingTransport
 
-from gait.analysis.events import segment_cycles
+from gait.analysis.events import detect_stance_intervals, segment_cycles
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel
 from gait.core.zupt import detect_stance
@@ -215,8 +215,20 @@ def _cycles(capture: FootCapture, foot: FootLabel, nominal_fs: float, cfg: AlgoC
     kept = len(drop_still_lead(stance_spans(timebase.t, stance.stances), cfg))
     stances = stance.stances[len(stance.stances) - kept :]
     # `FootLabel` 是 Literal["L", "R"]，不是可实例化的类型 —— 直接传字面量。
+    # 支撑相区间走 `detect_stance_intervals`，不走零速区间的边缘细化。
+    #
+    # `stance.stances` 是**零速时刻**（一周期一个，跨度 15~58 ms）。V3′ 报的
+    # `double_support_fraction` 此前一直是负的（实测 −0.62~−0.92），因为用两个近似
+    # 零宽的区间算重叠，得到的必然是负一个 step 时长 —— 那是零宽区间的算术，不是
+    # 双支撑期读数（RAY-325 `stance-interval-detection`）。
+    #
+    # 剔前导仍然在 ZUPT 边界上做（见上），因为那一步依赖"前导比典型支撑相长得多"
+    # 这个比值，而两种口径的典型支撑相差一个数量级。
+    edges = detect_stance_intervals(accel, timebase.report.fs, stance, cfg)
+    kept_edges = edges[len(edges) - kept :] if kept <= len(edges) else edges
     cycles, _edges = segment_cycles(
-        foot, timebase.t, accel, gyro, stances, position=None, cfg=cfg
+        foot, timebase.t, accel, gyro, stances, position=None, cfg=cfg,
+        stance_edges=kept_edges if len(kept_edges) >= 2 else None,
     )
     return cycles, timebase, stances
 

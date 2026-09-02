@@ -26,9 +26,9 @@ from gait.core.zupt import (
     ZuptError,
     _autocorrelation_period,
     _refine_from_events,
-    _runs,
     detect_stance,
     lowpass,
+    runs,
 )
 from gait.validate.synthetic import NoiseModel, WalkSpec, generate_walk
 
@@ -270,7 +270,7 @@ class TestPeriodSegmentation:
         detection, truth, _ = detected_and_truth(
             GAIT_CASES["walk"], noise=NoiseModel.bs_bt91()
         )
-        spans = len(_runs(detection.zupt))
+        spans = len(runs(detection.zupt))
         assert spans <= len(truth.stance) + 1, (
             f"{spans} 个跨度 vs {len(truth.stance)} 步：支撑相被裂开了"
         )
