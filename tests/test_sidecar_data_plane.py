@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -148,7 +147,13 @@ def killed_session(tmp_path: Path) -> tuple[Path, str]:
             time.sleep(0.05)
         else:  # pragma: no cover - 只在环境异常时走到
             pytest.fail("sidecar 十秒内没有写出足够的数据")
-        os.kill(process.pid, signal.SIGKILL)
+        # `kill()` 而不是 `os.kill(SIGKILL)`：后者是 POSIX-only，而 **Windows 正是
+        # 交付平台**，这条测试更该在那儿跑。`Popen.kill()` 在 Windows 上走
+        # TerminateProcess，语义正是这里要的：不给进程任何清理的机会。
+        #
+        # 这条经验 `test_device_crash_recovery.py` 里已经写过一次（RAY-198），
+        # 我第一版没照着做，Windows CI 当场红了。
+        process.kill()
         process.wait(timeout=10)
     finally:
         if process.poll() is None:  # pragma: no cover
