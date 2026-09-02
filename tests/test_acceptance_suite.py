@@ -25,6 +25,8 @@ from pathlib import Path
 import acceptance
 import pytest
 
+from gait.config import AlgoConfig
+
 MODULES = sorted(
     info.name
     for info in pkgutil.iter_modules(acceptance.__path__)
@@ -88,3 +90,54 @@ def test_every_script_anchors_on_the_controlled_truth_or_nothing(name):
             assert isinstance(node.value, ast.Name), (
                 f"{name} 自己写了一个真值常量；应当引用 `_dataset.TRUTH_CYCLES`"
             )
+
+
+@pytest.mark.parametrize("name", MODULES)
+def test_every_analyse_takes_the_same_two_arguments(name):
+    """`analyse(trial_dir, cfg)` —— 签名统一，`tools/run_acceptance.py` 按它统一调用。
+
+    这条是被 runner 逼出来的：`event_interval` 原本只收 `trial_dir`（它自己造两套
+    配置），于是 runner 要么按名字特判，要么用 `inspect` 猜。两者都是把"接口不一致"
+    从一次性的修改成本变成永久的调用成本。
+    """
+    import inspect
+
+    module = importlib.import_module(f"acceptance.{name}")
+    parameters = list(inspect.signature(module.analyse).parameters)
+    assert parameters == ["trial_dir", "cfg"], f"{name}.analyse 的签名是 {parameters}"
+
+
+def test_the_runner_finds_every_script_and_skips_the_private_ones():
+    """runner 的发现逻辑：找齐全部脚本，且不把 `_dataset` 当成一个验收脚本。"""
+    import run_acceptance
+
+    found = run_acceptance.scripts()
+    assert set(found) == set(MODULES)
+    assert not any(name.startswith("_") for name in found)
+
+
+def test_a_crashed_script_is_reported_as_crashed_not_as_passing(monkeypatch):
+    """**崩溃与"零条不达标"必须分开报。**
+
+    RAY-328 的 `xcorr_prior_acceptance.py` 在上游删掉一个字段之后是 `KeyError` 直接
+    崩的 —— 那时它一行判据都没跑到。若 runner 把它算成"0 条不达标"，汇总表会显示
+    全绿，而实际上那个脚本什么也没验。这正是本 Issue 要治的那种"看起来在守"。
+    """
+    import run_acceptance
+
+    class Exploding:
+        @staticmethod
+        def analyse(trial_dir, cfg):
+            raise KeyError("seeded")
+
+        @staticmethod
+        def judge(rows):
+            return []
+
+    monkeypatch.setattr(run_acceptance.importlib, "import_module", lambda _: Exploding)
+    outcome = run_acceptance.run("whatever", [Path(".")], AlgoConfig(), None)
+
+    assert outcome.crashed is not None
+    assert "KeyError" in outcome.crashed
+    assert outcome.failures == []          # 一条判据都没跑到
+    assert outcome.passed is False         # 但绝不算通过

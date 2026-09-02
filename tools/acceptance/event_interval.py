@@ -34,8 +34,12 @@ MAX_CELL = 0.050
 MAX_CYCLE_ERROR = 3
 
 
-def analyse(trial_dir: Path) -> list[dict]:
-    on = AlgoConfig()
+def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
+    """签名与套件里其余脚本一致 —— `tools/run_acceptance.py` 按这个签名统一调用。
+
+    `cfg` 就是"精修开着"的那一套；"关掉"的那一套由它派生，所以调用方只需给一个。
+    """
+    on = cfg
     # 关掉采纳 = 精修上线之前的行为。**基线当场重算**，不抄历史读数 —— 两条路径在同一次
     # 运行里跑同一段数据，只差 `period_refine_min_intervals` 这一个参数。
     off = replace(on, period_refine_min_intervals=10**6)
@@ -48,10 +52,10 @@ def analyse(trial_dir: Path) -> list[dict]:
         duration = 0.0
         label = walks["after"][index].trial
         name = walks["after"][index].walk
-        for tag, cfg in (("before", off), ("after", on)):
+        for tag, variant in (("before", off), ("after", on)):
             walk = walks[tag][index]
             feet, duration = walk.feet, walk.duration_s
-            result = plan_dual_foot_periods(feet["L"], feet["R"], walk.nominal_fs, cfg)
+            result = plan_dual_foot_periods(feet["L"], feet["R"], walk.nominal_fs, variant)
             measured[tag] = {
                 foot: {
                     "period_s": detection.period.period_samples / feet[foot].fs,
@@ -109,9 +113,10 @@ def main() -> int:
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
+    cfg = AlgoConfig()
     rows: list[dict] = []
     for trial in args.trials:
-        rows.extend(analyse(trial))
+        rows.extend(analyse(trial, cfg))
 
     print(f"{'趟/脚':22s}{'真 T':>7s}{'现状':>8s}{'新':>8s}{'步 旧→新':>10s}{'采纳':>5s}")
     for row in rows:
