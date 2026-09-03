@@ -21,6 +21,7 @@ from gait.analysis.segments import (
     KIND_STRAIGHT,
     KIND_TURN,
     SEGMENTATION_VERSION,
+    PathSegment,
     SegmentationError,
     analyse,
     heading_change_per_cycle,
@@ -53,7 +54,9 @@ def turnaround(*, path_length=4.0, turn_strides=2, duration=60.0, noise=None):
         cadence=108.0,
     )
     series, truth = generate_walk(spec, foot="L", noise=noise or NoiseModel(seed=0))
-    spans = drop_still_lead(detect_stance(series.acc, series.gyr, series.fs, CFG).stances)
+    spans = drop_still_lead(
+        detect_stance(series.acc, series.gyr, series.fs, CFG).stances
+    )
     cycles, _ = segment_cycles(
         "L", series.t, series.acc, series.gyr, spans, position=truth.p
     )
@@ -64,7 +67,9 @@ def truth_labels(truth, cycles):
     labels = []
     for cycle in cycles:
         middle = 0.5 * (cycle.t_ic + cycle.t_ic_next)
-        stride = next((s for s in truth.strides if s.t_ic <= middle < s.t_ic_next), None)
+        stride = next(
+            (s for s in truth.strides if s.t_ic <= middle < s.t_ic_next), None
+        )
         labels.append(bool(stride.is_turn) if stride is not None else False)
     return np.array(labels)
 
@@ -276,6 +281,54 @@ def test_a_segment_too_short_to_trim_is_dropped_with_a_named_reason():
     assert any("too_short" in reason for reason in report.dropped.values())
 
 
+def test_the_kept_count_is_predictable_from_the_segment_sizes():
+    """中段步数**完全由直行段的长度分布决定**：`Σ 长度>2·trim 的段 (长度 − 2·trim)`。
+
+    这条不是把实现抄一遍 —— 它钉的是**可预测性**。RAY-354 的现场读数里
+    `S1-sport/slow-a/L` 从 33 个周期只剩 6 个中段步，看起来像个说不清的灾难；
+    按这条式子一算就清楚了：直行段被碎成 `[5,1,1,5,2,…]`，两个长度 ≤ 2 的碎段
+    **整段丢**，其余每段首尾各去 1 —— 3+0+0+3+0 = 6。**逐格账目 24/24 全对。**
+
+    有了它，「分段坏了多少」不必再靠看最终步数猜，可以直接从段长分布算出来。
+    """
+    series, _, cycles, _ = turnaround(path_length=10.0, turn_strides=3)
+    for trim in (0, 1, 2):
+        report = analyse(cycles, series.t, series.gyr[:, 2], trim=trim)
+        predicted = sum(
+            max(0, segment.cycles - 2 * trim)
+            for segment in report.straight_segments
+            if segment.cycles > 2 * trim
+        )
+        assert len(report.selected) == predicted, f"trim={trim}"
+
+
+def test_chopping_a_walk_into_shorter_segments_costs_superlinearly():
+    """**碎段的代价是超线性的。** 同样多的周期，段越碎，留下的越少 —— 直到一步不剩。
+
+    这是 RAY-354 的机制：假转身不只丢掉转身那几步，它把直行段**切碎**，而每个碎段
+    首尾各再赔 1 步、长度 ≤ 2 的碎段一步都留不下。所以「判错几次转身」与「丢掉多少步」
+    **不是线性关系**：中档判错 1 次只丢 5 步，慢档一格却从 33 掉到 6。
+    """
+    cycles = list(range(30))  # 只用到个数，段的构造与内容无关
+    kept = {}
+    for size in (30, 10, 5, 3, 2):
+        pieces = [
+            PathSegment(KIND_STRAIGHT, start, min(start + size, 30), 0.0, 1.0)
+            for start in range(0, 30, size)
+        ]
+        if size <= 2:
+            with pytest.raises(SegmentationError, match="剔除策略"):
+                select_middle_steps(cycles, pieces, trim=1)
+            kept[size] = 0
+        else:
+            kept[size] = len(select_middle_steps(cycles, pieces, trim=1).selected)
+
+    # 30 个周期：1 段留 28，3 段留 24，6 段留 18，10 段留 10，15 段一步不剩。
+    assert kept == {30: 28, 10: 24, 5: 18, 3: 10, 2: 0}
+    # 段数翻倍不是把损失翻倍 —— 从 1 段到 10 段，损失从 2 步涨到 20 步（10 倍）。
+    assert (30 - kept[30]) * 10 == 30 - kept[3]
+
+
 # ── 分离对哪些指标要紧 ────────────────────────────────────────────────────────
 
 
@@ -293,7 +346,9 @@ def test_separation_barely_moves_the_median_but_rescues_the_spread():
     kept = np.array(
         [
             cycle.stride_length
-            for cycle in selected_cycles(cycles, analyse(cycles, series.t, series.gyr[:, 2]))
+            for cycle in selected_cycles(
+                cycles, analyse(cycles, series.t, series.gyr[:, 2])
+            )
         ]
     )
 
@@ -357,7 +412,9 @@ def test_straight_walking_has_one_segment_and_no_turns():
     """不转身的直行数据不该被切出任何转身段。"""
     spec = WalkSpec(duration_s=24.0, cadence=108.0)
     series, truth = generate_walk(spec, foot="L", noise=NoiseModel(seed=0))
-    spans = drop_still_lead(detect_stance(series.acc, series.gyr, series.fs, CFG).stances)
+    spans = drop_still_lead(
+        detect_stance(series.acc, series.gyr, series.fs, CFG).stances
+    )
     cycles, _ = segment_cycles(
         "L", series.t, series.acc, series.gyr, spans, position=truth.p
     )
