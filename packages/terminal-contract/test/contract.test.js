@@ -142,9 +142,15 @@ describe("事件流", () => {
 });
 
 describe("能力缺口", () => {
-  it("四个缺口各自指向认领它的 Issue", () => {
+  it("已实现的能力不再是缺口", () => {
+    // `report` 于 2026-09-03 翻面（RAY-224 `basic-report`）。上一版这里把「它是
+    // 缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，红了就改。
+    expect(capabilityGap("report")).toBeNull();
+    expect(CAPABILITIES.report.implemented).toBe(true);
+  });
+
+  it("仍是缺口的各自指向认领它的 Issue", () => {
     expect(capabilityGap("calibration").issue).toBe("RAY-208");
-    expect(capabilityGap("report").issue).toBe("RAY-224");
     expect(capabilityGap("subject-directory").issue).toBe("RAY-322");
     expect(capabilityGap("operator-auth").issue).toBe("RAY-323");
   });

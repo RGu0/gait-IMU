@@ -85,9 +85,9 @@
       "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未实现；gait/calib/ 目前是空包"
     },
     "report": {
-      "implemented": false,
+      "implemented": true,
       "issue": "RAY-224",
-      "summary": "本地基础报告尚未实现；gait/report/ 目前是空包"
+      "summary": "本地基础报告已实现（gait/report/）；PDF 导出与实际打印（V-U3）仍需 Electron，属 RAY-224 的 pdf-export scope"
     },
     "subject-directory": {
       "implemented": false,
