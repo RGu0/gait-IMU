@@ -99,7 +99,7 @@ p95 ≤ 120 s 交付时实测 4.2 s（余量 28 倍），证据俱全，但此�
 | RAY-215 | 合成 4 米往返下直行 / 转身分离准确 | `test_segments.py` 四条（含「判据是航向不是步长」） | 合成 |
 | RAY-215 | 剔除策略可配且可复算 | 同上四条（同参数复现同结果、报告带回它用的参数、每个被剔的步说明理由） | 合成 |
 | RAY-216 | 合成数据下事件时刻误差 < 20 ms | `test_refined_events_land_within_the_acceptance_tolerance` + **阳性对照**（原始 ZUPT 边界必须过不了）+ 与检测窗口无关 | 合成 |
-| RAY-216 | **参数量级合理性检查通过** | 合成侧有（`test_double_support_lands_in_the_physiological_band` 等）；**真机侧无人守** —— 产品链路实测支撑相占比 1~16%（生理 60~75%）、DS −0.925~−0.624 | 合成 ✅ / **真机 ❌** |
+| RAY-216 | **参数量级合理性检查通过** | 合成侧 `test_double_support_lands_in_the_physiological_band` 等；**真机侧由 RAY-351 的 `chain_metrics.py` 补上** —— 此前无人守，产品链路实测支撑相占比 1~16%（生理 60~75%）、DS −0.925~−0.624 | 合成 + 真机 |
 | RAY-217 | 60 s 下 CV 正常输出且 `grade` 反映样本量少 | `test_variability.py` 四条（含「低于阈值时翻倍的 CV 分辨不出来」） | 合成 |
 | RAY-218 | 任一指标的质量证据入库可查 | `test_quality.py` 三条 | 合成 |
 | RAY-218 | `low` 只影响呈现不拦截；门控矩阵默认全关 | `test_quality.py` 四条，正反都有 | 合成 |
