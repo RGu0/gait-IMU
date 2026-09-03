@@ -31,6 +31,10 @@
    真机没有 IC/TO 真值可校。设一个够不着的门只会让脚本永远红。
 3. **阳性对照**：同一次导航结果走**旧路径**（`segment_cycles` 不传 `stance_edges`），
    两条门都必须拦下它。
+4. **完整链也要跑得完**（RAY-357）。本脚本对每趟同时跑 `run_basic_chain` 与
+   `run_full_chain` —— 后者曾因 `FilterHistory` 不覆盖碎段而在真机上崩在 `rts.smooth`，
+   而当时的判据只说了基础链，套件、单测、CI 全绿。完整链的读数**只记录不设门**
+   （它多了 RTS + 锚定 + 双足约束三件事，达标门归各自的 Issue）。
 
    对照用的不是编出来的缺陷，**就是切换之前的产品链路本身** —— 一条真实存在过的
    更差路径。
@@ -49,7 +53,7 @@ import numpy as np
 
 from acceptance._dataset import load_walks, parse_args, report
 from gait.analysis import events
-from gait.cloud.chain import run_basic_chain
+from gait.cloud.chain import run_basic_chain, run_full_chain
 from gait.config import AlgoConfig
 from gait.contracts import FootSeries, Quality
 
@@ -108,6 +112,12 @@ def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
     for walk in load_walks(trial_dir, cfg, lead_s=LEAD_S):
         series = {label: _foot_series(label, foot) for label, foot in walk.feet.items()}
         chain = run_basic_chain(series, cfg, sync_quality=SYNC_QUALITY)
+        # **完整链也要跑。** RAY-352 的跳过让 `FilterHistory` 不再覆盖碎段，
+        # `rts.smooth` 的覆盖检查因此把一个 8 采样的碎段误判成"来自不同调用"，
+        # 整条完整链在真机上崩掉（RAY-357）——而当时的判据只说了基础链，套件、
+        # 单测、CI 全绿。这一行就是把那半边补上：它抛，`analyse` 就抛，runner
+        # 会如实报"崩溃"而不是"0 条不达标"。
+        full = run_full_chain(series, cfg, sync_quality=SYNC_QUALITY)
 
         old = {label: _old_path(chain.feet[label], series[label], cfg) for label in series}
         old_ds = None
@@ -165,6 +175,21 @@ def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
                     for label in sorted(old)
                 },
                 "control_cycles": {label: len(old[label]["cycles"]) for label in sorted(old)},
+                # 完整链（前向 + RTS + 锚定 + 双足约束）的同一批读数，只记录不设门。
+                "full_ds": (
+                    round(float(full.double_support.fraction), 4)
+                    if full.double_support
+                    else None
+                ),
+                "full_stance_pct": {
+                    label: (
+                        round(float(o.spatiotemporal.stance_ratio), 1)
+                        if o.spatiotemporal
+                        else None
+                    )
+                    for label, o in sorted(full.feet.items())
+                },
+                "full_dualfoot_applied": bool(full.diagnostics.get("dualfoot_applied")),
             }
         )
     return rows

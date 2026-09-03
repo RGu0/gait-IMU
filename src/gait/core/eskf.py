@@ -232,10 +232,27 @@ class FilterHistory:
     跨段语义一致：空洞两侧的状态没有可信的动力学联系。"""
 
     segments: tuple[SegmentHistory, ...]
+    #: 短到没法分析、被整段跳过的区间（RAY-352）。它们**没有历史可回传** ——
+    #: 那一段没跑滤波，`Φ` 与 `P` 都不存在。
+    #:
+    #: 记在这里而不是省略掉，是因为 `rts.smooth` 要检查 history 完整覆盖
+    #: `navigation`，而那道检查抓的是「history 与 navigation 来自不同调用」——
+    #: 一条值得留着的检查。省略跳过的段会让它误判成不同调用（RAY-357：真机上
+    #: 一个 8 采样的碎段就让整条完整链崩在那里）。
+    #:
+    #: 与 `NavResult` 对同一件事的处理一致：**覆盖但标记**，不假装那段有数据。
+    skipped: tuple[tuple[int, int], ...] = ()
 
     @property
     def samples(self) -> int:
-        return sum(item.end - item.start for item in self.segments)
+        """history 覆盖到的采样数，**含被跳过的段**。
+
+        跳过的段没有历史，但它确实被这次调用覆盖过 —— 覆盖与「有东西可平滑」
+        是两件事，这个属性回答的是前者。
+        """
+        return sum(item.end - item.start for item in self.segments) + sum(
+            end - start for start, end in self.skipped
+        )
 
 
 def _process_noise(cfg: AlgoConfig, dt: float) -> np.ndarray:
@@ -756,7 +773,7 @@ def _run(
     )
     return (
         navigation,
-        FilterHistory(segments=tuple(histories)) if record else None,
+        FilterHistory(segments=tuple(histories), skipped=tuple(skipped)) if record else None,
         tuple(detections),
     )
 
