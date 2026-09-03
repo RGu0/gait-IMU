@@ -179,25 +179,27 @@ class SegmentDetection:
     """一个连续段的零速检测结果，连同它在整个序列里的位置。
 
     **它交出来的是滤波器实际用过的那一份**，不是让调用方照着参数再算一遍。
-
     `NavResult` 把 `StanceDetection` 拍扁成了 `zupt` / `stances` / `degraded` / `score`，
-    丢掉了 `period`。而 `analysis/events.py::detect_stance_intervals` 需要 `period.bounds`
-    —— 支撑相区间的个数由周期栅格定死，那正是它相对边缘细化的全部优势所在。
+    丢掉了 `period`；而下游若要按周期栅格取支撑相区间就需要它。
 
-    为什么不让调用方自己重跑 `detect_stance`：重跑要在别处复刻 `gravity` 与 `segments`
-    的口径，而两处**必须永远一致**，否则事件会建在一份与轨迹不同的检测上，且不报错。
-    `core/rts.py` 对 `FilterHistory` 写过同一句话（「必须来自**同一次**调用」），
-    处理方式也一样 —— 把东西交出来，而不是让人重算。
+    `detection` 为 `None` 表示**这一段短到没法分析，被整段跳过了**。这与"分析过但一个
+    支撑相都没检出"是两回事，后者会给出一个 `stances` 为空的真实 `StanceDetection`。
+    两者读数相同（`zupt` 全 False）而含义相反，所以必须能分开 —— 否则"这段没数据"会
+    伪装成"这段没在走路"。
 
-    带上 `start` / `end` 而不是只返回一个元组序列：调用方要把段内下标搬回全局下标，
-    让它自己去和 `series.segments` 对齐等于把一条隐式的"顺序相同"约定塞给它。
+    带上 `start` / `end` 而不是让调用方去和 `series.segments` 对齐：那等于把一条隐式的
+    "顺序相同"约定塞给它。
     """
 
     #: 该段在整个序列里的半开区间。
     start: int
     end: int
-    #: 该段的检测结果。下标是**段内**的，加 `start` 才是全局下标。
-    detection: StanceDetection
+    #: 该段的检测结果，下标是**段内**的。`None` = 段长不足，整段跳过。
+    detection: StanceDetection | None
+
+    @property
+    def skipped(self) -> bool:
+        return self.detection is None
 
 
 @dataclass(frozen=True)
@@ -611,19 +613,19 @@ def run_ins_with_stances(
 ) -> tuple[NavResult, tuple[SegmentDetection, ...], FilterHistory | None]:
     """与 `run_ins` 同一次前向滤波，额外交出**滤波器用过的那份**逐段零速检测。
 
-    存在的理由是 `NavResult` 拍扁了 `StanceDetection`：`zupt` / `stances` / `degraded` /
-    `score` 留下了，`period` 没有。而 `analysis/events.py::detect_stance_intervals`
-    要读 `period.bounds` —— 支撑相区间的个数由周期栅格定死，那是它相对边缘细化的
-    全部优势（RAY-325）。产品链路此前因此只能走边缘细化，真机上支撑相占比读到
-    1~16%（生理 60~75%）、双支撑期占比读到 −0.9（RAY-351）。
+    两个用途，都是 `NavResult` 给不了的：
+
+    * **哪些段被整段跳过了**（`SegmentDetection.skipped`）。`NavResult` 里那些样本的
+      `zupt` 全为 False，与"分析过但没检出支撑相"读数相同、含义相反 —— 不区分开，
+      "这段没数据"就会伪装成"这段没在走路"。
+    * **`period`**。`NavResult` 把 `StanceDetection` 拍扁时丢掉了它，而按周期栅格取
+      支撑相区间要用（RAY-325 的 `detect_stance_intervals`）。
 
     **不改变前向结果**：与 `run_ins` 逐位相同 —— 交出检测是旁路，不是分叉。
 
-    `record=True` 时一并给出 RTS 所需的历史，等价于 `run_ins_with_history` 再加检测；
-    云端完整链一次拿全，不必为了拿检测再跑一遍前向。
+    `record=True` 时一并给出 RTS 所需的历史，等价于 `run_ins_with_history` 再加检测。
 
-    返回的下标是**段内**的，加 `SegmentDetection.start` 才是全局下标 —— 见那个类的
-    文档字符串。
+    检测里的下标是**段内**的，加 `SegmentDetection.start` 才是全局下标。
     """
     navigation, history, detections = _run(
         series, cfg, alignment=alignment, gravity=gravity, record=record
@@ -668,7 +670,25 @@ def _run(
     initial_covariance: np.ndarray | None = None
     histories: list[SegmentHistory] = []
     detections: list[SegmentDetection] = []
+    skipped: list[tuple[int, int]] = []
+    # `detect_stance` 对短于检测窗口的段直接拒绝，理由写在它的错误信息里：缩小窗口会让
+    # 判据的含义随段长变化。它同时写明「调用方应当整段跳过」—— 这里就是那个调用方。
+    #
+    # 空洞切分（RAY-210）产出碎段是**正常行为**，不是异常数据：真机 T-230-03 的 24 格
+    # 切出 56 段，其中 3 段短于 15 采样（最短 8）。此前这里无条件调用，于是整条产品链
+    # 在真机数据上直接抛（RAY-352）。
+    usable = [(a, b) for a, b in series.segments if b - a >= cfg.zupt_window_samples]
+    if series.segments and not usable:
+        raise EskfError(
+            f"{len(series.segments)} 个数据段全部短于检测窗口 "
+            f"{cfg.zupt_window_samples}，没有任何一段能定出初始姿态。"
+            "此时返回一条轨迹只能是编的 —— 该重采，不该硬算。"
+        )
     for start, end in series.segments:
+        if (start, end) not in usable:
+            skipped.append((start, end))
+            detections.append(SegmentDetection(start=start, end=end, detection=None))
+            continue
         acc = series.acc[start:end]
         gyr = series.gyr[start:end]
         detection = detect_stance(acc, gyr, series.fs, cfg, gravity=gravity)
@@ -706,6 +726,18 @@ def _run(
                     process_noise=_process_noise(cfg, dt),
                 )
             )
+
+    # 被跳过的段：**状态保持，位置不前进**。数组是 `np.empty` 开的，不填就是垃圾值。
+    #
+    # 取最近一个可用样本的状态复制过去 —— 前面有可用段就取它的末样本，碎段在最前面
+    # 就取后面第一个可用段的首样本。位置因此在段内是常量：那正是"这段时间发生了什么
+    # 我们不知道"的诚实表达，而不是把它积分成一段编出来的轨迹。
+    for start, end in skipped:
+        source = start - 1 if start > 0 else end
+        for array in (rotations, velocity, position, gyro_bias, accel_bias):
+            array[start:end] = array[source]
+        velocity[start:end] = 0.0
+    # `zupt` / `degraded` / `score` 已经是零 —— 碎段没有支撑相可言。
 
     # 循环里传的是旋转矩阵，到这里才一次性转成契约要求的四元数 —— 批量转换是
     # 向量化的，逐步转换不是。

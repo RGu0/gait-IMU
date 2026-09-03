@@ -204,9 +204,17 @@ def _stance_intervals(
     **按段做，不是把整条序列当一段。** `run_ins` 本来就是逐段滤波的（空洞之间不积分），
     每段有自己的周期栅格；真机实测 24 格里有一半是 2~3 段。把它们并成一段再检测，
     得到的会是一份与轨迹所依据的检测**不同**的检测，而且不报错。
+
+    代价已量清：1 段的格无损失，2 段 −1，3 段 −2（网格只铺在首末摆动峰之间，
+    每段各丢一个）。真机 24 格均值 −0.71 个周期。**这是按段做的固有代价，而合成
+    一段是错的** —— 那会让事件建在一份与轨迹不同的检测上。
     """
     edges: list[events.StanceEdges] = []
     for segment in detections:
+        if segment.skipped:
+            # 短到没法分析的段（RAY-352）。它没有检测结果，自然也没有支撑相区间 ——
+            # 跳过而不是拿一个空的 `StanceDetection` 去装样子。
+            continue
         window = series.acc[segment.start : segment.end]
         for edge in events.detect_stance_intervals(window, series.fs, segment.detection, cfg):
             edges.append(

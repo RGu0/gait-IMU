@@ -30,6 +30,7 @@ from gait.core.eskf import (
     _update,
     _Workspace,
     run_ins,
+    run_ins_with_stances,
 )
 from gait.core.ins import GRAVITY_STANDARD, gravity_vector
 from gait.core.zupt import detect_stance
@@ -367,3 +368,97 @@ class TestRejections:
         series, _ = walk(6.0)
         alignment = initial_alignment(series.acc, series.gyr, series.fs)
         assert np.all(np.isfinite(run_ins(series, alignment=alignment).p))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-352：短到没法分析的数据段
+#
+# `detect_stance` 对短于检测窗口的段直接拒绝，并在错误信息里写明「调用方应当整段
+# 跳过」。`_run` 就是那个调用方，此前它不跳 —— 于是任何含碎段的真机数据都会让整条
+# 产品链抛异常。空洞切分（RAY-210）产出碎段是正常行为：T-230-03 的 24 格切出 56 段，
+# 其中 3 段短于 15 采样（最短 8）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _with_fragment(seconds: float = 12.0, fragment: int = 8) -> FootSeries:
+    """一段可用数据，中间夹一个 8 采样的碎段。"""
+    series, _ = generate_walk(WalkSpec(duration_s=seconds), noise=SENSOR_NOISE)
+    n = len(series.t)
+    cut = n // 2
+    return FootSeries(
+        label="L",
+        t=series.t,
+        acc=series.acc,
+        gyr=series.gyr,
+        quality=np.full(n, Quality.NONE, dtype=np.uint8),
+        segments=[(0, cut), (cut, cut + fragment), (cut + fragment, n)],
+        fs=series.fs,
+    )
+
+
+class TestUnanalysableSegments:
+    def test_a_fragment_no_longer_raises(self):
+        """判据 1：含碎段的序列不再抛 —— 这正是真机上链路跑不完的原因。"""
+        navigation = run_ins(_with_fragment())
+        assert len(navigation.t) == len(navigation.p)
+
+    def test_the_fragment_is_skipped_not_computed(self):
+        """判据 2：碎段没有支撑相可言，位置在段内不前进。"""
+        series = _with_fragment()
+        cut = series.segments[1][0]
+        end = series.segments[1][1]
+        navigation = run_ins(series)
+        assert not navigation.zupt[cut:end].any()
+        assert not navigation.degraded[cut:end].any()
+        assert np.all(navigation.score[cut:end] == 0.0)
+        # 位置是常量 —— "这段时间发生了什么我们不知道"，不是把它积分成一段编出来的轨迹。
+        assert np.allclose(navigation.p[cut:end], navigation.p[cut], atol=0.0)
+
+    def test_a_skipped_segment_is_distinguishable_from_one_that_found_nothing(self):
+        """判据 3：**跳过**与**分析过但没检出**必须分得开。
+
+        两者在 `NavResult` 里读数相同（`zupt` 全 False），含义相反。不区分开，
+        "这段没数据"就会伪装成"这段没在走路"。
+        """
+        _, detections, _ = run_ins_with_stances(_with_fragment())
+        assert [d.skipped for d in detections] == [False, True, False]
+        assert detections[1].detection is None
+        # 可用段交出来的是真的检测结果，不是占位。
+        assert detections[0].detection is not None
+        assert detections[0].detection.period is not None
+
+    def test_the_skip_machinery_is_inert_without_fragments(self):
+        """判据 4 的形状：没有碎段时，新增的那套东西一个字都不该动结果。
+
+        全部段都可用 ⟹ `skipped` 为空 ⟹ 填充循环不执行。与 `run_ins` 的既有测试
+        合起来，这一条说明本改动只让原本崩掉的跑起来。
+        """
+        series, _ = generate_walk(WalkSpec(duration_s=12.0), noise=SENSOR_NOISE)
+        navigation, detections, _ = run_ins_with_stances(series)
+        assert not any(d.skipped for d in detections)
+        assert np.array_equal(navigation.p, run_ins(series).p)
+
+    def test_all_fragments_is_refused_rather_than_invented(self):
+        """判据 5：一段可用的都没有时拒绝 —— 那时没有任何可信的初始对准。"""
+        series = _with_fragment()
+        n = len(series.t)
+        allfrag = replace(series, segments=[(i, min(i + 8, n)) for i in range(0, n, 8)])
+        with pytest.raises(EskfError, match="全部短于检测窗口"):
+            run_ins(allfrag)
+
+    def test_a_leading_fragment_takes_its_state_from_what_follows(self):
+        """碎段在最前面时没有"上一段"可继承 —— 取后面第一个可用段的首样本。"""
+        series, _ = generate_walk(WalkSpec(duration_s=12.0), noise=SENSOR_NOISE)
+        n = len(series.t)
+        leading = replace(
+            series,
+            segments=[(0, 8), (8, n)],
+        )
+        navigation = run_ins(
+            FootSeries(
+                label="L", t=series.t, acc=series.acc, gyr=series.gyr,
+                quality=np.full(n, Quality.NONE, dtype=np.uint8),
+                segments=leading.segments, fs=series.fs,
+            )
+        )
+        assert np.allclose(navigation.p[0:8], navigation.p[8], atol=0.0)

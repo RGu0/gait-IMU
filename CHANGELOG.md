@@ -11,6 +11,28 @@
 
 ### 变更
 
+* **`core/eskf.py::run_ins` 去掉一个抛出条件，加上另一个。**
+
+  此前：`series.segments` 里只要有一段短于 `zupt_window_samples`，`detect_stance` 就会
+  抛 `ZuptError`，整条链失败。而空洞切分（RAY-210）产出这样的碎段是**正常行为** ——
+  真机 T-230-03 的 24 格切出 56 段，其中 3 段短于 15 采样（最短 8）。
+
+  现在：碎段被**整段跳过**，与 `detect_stance` 错误信息里写明的契约一致。跳过的段
+  仍然被覆盖，其样本 `zupt` / `degraded` 为 False、`score` 为 0、位置在段内不前进。
+
+  **新的抛出条件**：全部段都短于检测窗口时抛 `EskfError` —— 那时没有任何可信的初始
+  对准，返回一条轨迹只能是编的。
+
+  **没有碎段时结果逐位不变**（实测：三档时长的 `q/v/p/bg/ba/score/zupt/stances`
+  指纹与改动前完全相同）。
+
+* **`core/eskf.py` 新增 `run_ins_with_stances` 与 `SegmentDetection`。** 现有
+  `run_ins` / `run_ins_with_history` 签名不变。新入口交出滤波器**用过的那份**逐段
+  零速检测，两个用途：`SegmentDetection.skipped` 区分「整段跳过」与「分析过但没检出
+  支撑相」（两者在 `NavResult` 里读数相同、含义相反）；`detection.period` 供按周期
+  栅格取支撑相区间用（`NavResult` 拍扁时丢掉了它）。
+
+
 * **`gait.device.capture` 的回放路径新增一个抛出条件。** `replay_raw_frames` /
   `replay_session_foot` / `replay_recording` 此前只在 `DeviceStats.dropped_samples`
   非零时抛 `CaptureError`；现在 `DeviceStats.dropped_before_ready` 非零同样抛，
