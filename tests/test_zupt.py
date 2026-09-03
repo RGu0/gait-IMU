@@ -25,6 +25,7 @@ from gait.core.zupt import (
     StanceDetection,
     ZuptError,
     _autocorrelation_period,
+    _period_confidence,
     _refine_from_events,
     detect_stance,
     lowpass,
@@ -845,3 +846,116 @@ def test_a_report_without_truncation_fields_still_works():
     )
     assert report.spanned_cycles == report.cycles == 30
     assert report.truncated is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-347：`consistent` 是读数，`fallback` 是事实
+#
+# RAY-339 之后 `consistent` 不再决定周期（精修被采纳时），但 `_period_confidence`
+# 仍按它把软零速置信度减半 —— 按一个已经不成立的理由降级。真机 24 格里有 4 格中招，
+# 而那 4 格的最终周期误差 +2.5% / −2.0% / −0.8% / +0.4%，是全表偏好的一半。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_an_adopted_refinement_is_not_a_fallback():
+    """精修被采纳 ⟹ `fallback` 为假，无论几个估计彼此差多少。"""
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    assert "events" in dict(detection.period.estimates)
+    assert detection.period.fallback is False
+
+
+def test_a_rejected_refinement_keeps_the_first_pass_verdict():
+    """精修不被采纳 ⟹ `fallback` 就是第一遍那句 `median if consistent else seed`。
+
+    **这是本改动的阳性对照。** 判据 1（真机 24 格一格不减半）可以靠把减半整个删掉
+    来满足，那会把一条真降级悄悄摘掉；这一条钉住它还在。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    cfg = replace(AlgoConfig(), period_refine_min_intervals=10**6)
+    detection = detect_stance(series.acc, series.gyr, series.fs, cfg)
+    assert "events" not in dict(detection.period.estimates)
+    assert detection.period.fallback is (not detection.period.consistent)
+
+
+def test_the_confidence_ceiling_follows_fallback_not_agreement():
+    """置信上限看周期怎么来的，不看几个估计差多少。
+
+    直接构造两份只差 `fallback` 的报告，喂给 `_period_confidence`：`consistent` 一律
+    为假（模拟真机那 4 格），差别只在周期是不是退化来的。
+    """
+    swing = np.full(400, 0.5)
+    soft = np.zeros(400, dtype=bool)
+    soft[10:20] = True
+    bounds = tuple((start, start + 100) for start in range(0, 400, 100))
+
+    def report(*, fallback: bool) -> PeriodReport:
+        return PeriodReport(
+            period_samples=100.0,
+            cycles=4,
+            estimates=(("autocorrelation", 80.0), ("impact", 130.0)),
+            ratio=1.625,          # 远超 1.3——`consistent` 为假
+            consistent=False,
+            bounds=bounds,
+            fallback=fallback,
+        )
+
+    cfg = AlgoConfig()
+    refined = _period_confidence(swing, soft, report(fallback=False), cfg)
+    degraded = _period_confidence(swing, soft, report(fallback=True), cfg)
+
+    assert refined[soft].max() == pytest.approx(2 * degraded[soft].max())
+    # 估计彼此差 1.625 却仍拿满上限——正是 RAY-347 之前拿不到的那一半。
+    assert refined[soft].max() > degraded[soft].max()
+
+
+def test_the_readout_is_left_alone():
+    """`consistent` / `ratio` 的取值不许被这次改动碰。
+
+    历史报告要能与今天的读数对齐。改的是"拿这个结论去做什么"，不是结论本身。
+    """
+    series, _ = generate_walk(WalkSpec(duration_s=30.0), noise=NoiseModel(seed=5))
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    values = [value for _, value in detection.period.estimates]
+    assert detection.period.ratio == pytest.approx(max(values) / min(values))
+    assert detection.period.consistent is (
+        detection.period.ratio < AlgoConfig().stance_period_consistency_max
+    )
+
+
+def test_the_shuffle_example_no_longer_triggers_the_fallback():
+    """**负结果，写成测试钉住**：`_estimate_period` 注释里那个「中位数 259 / 真值 400」
+    的 `shuffle` 例子，在今天的合成器上复现不出来。
+
+    实测比值只有 1.015 —— **一致**，压根不走退化路径；采用 400、中位 400、seed 396，
+    三个几乎重合。那个 259 是 RAY-325 时期的读数，合成器或参数此后变过。
+
+    机制本身没变（`period = median if consistent else seed` 一个字未动），变的是这个
+    合成案例不再触发它。留下这条是为了让下一个人不必再去 `shuffle` 里找那个退化 ——
+    找不到。退化路径的真机证据在 `tools/acceptance/confidence_ceiling.py`：关掉精修
+    之后 24 格里有 4 格（比值 1.346~1.624）确实走它。
+    """
+    spec = WalkSpec(duration_s=20.0, cadence=60.0, stride_length=0.35, stance_ratio=0.75)
+    series, _ = generate_walk(spec, noise=NoiseModel.bs_bt91())
+    detection = detect_stance(series.acc, series.gyr, series.fs)
+    assert detection.period.consistent is True
+    assert detection.period.fallback is False
+    assert detection.period.ratio < 1.1
+
+
+def test_a_report_without_the_fallback_field_reads_as_not_a_fallback():
+    """老的构造点不传 `fallback`，默认"不是退化来的"。
+
+    与 `head_truncated` / `tail_truncated` 同一条：新增字段不改变既有含义。默认取
+    假而不是真，因为把一个正常周期误标成退化会**无声地**把置信度砍半——那正是本
+    Issue 要修的病，默认值不该重犯一次。
+    """
+    report = PeriodReport(
+        period_samples=100.0,
+        cycles=30,
+        estimates=(("autocorrelation", 100.0),),
+        ratio=1.0,
+        consistent=True,
+        bounds=((0, 100),),
+    )
+    assert report.fallback is False
