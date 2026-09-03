@@ -459,10 +459,14 @@ def _measured_headings() -> list[dict]:
 
 
 def test_heading_drift_accepts_the_measured_shape():
-    """实测形状一条不报 —— 否则这套哨兵在自己的正样本上就是红的。"""
+    """实测形状一条不报 —— 否则这套哨兵在自己的正样本上就是红的。
+
+    `_healthy_gate()` 是 RAY-362 之后"完整的一次运行"必须带上的两道对照。
+    少了它们这一组就不是正样本，而是"上限门那一格没测"。
+    """
     from acceptance import heading_drift
 
-    assert heading_drift.judge(_measured_headings()) == []
+    assert heading_drift.judge(_measured_headings() + _healthy_gate()) == []
 
 
 def test_heading_drift_catches_a_cell_that_got_worse():
@@ -540,6 +544,128 @@ def test_heading_drift_notices_a_missing_positive_control():
 
     rows = [row for row in _measured_headings() if row["kind"] == "cell"]
     assert any("对照没跑出任何一格" in line for line in heading_drift.judge(rows))
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-362：上限门的阳性对照 + 阴性对照。**三种结局要分开**：正常、崩溃、静默失效。
+# 只测"没顶过门会红"是不够的 —— RAY-356 正是因为把崩溃读成"这条路走不通"，
+# 才写下了"上限门够不着"这个错结论。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _upper_row(heading=61.2, foot="L", **extra):
+    from acceptance import heading_drift
+
+    row = {
+        "kind": "upper_control",
+        "trial": heading_drift.UPPER_CELL[0],
+        "walk": heading_drift.UPPER_CELL[1],
+        "peak_dps": heading_drift.UPPER_PEAK_DPS,
+        "onset_s": heading_drift.UPPER_ONSET_S,
+        "foot": foot,
+        "outcome": "ran",
+        "heading_p50": heading,
+        "turns": 3,
+        "cycles": 33,
+        "zupt_fraction": 0.04,
+        "free_run_p50": 2.9,
+    }
+    row.update(extra)
+    return row
+
+
+def _null_row(heading=24.0, foot="L", **extra):
+    from acceptance import heading_drift
+
+    row = {**_upper_row(heading, foot), "kind": "null_control"}
+    row["peak_dps"] = heading_drift.NULL_PEAK_DPS
+    row.update(extra)
+    return row
+
+
+def _healthy_gate() -> list[dict]:
+    """两道对照都正常的那一组：阳性两足越线、阴性两足留在带内。"""
+    return [
+        _upper_row(61.2, "L"),
+        _upper_row(61.4, "R"),
+        _null_row(24.0, "L"),
+        _null_row(17.5, "R"),
+    ]
+
+
+def test_heading_drift_accepts_a_healthy_pair_of_gate_controls():
+    from acceptance import heading_drift
+
+    assert heading_drift.judge(_measured_headings() + _healthy_gate()) == []
+
+
+def test_heading_drift_reports_a_missing_upper_control_as_not_run():
+    """对照钉在某一格上，那一格没供上就是**没测**，不是"门没通电"。
+
+    这一条守的是 RAY-362 的成因：把"这次没测出来"读成"这里测不出来"。
+    """
+    from acceptance import heading_drift
+
+    failures = heading_drift.judge(_measured_headings())
+    assert any("上限门的阳性对照**没跑**" in line for line in failures)
+    assert any("这不是「门没通电」，是这次没测" in line for line in failures)
+
+
+def test_heading_drift_separates_a_crashed_upper_control_from_a_failed_one():
+    """崩溃与"没顶过门"分开报 —— 混报会让下一个人去查一个没坏的门。"""
+    from acceptance import heading_drift
+
+    crashed = [
+        {**_upper_row(), "outcome": "crashed", "error": "SegmentationError"},
+        _null_row(24.0, "L"),
+    ]
+    failures = heading_drift.judge(_measured_headings() + crashed)
+    assert any("SegmentationError" in line and "**崩了，不是不达标**" in line for line in failures)
+    # 崩了就不该再报"没越过上限"——那是另一种结局。
+    assert not any("没有越过上限" in line for line in failures)
+
+
+def test_heading_drift_calls_a_silent_upper_control_an_injection_failure():
+    """链子跑完但没顶过门 —— 是**注入在这一格失效**，不是门坏了。"""
+    from acceptance import heading_drift
+
+    weak = [_upper_row(31.0, "L"), _upper_row(30.0, "R"), _null_row(24.0, "L")]
+    failures = heading_drift.judge(_measured_headings() + weak)
+    assert any("**这是注入在这一格失效，不是上限门坏了**" in line for line in failures)
+
+
+def test_heading_drift_judges_the_upper_control_on_the_pinned_foot_only():
+    """右脚在 onset 2.9 有一道 0.1 s 宽的悬崖，所以判据只钉左脚。
+
+    右脚掉回带内**不该**让对照失败 —— 否则这个哨兵会在一个已知的、
+    与算法无关的敏感点上变红。
+    """
+    from acceptance import heading_drift
+
+    rows = [_upper_row(61.2, "L"), _upper_row(29.6, "R"), _null_row(24.0, "L")]
+    assert heading_drift.judge(_measured_headings() + rows) == []
+
+
+def test_heading_drift_catches_a_null_control_that_went_red():
+    """阴性对照变红 = 注入装置本身有问题。
+
+    一个把什么都染红的注入，证不了上限门通电 —— 只测阳性对照就会漏掉这一类。
+    """
+    from acceptance import heading_drift
+
+    rows = [_upper_row(61.2, "L"), _null_row(55.0, "L")]
+    failures = heading_drift.judge(_measured_headings() + rows)
+    assert any("**注入装置本身有问题**" in line for line in failures)
+
+
+def test_heading_drift_notices_a_missing_null_control():
+    """只有阳性对照的一组是不完整的，要报出来而不是默默通过。"""
+    from acceptance import heading_drift
+
+    rows = [_upper_row(61.2, "L"), _upper_row(61.4, "R")]
+    failures = heading_drift.judge(_measured_headings() + rows)
+    assert any("阴性对照没跑" in line for line in failures)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
