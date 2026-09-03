@@ -453,7 +453,6 @@ def main() -> int:
         f"阳性判 {UPPER_FOOT} 脚 > {HEADING_BAND[1]:.0f}°，阴性须留在带内"
     )
     gate = [row for row in everything if row["kind"].endswith("_control")]
-    gate = [row for row in gate if row["kind"] != "control"]
     if not gate:
         print(f"  —— **没跑**：这次的趟次里没有 {cell_name}")
     for row in gate:
