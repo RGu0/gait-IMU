@@ -66,6 +66,7 @@ from gait.protocolflow.timed_walk import (
     VERDICT_INVALID,
     TimedWalk,
 )
+from gait.report import build_report
 
 _SIDES = {"L": "左", "R": "右"}
 
@@ -518,8 +519,46 @@ class TerminalService:
     def _do_runCalibration(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("calibration")
 
-    def _do_reportFor(self, _: dict[str, Any]) -> Any:
-        return _Unimplemented("report")
+    def _do_reportFor(self, params: dict[str, Any]) -> Any:
+        """一份已完成会话的基础报告。
+
+        报告层不判会话有效性 —— PRD §13「会话级无效不生成报告」是**调用前**的判断，
+        由 `sessionResult` 给出。这里只在拿不到步态周期时拒绝，而拒绝的理由说的正是
+        这件事，免得调用方以为报告层会替它把关。
+        """
+        cycles = self._cycles_for(params)
+        if not cycles:
+            return TerminalError(
+                code="E-QLT-5003",
+                message="这次检测没有可用的步态周期，无法生成报告。",
+                action="请确认会话有效性判定的结果；会话级无效不生成报告。",
+            )
+        walk = self.walk
+        return build_report(
+            cycles,
+            report_id=str(params.get("reportId") or self.session_id or "R-unknown"),
+            organization=(self.operator or {}).get("organization", "本机构"),
+            subject_label=str(params.get("subjectLabel") or "未提供"),
+            assessed_at=datetime.now(UTC).date().isoformat(),
+            duration_s=self.config.duration_s,
+            algo_version=f"gait-contract-{CONTRACT_VERSION}",
+            protocol_version=str(self.config.version),
+            valid_seconds=walk.valid_seconds if walk else 0.0,
+            turns=params.get("turns"),
+            annotations_text=params.get("annotations") or (),
+        )
+
+    def _cycles_for(self, params: dict[str, Any]) -> list[Any]:
+        """本次会话的步态周期。
+
+        **目前恒为空。** 从原始数据算出周期要跑完整的 ESKF → 事件检测 → 分段链
+        （`core/` + `analysis/`），而那条链在 sidecar 里还没有被接起来 —— 与本 scope
+        之前每一次「功能齐全但没人调用」是同一个形状，只是这次它被显式记下来了。
+
+        调用方可以直接传 `cycles` 进来（离线重算与测试走这条路），所以报告本身是
+        可验的；缺的只是「从这次采集自动算出周期」那一步。
+        """
+        return list(params.get("cycles") or [])
 
     def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("subject-directory")
