@@ -3,18 +3,17 @@
 `still.py` —— 静立 5 s：陀螺零偏、标定基准、松动检测。
 `walk.py` —— 直线走 10 步：安装误差角与坐标系重排。
 
-出厂标定（RAY-207，服务方工装）：
-`accel.py` —— 加计六面法：3×3 标度/非正交矩阵与零偏向量。
+出厂标定（RAY-207 R2，服务方工装）：
+`accel.py` —— 加计多姿态标定：模长判据解对称 3×3 标度/非正交矩阵与零偏向量。
 """
 
 from gait.calib.accel import (
-    FACES,
     MILLI_G,
+    MIN_ORIENTATIONS,
     AccelCalibration,
-    FaceObservation,
-    identify_face,
-    observe_face,
-    solve_six_face,
+    OrientationObservation,
+    observe_orientation,
+    solve_orientations,
 )
 from gait.calib.still import (
     LOOSENESS_LIMIT_DEG,
@@ -35,24 +34,23 @@ from gait.calib.walk import (
 )
 
 __all__ = [
-    "FACES",
     "LOOSENESS_LIMIT_DEG",
     "MILLI_G",
+    "MIN_ORIENTATIONS",
     "MIN_PEAK_ASYMMETRY",
     "MIN_PRINCIPAL_RATIO",
     "MIN_STILL_SECONDS",
     "AccelCalibration",
     "CalibrationError",
     "CalibrationVerdict",
-    "FaceObservation",
     "LoosenessCheck",
     "MountingCalibration",
+    "OrientationObservation",
     "StillCalibration",
     "calibrate_still",
     "check_looseness",
     "estimate_mounting",
-    "identify_face",
-    "observe_face",
-    "solve_six_face",
+    "observe_orientation",
+    "solve_orientations",
     "verdict",
 ]
