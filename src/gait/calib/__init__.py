@@ -1,19 +1,29 @@
-"""L3 calibration layer.
+"""会话级标定（RAY-208）。
 
-Modules, and the Issue that delivers each::
-
-    accel.py       F2.1 six-face accelerometer calibration (service-side jig)
-                   -> RAY-207
-    store.py       F2.5 calibration parameter store
-                   -> RAY-207
-    static.py      F2.2 static bias refresh
-                   -> RAY-208
-    frames.py      F2.3 coordinate frame re-ordering
-                   -> RAY-208
-    mounting.py    F2.4 mounting misalignment angle
-                   -> RAY-208
-
-PRD v1.2 §14: six-face calibration becomes a service-side workflow;
-the institution side only performs session-level calibration.
-
+`still.py` —— 静立 5 s：陀螺零偏、标定基准、松动检测。
+坐标系重排与安装误差角属 `walk-calibration` scope，尚未实现。
 """
+
+from gait.calib.still import (
+    LOOSENESS_LIMIT_DEG,
+    MIN_STILL_SECONDS,
+    CalibrationError,
+    CalibrationVerdict,
+    LoosenessCheck,
+    StillCalibration,
+    calibrate_still,
+    check_looseness,
+    verdict,
+)
+
+__all__ = [
+    "LOOSENESS_LIMIT_DEG",
+    "MIN_STILL_SECONDS",
+    "CalibrationError",
+    "CalibrationVerdict",
+    "LoosenessCheck",
+    "StillCalibration",
+    "calibrate_still",
+    "check_looseness",
+    "verdict",
+]
