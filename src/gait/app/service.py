@@ -39,6 +39,7 @@ from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
+from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, SessionMeta
 from gait.device.capture import SessionCapture
@@ -98,6 +99,13 @@ class TerminalService:
         #: 结论里去（`LinkOutcome.recording_error`），否则「这次采集有一半没落盘」
         #: 就停在一个事件里，而事件是会被错过的。
         self._recording_errors: dict[str, str] = {}
+        #: 待传队列。与会话目录同根 —— 队列记的就是那些目录，分开放会让「哪份数据
+        #: 属于哪个队列」变成一个要靠约定维持的事实。
+        self.uploads = (
+            UploadQueue(Path(session_root) / "upload-queue.sqlite3")
+            if session_root is not None
+            else None
+        )
         self.walk: TimedWalk | None = None
         self._event_seq = 0
         self._aborted: dict[str, Any] | None = None
@@ -328,14 +336,27 @@ class TerminalService:
             created_at=datetime.now(UTC).isoformat(timespec="seconds"),
             subject_uuid=new_subject_uuid(),
             scenario="walk",
-            devices={label: {"device_id": t.device_id} for label, t in self.source.transports().items()},
-            config_snapshot={"state": "pending", "reason": "配置下发快照在会话结束时补齐"},
+            devices={
+                label: {"device_id": t.device_id}
+                for label, t in self.source.transports().items()
+            },
+            config_snapshot={
+                "state": "pending",
+                "reason": "配置下发快照在会话结束时补齐",
+            },
             calib_snapshot={"state": "unimplemented", "issue": "RAY-208"},
             algo_version=f"gait-contract-{CONTRACT_VERSION}",
-            algo_params=self.config.snapshot() if hasattr(self.config, "snapshot") else {"duration_s": self.config.duration_s},
+            algo_params=self.config.snapshot()
+            if hasattr(self.config, "snapshot")
+            else {"duration_s": self.config.duration_s},
             sync_report={"state": "pending", "reason": "同步报告在会话结束后才存在"},
-            integrity_report={"state": "pending", "reason": "完整性报告在会话结束后才存在"},
-            protocol_config=self.walk.protocol_snapshot() if self.walk else {"duration_s": self.config.duration_s},
+            integrity_report={
+                "state": "pending",
+                "reason": "完整性报告在会话结束后才存在",
+            },
+            protocol_config=self.walk.protocol_snapshot()
+            if self.walk
+            else {"duration_s": self.config.duration_s},
             contract_version=CONTRACT_VERSION,
             notes="本地采集会话；元数据在会话结束时改写。停在 pending 即表示未正常结束。",
             extra={"provenance": self.source.provenance()},
@@ -387,11 +408,36 @@ class TerminalService:
                     "chunks_written": dict(status.chunks_written),
                     "problems": list(status.problems),
                 },
-                sync_report={"state": "not_computed", "reason": "主机侧同步在离线重算阶段产出"},
+                sync_report={
+                    "state": "not_computed",
+                    "reason": "主机侧同步在离线重算阶段产出",
+                },
             ),
         )
         self.capture = None
+        self._enqueue_for_upload()
         return status
+
+    def _enqueue_for_upload(self) -> None:
+        """把刚收尾的会话排进待传队列。
+
+        ## 不完整的会话**也要**上传
+
+        一份因写盘失败而安全停止的会话，数据是残的 —— 但它的元数据自己说了它是残的
+        （`integrity_report.complete = False`），而原始数据是「数据评估的生命线」
+        （RAY-226）。不排它，等于**恰恰把记录了一次故障的那份数据丢掉**，而 G-04
+        要的是数据不静默丢失，不是只保住顺利的那些。
+
+        ## 入队与发送是两件事
+
+        这里只入队。真正发出去需要一个 `IngestionClient` 实现，而服务端不在本仓库
+        （同 RAY-225 的边界）—— 见 `contract.json` 的 `upload-transport` 缺口。
+        入队本身已经有意义：它让「服务端确认前不删本地」有了记账处，也让 P-01 的
+        待传条数有真实来源。
+        """
+        if self.uploads is None or self.session_root is None or self.session_id is None:
+            return
+        enqueue_session(self.uploads, self.session_root, self.session_id)
 
     def _do_sessionResult(self, params: dict[str, Any]) -> dict[str, Any]:
         """会话有效性 + 双足完整性。两者分开记账，因为它们判的不是一件事。"""
@@ -596,8 +642,18 @@ class TerminalService:
                 "ready": verdict.admitted,
                 "issues": list(verdict.problems),
             },
+            # P-01 顶部的「数据已同步 / 待上传」。数字来自真实队列，不是常量 ——
+            # 一个永远显示 0 的待传数会让积压这件事永远不被发现。
+            "uploadSummary": self._upload_summary(),
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
+
+    def _upload_summary(self) -> dict[str, Any]:
+        """待传积压。没有队列时说「没在记账」，而不是报 0。"""
+        if self.uploads is None:
+            return {"tracked": False}
+        report = self.uploads.backlog()
+        return {"tracked": True, **report.snapshot()}
 
     @staticmethod
     def _item(

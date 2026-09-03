@@ -549,6 +549,40 @@ class SessionUploader:
                 parts_skipped=progress.skipped,
                 detail=str(exc),
             )
+        except Exception as exc:  # noqa: BLE001 - 见下方整段说明
+            # ## 为什么这里要兜住所有异常
+            #
+            # `IngestionClient` 是一个 Protocol，它**没有规定实现者该抛什么**。一个
+            # 真实的 HTTP 客户端会很自然地让 `requests.Timeout`、`TimeoutError`、
+            # `ConnectionResetError` 逃出来 —— 慢网是最典型的来源。
+            #
+            # 不兜住的后果不在这一条会话上，在 `drain` 里：它循环调本方法且没有任何
+            # 异常保护，一条会话碰上一次超时，**整个排空循环就停了**，其余待传会话
+            # 一并停住。而「断网 24 h 场景数据零丢失」正指望这个循环活着。
+            #
+            # ## 为什么方向是「重试」而不是「冲突」
+            #
+            # 两个方向的代价不对称：判成冲突（不可重试）会让这份数据**永远传不上去**；
+            # 判成可重试最多是多退避几次。未知失败在没有别的信息时更可能是暂时的，
+            # 而且猜错的代价一边远大于另一边。
+            #
+            # ## 代价：这可能盖住我们自己的 bug
+            #
+            # 一个反复发生的 `TypeError` 会被当成网络问题无限重试下去。所以错误文本
+            # 里带上**异常类型名** —— 队列里连着几十条 `TypeError: ...` 与连着几十条
+            # `Timeout` 长得完全不同，而积压提示（100 次 / 1 GB）会把它推到人眼前。
+            self.queue.defer(
+                entry.session_id,
+                error=f"未预期的上传失败 {type(exc).__name__}: {exc}",
+                now=moment,
+            )
+            return UploadOutcome(
+                session_id=entry.session_id,
+                result="deferred",
+                parts_sent=progress.sent,
+                parts_skipped=progress.skipped,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
 
         self.queue.mark_confirmed(
             entry.session_id,
