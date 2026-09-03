@@ -358,3 +358,41 @@ def test_a_degenerate_cell_does_not_crash_the_report(name, row, capsys):
     finally:
         monkey.undo()
     assert "—" in capsys.readouterr().out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-350：覆盖图与目录的一致性
+#
+# `COVERAGE.md` 大部分内容是判断（哪条判据由什么守着），机器核不了。能核的只有一件：
+# 它标成"真机"的那些，指的脚本必须真的存在。这一条挡住的是"图上写着有人守、而那个
+# 脚本已经被删或改名"——那正是 RAY-346 里 `period_stance_field.py` 的死法。
+# ─────────────────────────────────────────────────────────────────────────────
+
+COVERAGE = Path(acceptance.__path__[0]) / "COVERAGE.md"
+
+
+def test_every_script_the_coverage_map_calls_real_machine_exists():
+    """覆盖图里标成"真机"的行，提到的脚本必须在目录里。"""
+    named: set[str] = set()
+    for line in COVERAGE.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|") or "真机" not in line:
+            continue
+        for chunk in line.split("`")[1::2]:
+            if chunk.endswith(".py"):
+                named.add(chunk[: -len(".py")])
+    assert named, "覆盖图里一个真机脚本都没提到 —— 解析多半坏了"
+    missing = sorted(named - set(MODULES))
+    assert not missing, f"覆盖图说这些脚本在守，但目录里没有：{missing}"
+
+
+def test_the_coverage_map_states_its_own_boundary():
+    """**判据 2 是硬要求**：图必须写出查了哪些、跳过哪些、为什么。
+
+    一张不说边界的覆盖图会被当成"全都查过了"，而那种错觉比没有图更危险 —— 它正是
+    RAY-350 要消灭的东西。这条测试钉住的是那一节不许被悄悄删掉。
+    """
+    text = COVERAGE.read_text(encoding="utf-8")
+    assert "## 审计边界" in text
+    assert "没查" in text and "为什么不查" in text
+    # 边界必须点名它查过的 Issue，而不是只说"共享算法路径"这种没法核对的话。
+    assert text.count("RAY-") > 40
