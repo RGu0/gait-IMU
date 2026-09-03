@@ -36,7 +36,7 @@ MODULES = sorted(
 
 def test_the_suite_is_not_empty():
     """空的套件会让下面每一条参数化测试都变成零次调用 —— 全绿，而且什么也没测。"""
-    assert len(MODULES) >= 7
+    assert len(MODULES) >= 10
 
 
 @pytest.mark.parametrize("name", MODULES)
@@ -141,3 +141,189 @@ def test_a_crashed_script_is_reported_as_crashed_not_as_passing(monkeypatch):
     assert "KeyError" in outcome.crashed
     assert outcome.failures == []          # 一条判据都没跑到
     assert outcome.passed is False         # 但绝不算通过
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-346：登记表，与三个新脚本的判据形状
+#
+# 上面那些守的是"脚本还是不是一个验收脚本"。下面这些守的是"这些门还通不通电" ——
+# RAY-343 定下的规矩是每个脚本带阳性对照，而对照本身也可能被写死成永远通过。
+# 数据驱动的对照在 `tools/acceptance/` 里跑真机数据；这里用构造出来的行，验的是
+# judge 在收到"本该被抓"的输入时确实会抓。
+# ─────────────────────────────────────────────────────────────────────────────
+
+REGISTRY = Path(acceptance.__path__[0]) / "REGISTRY.md"
+
+
+def _registered() -> set[str]:
+    """登记表里 `| \\`名字\\` |` 那一列。"""
+    names: set[str] = set()
+    for line in REGISTRY.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `"):
+            continue
+        names.add(line.split("`")[1])
+    return names
+
+
+def test_the_registry_and_the_directory_agree():
+    """**表与目录一一对应。**
+
+    RAY-346 的成因是 RAY-325 判据 2 有脚本却不在这个目录里，于是 runner 报"7/7 全部
+    达标"时并不知道有第八条。登记表挡不住"谁都没登记的判据"（那要靠 AGENTS.md 里的
+    约定），但它至少保证眼前这些是对得上的：没有未登记的脚本，也没有指向不存在脚本
+    的登记。
+    """
+    assert _registered() == set(MODULES), (
+        f"登记表与目录对不上：只在表里 {_registered() - set(MODULES)}，"
+        f"只在目录里 {set(MODULES) - _registered()}"
+    )
+
+
+def test_the_registry_does_not_list_the_private_helpers():
+    """`_dataset` / `_stance` 是共用计算，不是脚本 —— runner 不收，表也不登记。"""
+    assert not any(name.startswith("_") for name in _registered())
+
+
+def _period_row(cycles: int, control: int, speed: str = "mid", **extra) -> dict:
+    row = {
+        "trial": "T", "walk": f"{speed}-a", "foot": "L", "speed": speed,
+        "cycles": cycles, "error_pct": (cycles - 38) / 38 * 100.0,
+        "control_cycles": control,
+    }
+    row.update(extra)
+    return row
+
+
+def test_period_cycles_accepts_the_measured_shape():
+    """实测形状（周期数 36~39、对照掉到 16~19）必须一条不报。"""
+    from acceptance import period_cycles
+
+    rows = [
+        _period_row(36, 17, "slow"), _period_row(37, 18, "slow"),
+        _period_row(38, 18, "mid"), _period_row(39, 18, "fast"),
+        _period_row(36, 16, "fast"),
+    ]
+    assert period_cycles.judge(rows) == []
+
+
+def test_period_cycles_catches_a_dead_positive_control():
+    """对照没掉出区间 = 这个区间检查没有通电，必须报。
+
+    只喂前一半数据却仍数出 37 个周期，说明周期数根本不跟着输入走。
+    """
+    from acceptance import period_cycles
+
+    failures = period_cycles.judge([_period_row(38, 37)])
+    assert any("阳性对照没被抓出" in line for line in failures)
+
+
+def test_period_cycles_catches_a_sign_reversal_across_speed_bands():
+    """慢档整档为正、快档整档为负 —— 那正是阈值法「慢速过检、快速漏检」的失效。"""
+    from acceptance import period_cycles
+
+    rows = [
+        _period_row(41, 18, "slow"), _period_row(42, 18, "slow"),
+        _period_row(35, 17, "fast"), _period_row(36, 17, "fast"),
+    ]
+    assert any("两端反号" in line for line in period_cycles.judge(rows))
+
+
+def test_period_cycles_does_not_call_a_band_touching_zero_a_reversal():
+    """快档最好的一格恰好落在真值上（误差 +0%）不算反号 —— 那是噪声不是失效。
+
+    实测就是这个形状：slow −5%~−3%，fast −5%~+3%。写成「任一格越零就报」会让这套
+    判据在自己的正样本上红。
+    """
+    from acceptance import period_cycles
+
+    rows = [
+        _period_row(36, 17, "slow"), _period_row(37, 18, "slow"),
+        _period_row(36, 17, "fast"), _period_row(39, 18, "fast"),
+    ]
+    assert period_cycles.judge(rows) == []
+
+
+def _interval_row(new_ds: float, old_ds: float, same_foot: int = 0,
+                  stance_pct=(53.0, 54.0)) -> dict:
+    return {
+        "trial": "T", "walk": "mid-a",
+        "new": {"path": "new", "ds_fraction": new_ds, "same_foot": same_foot,
+                "stance_pct": list(stance_pct), "intervals": [36, 36]},
+        "old": {"path": "old", "ds_fraction": old_ds, "same_foot": 3,
+                "stance_pct": [9.0, 9.0], "intervals": [37, 36]},
+    }
+
+
+def test_stance_intervals_accepts_the_two_negative_cells_the_user_ruled_on():
+    """`S1-sport` 快档两格实测 −0.068，**2026-09-02 用户裁决接受**。
+
+    判据钉的是「负得有限」不是「不许负」—— 写成后者就只能靠改判据来达成。
+    """
+    from acceptance import stance_intervals
+
+    rows = [_interval_row(+0.123, -0.799)] * 10 + [_interval_row(-0.068, -0.925)] * 2
+    assert stance_intervals.judge(rows) == []
+
+
+def test_stance_intervals_catches_a_dead_positive_control():
+    """旧路径（`refine_stance_edges`）若也过了那道门，门就没有通电。"""
+    from acceptance import stance_intervals
+
+    failures = stance_intervals.judge([_interval_row(+0.100, -0.05)])
+    assert any("阳性对照没被抓出" in line for line in failures)
+
+
+def test_stance_intervals_catches_a_collapse_back_to_zero_width_intervals():
+    """支撑相占比掉回个位数 = 退回零速时刻，`detect_stance_intervals` 白做了。"""
+    from acceptance import stance_intervals
+
+    failures = stance_intervals.judge(
+        [_interval_row(-0.9, -0.95, stance_pct=(9.0, 9.0))]
+    )
+    assert any("支撑相占比" in line for line in failures)
+
+
+def _contrast_row(coarse: float, refined: float, control: float) -> dict:
+    return {
+        "trial": "T", "walk": "mid-a",
+        "selfcheck": {"path": "selfcheck", "ds_fraction": coarse, "same_foot": 1},
+        "refined": {"path": "new", "ds_fraction": refined, "same_foot": 0,
+                    "stance_pct": [53.0], "intervals": [36]},
+        "control": {"path": "old", "ds_fraction": control, "same_foot": 3,
+                    "stance_pct": [9.0], "intervals": [37]},
+    }
+
+
+def test_selfcheck_contrast_accepts_the_measured_gap():
+    """实测：粗判 −1.003、现行 −0.068 → 差距 0.935；对照 −0.925 → 0.078。"""
+    from acceptance import selfcheck_contrast
+
+    assert selfcheck_contrast.judge([_contrast_row(-1.003, -0.068, -0.925)]) == []
+
+
+def test_selfcheck_contrast_catches_a_collapsed_gap():
+    """现行路径退回粗判水平 —— 差距塌掉必须报。"""
+    from acceptance import selfcheck_contrast
+
+    failures = selfcheck_contrast.judge([_contrast_row(-1.003, -0.95, -0.925)])
+    assert any("差距塌了" in line for line in failures)
+
+
+def test_selfcheck_contrast_catches_a_dead_positive_control():
+    """旧细化路径若也够得着那道门，门就没有通电。"""
+    from acceptance import selfcheck_contrast
+
+    failures = selfcheck_contrast.judge([_contrast_row(-1.003, -0.068, -0.05)])
+    assert any("阳性对照没被抓出" in line for line in failures)
+
+
+def test_selfcheck_contrast_trips_when_the_coarse_path_stops_being_near_minus_one():
+    """粗判路径不再 ≈ −1 是**绊线不是质量线**。
+
+    它变了不代表变差 —— 也可能是有人把 `sync/selfcheck` 改成用区间了，那是好事。
+    脚本分不出好坏，它只负责让这件事被看见，所以报出来的话里要说清这一点。
+    """
+    from acceptance import selfcheck_contrast
+
+    failures = selfcheck_contrast.judge([_contrast_row(-0.2, -0.068, -0.925)])
+    assert any("不一定是缺陷" in line for line in failures)
