@@ -1,13 +1,15 @@
 """`gait.validate.protocols` 的协议精度验证。
 
-RAY-230 需求修订 R2 的交付物。判据三条（50 m 直线 < 3%、闭环 < 1.5%、4 米往返与
-长直线一致性可量化），这里逐条守住它们的**执行点**，外加两条贯穿性质：
+RAY-230 的交付物（判据实现见修订 R2，直线协议参数化见修订 **R3**）。判据三条
+（已知距离直线 ≥ 40 m 且误差 < 3%、闭环 < 1.5%、4 米往返与长直线一致性可量化），
+这里逐条守住它们的**执行点**，外加两条贯穿性质：
 
 1. **空样本返回 `None`，不返回"合格"。** "没数据"不是"合格" —— 一条没跑过的判据
    和一条跑过且通过的判据在报告里必须长得不一样。
 2. **判据是冻结常量。** 门槛只能来自 `STRAIGHT_LINE_MAX_ERROR` /
-   `CLOSED_LOOP_MAX_ERROR`，不能散在判断里；否则"跑完之后有没有人动过判据"
-   在 git 历史里查不出来。
+   `CLOSED_LOOP_MAX_ERROR` / `STRAIGHT_LINE_MIN_DISTANCE_M`，不能散在判断里；
+   否则"跑完之后有没有人动过判据"在 git 历史里查不出来。R3 把场地下限也纳入
+   这条守护 —— **参数化的是「哪条道算数」，不是「多大误差算过」**。
 
 第三条判据**没有及格线**（原文"可量化并写入协议说明"），所以这里守的是
 "它不许假装自己有一个"。
@@ -27,6 +29,7 @@ from gait.validate.protocols import (
     PROTOCOL_SHUTTLE,
     PROTOCOL_STRAIGHT,
     STRAIGHT_LINE_MAX_ERROR,
+    STRAIGHT_LINE_MIN_DISTANCE_M,
     ClosedLoopVerdict,
     ProtocolConsistency,
     ProtocolError,
@@ -55,6 +58,12 @@ def nav(positions: np.ndarray) -> NavResult:
         degraded=np.zeros(n, dtype=bool),
         score=np.zeros(n),
     )
+
+
+#: T-230-03 的实测场地：75 砖 × 600 mm ＋ 74 接缝 × 2 mm。R3 之后它是合法的直线
+#: 协议距离（≥ `STRAIGHT_LINE_MIN_DISTANCE_M`），用在测试里是为了让"已知距离由
+#: 数据声明"这件事在用例上就看得见，而不是所有用例都填同一个 50。
+FIELD_45 = 45.148
 
 
 def straight_walk(distance: float, n: int = 500) -> NavResult:
@@ -192,12 +201,61 @@ class TestTheCriteriaAreTheOnlySourceOfThresholds:
         assert ClosedLoopVerdict((inside,)).passed is True
         assert ClosedLoopVerdict((outside,)).passed is False
 
+    def test_the_straight_line_floor_turns_exactly_at_the_named_constant(self):
+        """场地下限也是判据，且**在构造处**执行 —— 不是在 verdict 里静默剔除。
+
+        静默剔除会让报告显示"这趟参与了判定"，而判据一根本不适用于一条太短的道。
+        """
+        ok = TrialGeometry("at", PROTOCOL_STRAIGHT, STRAIGHT_LINE_MIN_DISTANCE_M)
+        assert ok.distance_m == STRAIGHT_LINE_MIN_DISTANCE_M
+
+        with pytest.raises(ProtocolError, match="已知距离"):
+            TrialGeometry("under", PROTOCOL_STRAIGHT, STRAIGHT_LINE_MIN_DISTANCE_M - 0.001)
+
+    def test_the_floor_binds_only_the_straight_protocol(self):
+        """4 米往返与闭环各有各的尺，下限是**直线判据**的一部分，不是全局最短距离。
+
+        往返协议的真值就是 4 m（单程），闭环填周长 —— 拿直线的下限去卡它们，
+        等于把一条判据的约束扩散到另外两条上。
+        """
+        assert TrialGeometry("t", PROTOCOL_SHUTTLE, 4.0).distance_m == 4.0
+        assert TrialGeometry("l", PROTOCOL_LOOP, 12.0).distance_m == 12.0
+
+    def test_the_known_distance_is_declared_by_the_data_not_hardcoded(self):
+        """R3 的实现口径：距离由数据声明，下限被冻结。
+
+        45.148 m 与 50 m 都是合法的已知距离，且**判定门槛对两者相同** ——
+        判据一量的是相对误差，绝对距离不进入它。
+        """
+        for truth in (FIELD_45, 50.0):
+            inside = measure(
+                "in",
+                PROTOCOL_STRAIGHT,
+                truth,
+                {"L": straight_walk(truth * (1 + STRAIGHT_LINE_MAX_ERROR * 0.99))},
+            )
+            outside = measure(
+                "out",
+                PROTOCOL_STRAIGHT,
+                truth,
+                {"L": straight_walk(truth * (1 + STRAIGHT_LINE_MAX_ERROR * 1.01))},
+            )
+            assert StraightLineVerdict((inside,)).passed is True
+            assert StraightLineVerdict((outside,)).passed is False
+
+    def test_the_report_carries_the_floor_it_ran_under(self):
+        """报告要说清按哪版判据算的 —— R3 加了一条约束，快照里就得看得见。"""
+        trial = measure("s", PROTOCOL_STRAIGHT, FIELD_45, {"L": straight_walk(FIELD_45)})
+        criterion = StraightLineVerdict((trial,)).snapshot()["criterion"]
+        assert criterion["max_abs_error"] == STRAIGHT_LINE_MAX_ERROR
+        assert criterion["min_distance_m"] == STRAIGHT_LINE_MIN_DISTANCE_M
+
     def test_the_closed_loop_criterion_is_stricter_than_the_straight_one(self):
         """闭环真值恒为零，读数里没有"路径长度量得准不准"这一项，它纯粹是航向漂移。"""
         assert CLOSED_LOOP_MAX_ERROR < STRAIGHT_LINE_MAX_ERROR
 
     def test_one_bad_trial_out_of_three_fails_the_straight_criterion(self):
-        """判据写的是"50 m 直线误差 < 3%"，不是"典型误差 < 3%"。"""
+        """判据写的是"已知距离直线误差 < 3%"，不是"典型误差 < 3%"。"""
         good = [
             measure(f"g{i}", PROTOCOL_STRAIGHT, 50.0, {"L": straight_walk(50.0)})
             for i in range(2)
