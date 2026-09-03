@@ -175,6 +175,32 @@ class FilterState:
 
 
 @dataclass(frozen=True)
+class SegmentDetection:
+    """一个连续段的零速检测结果，连同它在整个序列里的位置。
+
+    **它交出来的是滤波器实际用过的那一份**，不是让调用方照着参数再算一遍。
+
+    `NavResult` 把 `StanceDetection` 拍扁成了 `zupt` / `stances` / `degraded` / `score`，
+    丢掉了 `period`。而 `analysis/events.py::detect_stance_intervals` 需要 `period.bounds`
+    —— 支撑相区间的个数由周期栅格定死，那正是它相对边缘细化的全部优势所在。
+
+    为什么不让调用方自己重跑 `detect_stance`：重跑要在别处复刻 `gravity` 与 `segments`
+    的口径，而两处**必须永远一致**，否则事件会建在一份与轨迹不同的检测上，且不报错。
+    `core/rts.py` 对 `FilterHistory` 写过同一句话（「必须来自**同一次**调用」），
+    处理方式也一样 —— 把东西交出来，而不是让人重算。
+
+    带上 `start` / `end` 而不是只返回一个元组序列：调用方要把段内下标搬回全局下标，
+    让它自己去和 `series.segments` 对齐等于把一条隐式的"顺序相同"约定塞给它。
+    """
+
+    #: 该段在整个序列里的半开区间。
+    start: int
+    end: int
+    #: 该段的检测结果。下标是**段内**的，加 `start` 才是全局下标。
+    detection: StanceDetection
+
+
+@dataclass(frozen=True)
 class SegmentHistory:
     """一个连续段的前向滤波逐样本历史。RTS 平滑（`core/rts.py`）的输入。
 
@@ -550,7 +576,7 @@ def run_ins(
     PRD §6.1 的本地基础报告走的就是前向链；后向平滑只在云端链里发生，且发生在
     `core/rts.py`，不在这里。
     """
-    navigation, _ = _run(series, cfg, alignment=alignment, gravity=gravity, record=False)
+    navigation, _, _ = _run(series, cfg, alignment=alignment, gravity=gravity, record=False)
     return navigation
 
 
@@ -570,9 +596,39 @@ def run_ins_with_history(
     内存量级：每样本约 3.7 KB（两个 15×15 float64 + 一个 15 向量），200 Hz 下
     3 分钟单足约 130 MB。这是云端进程的账，不要在采集端调它。
     """
-    navigation, history = _run(series, cfg, alignment=alignment, gravity=gravity, record=True)
+    navigation, history, _ = _run(series, cfg, alignment=alignment, gravity=gravity, record=True)
     assert history is not None
     return navigation, history
+
+
+def run_ins_with_stances(
+    series: FootSeries,
+    cfg: AlgoConfig | None = None,
+    *,
+    alignment: Alignment | None = None,
+    gravity: float = GRAVITY_STANDARD,
+    record: bool = False,
+) -> tuple[NavResult, tuple[SegmentDetection, ...], FilterHistory | None]:
+    """与 `run_ins` 同一次前向滤波，额外交出**滤波器用过的那份**逐段零速检测。
+
+    存在的理由是 `NavResult` 拍扁了 `StanceDetection`：`zupt` / `stances` / `degraded` /
+    `score` 留下了，`period` 没有。而 `analysis/events.py::detect_stance_intervals`
+    要读 `period.bounds` —— 支撑相区间的个数由周期栅格定死，那是它相对边缘细化的
+    全部优势（RAY-325）。产品链路此前因此只能走边缘细化，真机上支撑相占比读到
+    1~16%（生理 60~75%）、双支撑期占比读到 −0.9（RAY-351）。
+
+    **不改变前向结果**：与 `run_ins` 逐位相同 —— 交出检测是旁路，不是分叉。
+
+    `record=True` 时一并给出 RTS 所需的历史，等价于 `run_ins_with_history` 再加检测；
+    云端完整链一次拿全，不必为了拿检测再跑一遍前向。
+
+    返回的下标是**段内**的，加 `SegmentDetection.start` 才是全局下标 —— 见那个类的
+    文档字符串。
+    """
+    navigation, history, detections = _run(
+        series, cfg, alignment=alignment, gravity=gravity, record=record
+    )
+    return navigation, detections, history
 
 
 def _run(
@@ -582,7 +638,7 @@ def _run(
     alignment: Alignment | None,
     gravity: float,
     record: bool,
-) -> tuple[NavResult, FilterHistory | None]:
+) -> tuple[NavResult, FilterHistory | None, tuple[SegmentDetection, ...]]:
     cfg = cfg or AlgoConfig()
     if not isinstance(series, FootSeries):
         raise EskfError(f"series 必须是 FootSeries，收到 {type(series).__name__}")
@@ -611,10 +667,12 @@ def _run(
     state: FilterState | None = None
     initial_covariance: np.ndarray | None = None
     histories: list[SegmentHistory] = []
+    detections: list[SegmentDetection] = []
     for start, end in series.segments:
         acc = series.acc[start:end]
         gyr = series.gyr[start:end]
         detection = detect_stance(acc, gyr, series.fs, cfg, gravity=gravity)
+        detections.append(SegmentDetection(start=start, end=end, detection=detection))
 
         if state is None:
             resolved = alignment or initial_alignment(acc, gyr, series.fs, cfg, gravity=gravity)
@@ -664,7 +722,11 @@ def _run(
         degraded=degraded,
         score=score,
     )
-    return navigation, FilterHistory(segments=tuple(histories)) if record else None
+    return (
+        navigation,
+        FilterHistory(segments=tuple(histories)) if record else None,
+        tuple(detections),
+    )
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:

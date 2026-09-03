@@ -72,8 +72,17 @@ class Walk:
         return self.duration_s / TRUTH_CYCLES
 
 
-def load_walks(trial_dir: Path, cfg: AlgoConfig) -> list[Walk]:
-    """一次采集里的六趟步行段。对碰段不返回 —— 它们不是步态。"""
+def load_walks(trial_dir: Path, cfg: AlgoConfig, *, lead_s: float = 0.0) -> list[Walk]:
+    """一次采集里的六趟步行段。对碰段不返回 —— 它们不是步态。
+
+    `lead_s` 把每趟的起点**往前延**若干秒，默认 0（其余脚本的基线都建在 0 上，
+    不要改这个默认值）。跑完整产品链路的脚本需要它：`core/alignment.py` 要求序列
+    开头有 ≥ 0.5 s 的静止段（RAY-202 的初始对准），而逐趟切片是从走起来那一刻切的，
+    静止前导落在切片之外。实测前延 1 s 就够六趟全部找得到，取 2 s 留余量。
+
+    前延进来的静止段会被检成一个很长的支撑相，但它进不了指标：分段筛选
+    （`analysis/segments.py`）只留直行段的中段步，静立既不是直行段也不在中段。
+    """
     bundle = np.load(trial_dir / "arrivals.npz", allow_pickle=False)
     walks = json.loads((trial_dir / "walk_segments.json").read_text(encoding="utf-8"))
     label = str(bundle["label"])
@@ -92,7 +101,7 @@ def load_walks(trial_dir: Path, cfg: AlgoConfig) -> list[Walk]:
             arrival = np.asarray(bundle[f"{prefix}_arrival"], dtype=np.float64)
             walk = walks["feet"][foot]["walks"][index]
             duration = float(walk["duration_s"])
-            start = int(np.searchsorted(arrival - origin, walk["start_s"]))
+            start = int(np.searchsorted(arrival - origin, max(0.0, walk["start_s"] - lead_s)))
             stop = int(np.searchsorted(arrival - origin, walk["end_s"]))
             sliced = arrival[start:stop]
             feet[foot] = FootSeriesInput(
