@@ -19,19 +19,19 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-# wt901 未发布到 PyPI，但**自上游 v0.2.0 起已有 tag**，因此按 tag 钉住。
+# wt901 未发布到 PyPI。RAY-334 曾决定「按 tag 钉住」，理由是 tag 与 commit 一样
+# 是不可变引用、还带着上游发布语义 —— 这个前提被上游破坏了一次（RAY-348）：
+# 上游把 v0.3.0 从轻量 tag **重打为 annotated tag**，tag 自身的 SHA 从 80b03c9
+# 变成 739518f（剥离后的 commit 仍是 80b03c9，代码一字未变），于是 uv 以 tag
+# 的 SHA 作解析键，锁文件里记的 80b03c9 与新解析出的 739518f 对不上，被判过期。
 #
-# 这里此前写的是「无 tag、无 release，因此按 commit 钉住」—— 那句话自 v0.2.0
-# 起就不成立了，却留了下来，让「按 40 位 SHA 钉」看着像唯一选择。上游 RAY-299 /
-# RAY-320 立项要终结的正是这件事（RAY-334）。
+# 结论修正为：**tag 是可被上游移动/重打的引用，commit 不是**。改回按 commit 钉住。
+# 钉 commit 不钉分支：分支引用会让「同一份 uv.lock」在不同时刻装出不同的代码，而
+# 锁文件的全部意义就是排除这种可能。commit 不可变，还正好等于 v0.3.0 的剥离
+# commit —— 换版本 = 改这里的 rev + 重新 uv lock，是一次显式的、会进 diff 的动作。
 #
-# 钉 tag 而不是分支：分支引用会让「同一份 uv.lock」在不同时刻装出不同的代码，
-# 而锁文件的全部意义就是排除这种可能。tag 与 commit 一样是不可变引用，但它还
-# 带着上游的发布语义与 CHANGELOG —— 换版本 = 改这里的 tag + 重新 uv lock，
-# 是一次显式的、会进 diff 的动作。
-#
-# v0.3.0 = WT901#39。相对上一钉（cb88cee5，它本身还在 v0.2.0 之前）带进 22 个
-# 合并，其中对本仓库要紧的：
+# 80b03c9 = v0.3.0^{} = WT901#39。相对上一钉（cb88cee5，它本身还在 v0.2.0 之前）
+# 带进 22 个合并，其中对本仓库要紧的：
 #
 #   RAY-292  0x71 回帧按 4 个寄存器解，协议固定回 8 个 —— 解码错误，不是缺功能。
 #   RAY-306  重连后配置重放失败时整条重连语义静默失效：连上了、数据在流、设备
@@ -45,7 +45,7 @@ dependencies = [
 # 在本仓库均零命中。「Battery.percent 可能为 None」上游列在升级须知里，但对本
 # 仓库**不是本次变化** —— battery_percent 在 cb88cee 与 v0.3.0 之间逐字节相同，
 # device/orchestration.py 早已显式处理 None。
-wt901 = { git = "https://github.com/RGu0/WT901.git", tag = "v0.3.0" }
+wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "80b03c9ede1b54cd9d8582ba867cd00c465d1c44" }
 
 [dependency-groups]
 dev = [

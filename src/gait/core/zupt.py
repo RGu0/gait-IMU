@@ -115,6 +115,12 @@ class PeriodReport:
     #: 各估计的 max/min。实测一致时 1.005~1.058，致命失效时 2.0。
     ratio: float
     #: 一致性闸是否通过。False 不代表结果不可用，代表它已被降级标记。
+    #:
+    #: **它是读数，不是开关。** RAY-339 之前它决定"取中位数还是退回自相关"；事件域
+    #: 精修成为主估计之后，那个二选一只发生在精修不被采纳时。要问"这个周期可不可信"
+    #: 的人该读 `fallback`，不是这里 —— 两者在精修被采纳的格上会给出相反的印象
+    #: （实测 24 格里有 4 格 `consistent=False` 而 `fallback=False`，且这 4 格的周期
+    #: 误差在全表里属于偏好的一半）。
     consistent: bool
     #: 周期边界，半开、升序，恰好 `cycles` 个。
     bounds: tuple[tuple[int, int], ...]
@@ -128,6 +134,17 @@ class PeriodReport:
     #: 报出来让调用方自己决定 —— `spanned_cycles` 是其中一种决定。
     head_truncated: float = 0.0
     tail_truncated: float = 0.0
+
+    #: **这个周期是退化路径给的**（自相关 seed），不是主路径给的。
+    #:
+    #: 与 `consistent` 分开，是因为两者回答的是不同的问题：`consistent` 说"几个估计
+    #: 彼此差多少"（读数），本字段说"最后采用的这个数是怎么来的"（事实）。RAY-339
+    #: 之前两者同义 —— 那时不一致就退回 seed；此后不再是：精修被采纳时，估计之间
+    #: 差多少都不影响采用的值。
+    #:
+    #: 要按"周期可不可信"降级的消费者读这一个。`_period_confidence` 就是；它此前读
+    #: `consistent`，于是在 4/24 格上按一个已经不成立的理由把置信度减半（RAY-347）。
+    fallback: bool = False
 
     @property
     def truncated(self) -> bool:
@@ -460,6 +477,9 @@ def _estimate_period(
         estimates=tuple(estimates),
         ratio=ratio,
         consistent=consistent,
+        # 这一遍里两者仍然同义 —— 上面那行 `median if consistent else seed` 就是
+        # 定义。分成两个字段是为了让下一遍（精修）能把它们分开。
+        fallback=not consistent,
         bounds=bounds,
         head_truncated=head,
         tail_truncated=tail,
@@ -623,6 +643,10 @@ def _refine_from_events(
         # 现在周期由事件域直接给出 —— 那个二选一没有了。它仍然报出来，因为"几个估计
         # 彼此差多少"是读报告的人要看的事实，只是它不再左右结果。
         consistent=ratio < cfg.stance_period_consistency_max,
+        # **周期来自事件域，不是退化路径。** 上面那句"不再左右结果"说的就是这件事，
+        # 而在 RAY-347 之前它只写在注释里 —— `_period_confidence` 读的仍是
+        # `consistent`，于是照旧减半。现在把它写成字段，注释与代码说同一句话。
+        fallback=False,
         bounds=bounds,
         head_truncated=head,
         tail_truncated=tail,
@@ -736,7 +760,11 @@ def _period_confidence(
     把它接到 ESKF 的观测协方差上是 RAY-204 的事，本模块只表达"多可信"。
     """
     confidence = np.zeros(swing.shape, dtype=np.float64)
-    ceiling = 0.25 if period.consistent else 0.125
+    # **看周期是怎么来的，不看几个估计彼此差多少。** 退化路径给的周期该减半；而精修
+    # 给的周期不该 —— 那 4 格（24 格实测）的估计确实互相差 1.35~1.62，但采用的值不是
+    # 从它们里选的，最终周期误差 +2.5% / −2.0% / −0.8% / +0.4%，全表偏好的一半。
+    # 按 `consistent` 减半等于按一个已经不成立的理由降级（RAY-347）。
+    ceiling = 0.125 if period.fallback else 0.25
     reference = cfg.stance_still_reference_rad_s
     for start, end in period.bounds:
         marked = soft[start:end]

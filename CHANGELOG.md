@@ -38,10 +38,15 @@
 
 ### 依赖
 
-* **wt901 由 `rev = "cb88cee5…"` 改为 `tag = "v0.3.0"`。** `pyproject.toml` 里
-  那句「无 tag、无 release，因此按 commit 钉住」自上游 v0.2.0 起已不成立，一并
-  改掉——留着它会让按 40 位 SHA 钉看起来像唯一选择（RAY-334）。
+* **wt901 由 `rev = "cb88cee5…"` 改为 `rev = "80b03c9…"`（= `v0.3.0`）。**
+  `pyproject.toml` 里那句「无 tag、无 release，因此按 commit 钉住」自上游 v0.2.0
+  起已不成立，一并改掉——留着它会让按 40 位 SHA 钉看起来像唯一选择（RAY-334）。
 
   `tests/test_wt901_dependency.py` 的版本断言随之由 `"0.1.0"` 改为 `"0.3.0"`，
-  并提取为 `PINNED_VERSION`。按 tag 钉之后这条更要守：tag 是可以被上游移动的
-  引用，而 commit 不会。
+  并提取为 `PINNED_VERSION`。
+
+  中途改用过 `tag = "v0.3.0"`（RAY-334），又改了回来（RAY-348）：上游把 `v0.3.0`
+  从轻量 tag **重打为 annotated tag**，代码一字未变（剥离后的 commit 仍是
+  `80b03c9`），但 tag 自身的 SHA 变了，而 uv 以它作解析键 —— `uv.lock` 因此被判
+  过期，`uv sync --locked` 在所有分支上失败。采纳 tag 时写下的那句风险
+  「tag 是可以被上游移动的引用，而 commit 不会」原样兑现，结论按它修正。

@@ -28,8 +28,10 @@ ADAPTER_SURFACE = (
 )
 
 
-#: `pyproject.toml` 的 `[tool.uv.sources]` 钉的 tag，去掉前缀 `v`。
-#: 自 RAY-334 起依赖按 tag 而非 40 位 SHA 钉，这个常量是那个 tag 在测试侧的回声。
+#: `pyproject.toml` 的 `[tool.uv.sources]` 钉的那个 commit 所对应的版本号。
+#: RAY-334 曾把依赖从 40 位 SHA 改为按 tag 钉，RAY-348 又改了回去 —— 上游把
+#: `v0.3.0` 重打为 annotated tag，tag 自身的 SHA 变了，锁文件随之失效。现在钉的是
+#: `80b03c9…`（= `v0.3.0^{}`），这个常量是那个 commit 在测试侧的回声。
 PINNED_VERSION = "0.3.0"
 
 
@@ -37,9 +39,9 @@ def test_wt901_is_installed_at_the_pinned_version():
     """装上的是不是我们钉的那一版。
 
     这条与 `ADAPTER_SURFACE` 守的不是一回事：那些名字在多个版本里都在，所以
-    「表面契约全过」并不能说明装对了版本。按 tag 钉之后尤其要守——tag 是可以被
-    上游移动的引用（`uv.lock` 里记着解析出的 commit，但重新 `uv lock` 会跟着
-    移动的 tag 走），而 commit 不会。**这条挂了先看 tag 是不是被挪过。**
+    「表面契约全过」并不能说明装对了版本。按 commit 钉之后这条挂了，说明的不再是
+    「tag 被挪过」，而是 `[tool.uv.sources]` 的 `rev` 与这里的期望版本各说各话 ——
+    **换 pin 时把两处一起改。**
     """
     assert metadata.version("wt901") == PINNED_VERSION
 
