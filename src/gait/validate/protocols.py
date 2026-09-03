@@ -7,7 +7,7 @@
 
 RAY-230（PRD v1.2 §17.1 V1）的三条判据：
 
-1. 50 m 直线误差 < 3%
+1. 已知距离直线（≥ 40 m）误差 < 3%
 2. 矩形闭环误差 < 1.5%
 3. 4 米往返协议与长直线协议的一致性偏差**可量化**并写入协议说明
 
@@ -23,6 +23,10 @@ RAY-230（PRD v1.2 §17.1 V1）的三条判据：
 定死、跑完不得修改**（《06 测试与验证方案》§5 的冻结声明，照 `v3prime.py` 的
 `NEGLIGIBLE_*` 先例）—— 写成具名常量而不是散在判断里，是为了让"有没有人在跑完
 之后动过判据"这件事在 git 历史里一眼可查。
+
+判据一还有第二条约束：场地下限 `STRAIGHT_LINE_MIN_DISTANCE_M`（需求修订 R3）。
+它的执行点不在 `verdict` 而在 `TrialGeometry.__post_init__` —— 因为它约束的是
+**这一趟算不算数**，不是**这一趟过没过**。太短的道在构造处就被拒收，进不到判定里。
 
 ## 空样本返回 None，不返回"合格"
 
@@ -59,8 +63,22 @@ import numpy as np
 
 from gait.contracts import NavResult
 
-#: 50 m 直线的相对距离误差上限（RAY-230 判据一，PRD v1.2 §17.1 V1）。
+#: 已知距离直线的相对距离误差上限（RAY-230 判据一，PRD v1.2 §17.1 V1）。
 STRAIGHT_LINE_MAX_ERROR: Final[float] = 0.03
+#: 直线协议的已知距离下限，m（RAY-230 判据一，需求修订 **R3**，用户 2026-09-03）。
+#:
+#: 判据一量的是**相对**误差，它不关心绝对距离 —— 所以判据真正需要的从来不是
+#: 「50 m」这个具体长度，而是「够长，长到 3% 量的仍然是漂移」。R3 之前判据文本
+#: 写的是「50 m 直线」，那是把**场地描述**写进了判据。R3 把两者拆开：**距离由每趟
+#: 数据声明**（`TrialGeometry.distance_m`），**下限冻结在这里**。
+#:
+#: 40 m 这个数由 R3 需求给定，不是从判据推出来的 —— 记在这里是为了让它有出处，
+#: 而不是让它看起来像算出来的。它要挡住的是「拿一条太短的道去凑 3%」：距离越短，
+#: 起停加减速与真值本身的不确定度在读数里占比越大，那时 3% 量的就不再是漂移。
+#:
+#: **本条与 `STRAIGHT_LINE_MAX_ERROR` 同为冻结判据**：开跑前定死、跑完不得修改。
+#: 场地不够长的处置是换场地或改需求修订，**不是改这个数**。
+STRAIGHT_LINE_MIN_DISTANCE_M: Final[float] = 40.0
 #: 矩形闭环的相对误差上限（RAY-230 判据二）。比直线严，因为闭环的真值恒为零，
 #: 读数里没有"路径长度量得准不准"这一项，它纯粹是航向漂移。
 CLOSED_LOOP_MAX_ERROR: Final[float] = 0.015
@@ -85,6 +103,7 @@ __all__ = [
     "PROTOCOL_SHUTTLE",
     "PROTOCOL_STRAIGHT",
     "STRAIGHT_LINE_MAX_ERROR",
+    "STRAIGHT_LINE_MIN_DISTANCE_M",
     "ClosedLoopVerdict",
     "ProtocolConsistency",
     "ProtocolError",
@@ -117,7 +136,9 @@ class TrialGeometry:
     protocol: str
     #: 真值距离，m。**三种协议的口径不同**，因为三者能被测到的量本来就不同：
     #:
-    #: * `straight`：整趟直线长度（如 50 m）。读数是首末位移模长。
+    #: * `straight`：整趟直线长度（如 45.148 m）。读数是首末位移模长。距离**由本
+    #:   字段声明**，但须 ≥ `STRAIGHT_LINE_MIN_DISTANCE_M` —— 下限是判据的一部分，
+    #:   见该常量的文档。
     #: * `shuttle`：**单程**长度（如 4 m），不是往返累计。往返走完回到原点，首末
     #:   位移按构造接近零，测不到累计路程；能测到的是**这条道有多长**，即轨迹在
     #:   行走主轴上的跨度。所以真值填单程。
@@ -131,6 +152,19 @@ class TrialGeometry:
             raise ProtocolError(
                 f"{self.label}：真值路径长度须为正的有限值，得到 {self.distance_m!r}。"
                 "闭环趟填周长而不是 0 —— 残差要除以它才谈得上相对误差"
+            )
+        if (
+            self.protocol == PROTOCOL_STRAIGHT
+            and self.distance_m < STRAIGHT_LINE_MIN_DISTANCE_M
+        ):
+            # 在构造处拒绝，而不是在 verdict 里悄悄跳过：一条太短的趟若被算进
+            # `StraightLineVerdict`，报告会显示它"参与了判定"，而判据一根本不适用
+            # 于它。拒收比静默剔除诚实。
+            raise ProtocolError(
+                f"{self.label}：直线协议的已知距离须 ≥ "
+                f"{STRAIGHT_LINE_MIN_DISTANCE_M} m，得到 {self.distance_m} m。"
+                "下限是判据的一部分（RAY-230 R3），不是可调参数 —— "
+                "场地不够长应换场地或走需求修订，不要改这个常量"
             )
 
 
@@ -245,7 +279,7 @@ def evaluate_trial(
 
 @dataclass(frozen=True)
 class StraightLineVerdict:
-    """判据一：50 m 直线误差 < 3%。"""
+    """判据一：已知距离直线（≥ 40 m）误差 < 3%。"""
 
     trials: tuple[TrialMeasurement, ...]
 
@@ -263,7 +297,7 @@ class StraightLineVerdict:
     def passed(self) -> bool | None:
         """判据一的唯一执行点。样本为空时返回 None —— "没数据"不是"合格"。
 
-        取**最大**而不是中位：三趟里有一趟超标就是超标。判据写的是"50 m 直线
+        取**最大**而不是中位：三趟里有一趟超标就是超标。判据写的是"已知距离直线
         误差 < 3%"，不是"典型误差 < 3%"。
         """
         errors = np.abs(self.errors)
@@ -278,7 +312,8 @@ class StraightLineVerdict:
             "max_abs_error": _finite(self.max_abs_error),
             "criterion": {
                 "max_abs_error": STRAIGHT_LINE_MAX_ERROR,
-                "source": "RAY-230 判据一 / PRD v1.2 §17.1 V1",
+                "min_distance_m": STRAIGHT_LINE_MIN_DISTANCE_M,
+                "source": "RAY-230 判据一 / PRD v1.2 §17.1 V1（需求修订 R3）",
             },
             "passed": self.passed,
         }
@@ -422,7 +457,7 @@ def _decision(
     missing = [
         name
         for name, verdict in (
-            ("50 m 直线", straight.passed),
+            ("已知距离直线", straight.passed),
             ("矩形闭环", loop.passed),
             ("协议一致性", consistency.quantified),
         )
@@ -434,7 +469,7 @@ def _decision(
         return "通过：直线与闭环均在判据内，协议一致性偏差已量化"
     failed = [
         name
-        for name, ok in (("50 m 直线", straight.passed), ("矩形闭环", loop.passed))
+        for name, ok in (("已知距离直线", straight.passed), ("矩形闭环", loop.passed))
         if not ok
     ]
     return f"未通过：{'、'.join(failed)}超出判据"
