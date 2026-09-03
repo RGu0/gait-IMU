@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from gait.config import AlgoConfig
-from gait.contracts import FootSeries
+from gait.contracts import FootSeries, Quality
 from gait.core import quaternion as quat
 from gait.core.eskf import FilterHistory, run_ins, run_ins_with_history
 from gait.core.rts import SmoothError, smooth
@@ -223,3 +223,76 @@ class TestTheHistoryIsFreeOfSideEffects:
         recorded, _ = run_ins_with_history(series, AlgoConfig())
         for field in ("p", "v", "q", "bg", "ba"):
             assert np.array_equal(getattr(plain, field), getattr(recorded, field)), field
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-357：被跳过的碎段
+#
+# RAY-352 让 `_run` 跳过短于检测窗口的段。`NavResult` 仍然覆盖它们，而
+# `FilterHistory` 此前不覆盖 —— 于是 `smooth` 的覆盖检查把一个 8 采样的碎段误判成
+# "history 与 navigation 来自不同调用"，整条完整链在真机上崩掉。
+#
+# 修法是让 history 显式带上跳过区间，而**不是**放宽那道检查：它抓的那种错误值得留着。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fragmented(seconds: float = 12.0, fragment: int = 8) -> FootSeries:
+    """一段可用数据，中间夹一个 8 采样的碎段 —— 真机上最短的那种。"""
+    series, _ = generate_walk(WalkSpec(duration_s=seconds), noise=NoiseModel(seed=3))
+    n = len(series.t)
+    cut = n // 2
+    return FootSeries(
+        label="L", t=series.t, acc=series.acc, gyr=series.gyr,
+        quality=np.full(n, Quality.NONE, dtype=np.uint8),
+        segments=[(0, cut), (cut, cut + fragment), (cut + fragment, n)],
+        fs=series.fs,
+    )
+
+
+class TestSkippedSegments:
+    def test_a_fragment_no_longer_looks_like_a_different_call(self):
+        """判据 1：含碎段的会话能走完平滑，不再被覆盖检查拦下。"""
+        series = _fragmented()
+        navigation, history = run_ins_with_history(series)
+        assert history.skipped, "碎段应当被记进 history.skipped"
+        assert history.samples == len(navigation.t)
+        smooth(navigation, history)  # 不抛即通过
+
+    def test_the_skipped_samples_are_left_exactly_as_the_forward_pass_left_them(self):
+        """判据 2：跳过的段没有 `Φ`/`P` 可回传，RTS 一个比特都不该动它。
+
+        零修正不是"忘了处理"，是**唯一诚实的处理** —— 凭空给它一个修正就是编造。
+        """
+        series = _fragmented()
+        navigation, history = run_ins_with_history(series)
+        start, end = history.skipped[0]
+        result = smooth(navigation, history)
+
+        # 速度与位置**逐位相同** —— 它们是直接相加的，加零就是原值。
+        assert np.array_equal(navigation.v[start:end], result.navigation.v[start:end])
+        assert np.array_equal(navigation.p[start:end], result.navigation.p[start:end])
+        # 姿态差 1 个 ULP：注入是右乘 `exp(δθ)` 再重归一化，δθ 为零时数学上是恒等，
+        # 数值上重归一化仍会动最后一位。断言写成"逐位相同"是把要求提得比事实严，
+        # 那会让一条本来正确的实现红在浮点上。
+        assert np.allclose(
+            navigation.q[start:end], result.navigation.q[start:end], rtol=0.0, atol=1e-15
+        )
+
+    def test_the_coverage_check_still_catches_a_history_from_another_call(self):
+        """判据 3：**这道检查没有被削弱。**
+
+        修法是让 history 如实覆盖，不是让检查睁一只眼 —— 它抓的是"配错了两次调用"，
+        而那种错本模块查不出内容层面的不一致，能查出的这一种就必须查。
+        """
+        short, _ = generate_walk(WalkSpec(duration_s=8.0), noise=NoiseModel(seed=3))
+        long_, _ = generate_walk(WalkSpec(duration_s=12.0), noise=NoiseModel(seed=3))
+        navigation, _ = run_ins_with_history(long_)
+        _, other_history = run_ins_with_history(short)
+        with pytest.raises(SmoothError, match="同一次"):
+            smooth(navigation, other_history)
+
+    def test_a_history_without_fragments_reports_no_skipped_ranges(self):
+        """没有碎段时 `skipped` 为空 —— 新字段在正常路径上不改变任何东西。"""
+        series, _ = generate_walk(WalkSpec(duration_s=12.0), noise=NoiseModel(seed=3))
+        _, history = run_ins_with_history(series)
+        assert history.skipped == ()
