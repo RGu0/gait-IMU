@@ -269,6 +269,48 @@ def _analyse_foot(
     )
 
 
+def _agree_turns_across_feet(
+    feet: dict[FootLabel, FootOutcome],
+    sync_quality: dict[str, Any] | None,
+) -> dict[FootLabel, FootOutcome]:
+    """把只有一只脚判出的转身降级为直行，然后重选中段步（RAY-354 判据 6）。
+
+    **放在这里而不是 `_analyse_foot` 里**，因为它要两只脚：`_analyse_foot` 是逐足的，
+    而"两足是否同时判出"这句话在单足语境下不存在。
+
+    单足会话、缺周期、或没有同步质量标注时**原样返回** —— 这条规则用不了的时候，
+    退回逐足判读，而不是抛错把整份报告打掉。
+    """
+    if sync_quality is None or sorted(feet) != ["L", "R"]:
+        return feet
+    left, right = feet["L"], feet["R"]
+    if not left.cycles or not right.cycles:
+        return feet
+
+    changes = {
+        label: segments.heading_change_per_cycle(
+            outcome.cycles, outcome.navigation.t, _yaw_rate(outcome.navigation)
+        )
+        for label, outcome in (("L", left), ("R", right))
+    }
+    agreed = segments.separate_with_agreement(
+        (left.cycles, changes["L"]),
+        (right.cycles, changes["R"]),
+        sync_quality=sync_quality,
+    )
+    out: dict[FootLabel, FootOutcome] = {}
+    for label, outcome, pieces in (("L", left, agreed[0]), ("R", right, agreed[1])):
+        report = segments.select_middle_steps(outcome.cycles, pieces)
+        selected = segments.selected_cycles(outcome.cycles, report)
+        out[label] = replace(
+            outcome,
+            selected=selected,
+            segmentation=report,
+            spatiotemporal=events.summarize(label, selected) if selected else None,
+        )
+    return out
+
+
 def _annotate_all(
     chain: str,
     feet: dict[FootLabel, FootOutcome],
@@ -359,12 +401,16 @@ def run_basic_chain(
         for label, series in series_by_foot.items()
     }
     navigation = {label: value[0] for label, value in forward.items()}
-    feet = {
-        label: _analyse_foot(
-            label, series_by_foot[label], navigation[label], forward[label][1], cfg, None, None
-        )
-        for label in sorted(navigation)
-    }
+    feet = _agree_turns_across_feet(
+        {
+            label: _analyse_foot(
+                label, series_by_foot[label], navigation[label], forward[label][1], cfg,
+                None, None,
+            )
+            for label in sorted(navigation)
+        },
+        sync_quality,
+    )
     return _assemble(
         quality.CHAIN_BASIC, BASIC_CHAIN_ALGO_VERSION, feet, None,
         sync_quality, protocol_seconds, {},
@@ -434,13 +480,16 @@ def run_full_chain(
                 navigation["R"] = constrained.right
                 dualfoot_applied = True
 
-    feet = {
-        label: _analyse_foot(
-            label, series_by_foot[label], navigation[label], stance_detections[label], cfg,
-            smooth_reports.get(label), anchor_reports.get(label),
-        )
-        for label in sorted(navigation)
-    }
+    feet = _agree_turns_across_feet(
+        {
+            label: _analyse_foot(
+                label, series_by_foot[label], navigation[label], stance_detections[label], cfg,
+                smooth_reports.get(label), anchor_reports.get(label),
+            )
+            for label in sorted(navigation)
+        },
+        sync_quality,
+    )
     diagnostics = {
         "stages": ["forward_eskf", "rts_smoothing", "stance_anchoring", "dualfoot_constraint"],
         "dualfoot_applied": dualfoot_applied,

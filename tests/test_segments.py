@@ -28,10 +28,16 @@ from gait.analysis.segments import (
     select_middle_steps,
     selected_cycles,
     separate,
+    separate_with_agreement,
 )
 from gait.config import AlgoConfig
 from gait.core.zupt import detect_stance
-from gait.validate.synthetic import NoiseModel, WalkSpec, generate_walk
+from gait.validate.synthetic import (
+    NoiseModel,
+    WalkSpec,
+    generate_dual_walk,
+    generate_walk,
+)
 
 CFG = AlgoConfig()
 
@@ -327,6 +333,96 @@ def test_chopping_a_walk_into_shorter_segments_costs_superlinearly():
     assert kept == {30: 28, 10: 24, 5: 18, 3: 10, 2: 0}
     # 段数翻倍不是把损失翻倍 —— 从 1 段到 10 段，损失从 2 步涨到 20 步（10 倍）。
     assert (30 - kept[30]) * 10 == 30 - kept[3]
+
+
+def dual_turnaround(*, turn_strides=1, path_length=10.0, duration=60.0):
+    """一次**双足**往返 —— 转身是真的，两只脚都经历。"""
+    spec = WalkSpec(
+        duration_s=duration,
+        path_length_m=path_length,
+        turn_strides=turn_strides,
+        cadence=108.0,
+    )
+    pair = generate_dual_walk(spec, noise=NoiseModel(seed=0))
+    out = {}
+    for label, (series, truth) in pair.items():
+        spans = drop_still_lead(
+            detect_stance(series.acc, series.gyr, series.fs, CFG).stances
+        )
+        cycles, _ = segment_cycles(
+            label, series.t, series.acc, series.gyr, spans, position=truth.p
+        )
+        out[label] = (
+            cycles,
+            heading_change_per_cycle(cycles, series.t, series.gyr[:, 2]),
+        )
+    return out
+
+
+def turn_count(pieces):
+    return sum(1 for item in pieces if item.kind == KIND_TURN)
+
+
+# ── RAY-354 判据 6：跨足一致性 ────────────────────────────────────────────────
+#
+# 判别量是"两只脚认不认"，不是"转身有多长"。长度分不开两类：假转身是单步（漂移是逐步
+# 噪声），而小角度真转身**也是单步** —— 下面第一条测试就钉住这一点。
+
+
+def test_a_real_turn_survives_because_both_feet_see_it():
+    """**阳性对照，也是本条规则的要害**：`turn_strides=1` 的单步真转身必须活下来。
+
+    「转身至少 N 步」那种过滤器会把它全杀掉 —— 而 `separate` 的判据是逐周期的，
+    一步 30° 的转弯按本模块自己的定义就是合法转身。真机实测这条规则保住 5/5。
+    """
+    dual = dual_turnaround(turn_strides=1)
+    plain = {
+        label: separate(cycles, changes) for label, (cycles, changes) in dual.items()
+    }
+    left, right = separate_with_agreement(
+        dual["L"], dual["R"], sync_quality={"test": True}
+    )
+
+    assert turn_count(plain["L"]) > 0, "合成往返里本来就该有转身"
+    assert turn_count(left) == turn_count(plain["L"])
+    assert turn_count(right) == turn_count(plain["R"])
+
+
+def test_a_turn_only_one_foot_sees_is_demoted_to_straight():
+    """**阴性对照**：另一只脚没看见的"转身"降级为直行，相邻直行段随之合并。
+
+    真机 T-230-03 转身真值为 0，这条规则把误报从 38 次降到 7 次（−82%），
+    而剩下的 7 次全在 `S1-sport/slow-a` —— 那一格另有前向解发散的缺陷。
+    """
+    dual = dual_turnaround(turn_strides=1)
+    cycles_r, changes_r = dual["R"]
+    # 右脚全程直行：它一次转身都不判，于是左脚的转身没有任何佐证。
+    quiet_right = (cycles_r, np.zeros_like(changes_r))
+
+    plain_left = separate(*dual["L"])
+    left, _ = separate_with_agreement(
+        dual["L"], quiet_right, sync_quality={"test": True}
+    )
+
+    assert turn_count(plain_left) > 0
+    assert turn_count(left) == 0
+    # 降级之后整趟并成一段，而不是留下一堆碎段 —— 碎段的代价是超线性的。
+    assert len(left) == 1
+
+
+def test_agreement_needs_the_sync_quality_annotation():
+    """跨足判断离开同步质量标注没有意义（PRD §13），与 `double_support` 同一口径。"""
+    dual = dual_turnaround(turn_strides=1)
+    with pytest.raises(SegmentationError, match="同步质量"):
+        separate_with_agreement(dual["L"], dual["R"], sync_quality=None)
+
+
+def test_a_negative_agreement_tolerance_is_rejected():
+    dual = dual_turnaround(turn_strides=1)
+    with pytest.raises(SegmentationError, match="tolerance_s"):
+        separate_with_agreement(
+            dual["L"], dual["R"], sync_quality={"test": True}, tolerance_s=-0.1
+        )
 
 
 # ── 分离对哪些指标要紧 ────────────────────────────────────────────────────────

@@ -73,6 +73,10 @@ DEFAULT_TURN_DEGREES: Final[float] = 25.0
 #: 每个直行段首尾各剔除几步。**在 4 米协议下这个数很贵**，见模块文档 §2。
 DEFAULT_TRIM_STEPS: Final[int] = 1
 
+#: 跨足转身一致性的时间容差，秒。0 表示要求两足的转身周期**时间上真的重叠**。
+#: 实测 0 与 0.5 s 给出同一结果（共现 0.083），所以默认取更严的那个。
+DEFAULT_AGREEMENT_TOLERANCE_S: Final[float] = 0.0
+
 
 class SegmentationError(ValueError):
     """分段的输入非法，或剔除策略把数据剔光了。"""
@@ -184,6 +188,13 @@ def separate(
         raise SegmentationError(f"turn_degrees 必须为正，收到 {turn_degrees}")
 
     kinds = np.where(np.abs(changes) >= turn_degrees, KIND_TURN, KIND_STRAIGHT)
+    return _tile(cycles, kinds, changes)
+
+
+def _tile(
+    cycles: Sequence[GaitCycle], kinds: np.ndarray, changes: np.ndarray
+) -> list[PathSegment]:
+    """把逐周期的类别铺成交替的段。`separate` 与跨足协调共用同一套铺排。"""
     segments: list[PathSegment] = []
     start = 0
     for index in range(1, len(cycles) + 1):
@@ -200,6 +211,91 @@ def separate(
         )
         start = index
     return segments
+
+
+def separate_with_agreement(
+    left: tuple[Sequence[GaitCycle], np.ndarray],
+    right: tuple[Sequence[GaitCycle], np.ndarray],
+    *,
+    sync_quality: dict[str, Any],
+    turn_degrees: float = DEFAULT_TURN_DEGREES,
+    tolerance_s: float = DEFAULT_AGREEMENT_TOLERANCE_S,
+) -> tuple[list[PathSegment], list[PathSegment]]:
+    """两只脚一起分段：**只有两足都判出的转身才算转身。**
+
+    ## 为什么这条规则成立
+
+    转身是**身体**改变行进方向，两只脚都要跟着走；而航向漂移是**逐脚**的
+    （RAY-359 实测左脚 12/12 趟都比右脚差）。所以「两足是否同时判出」把这两类分开，
+    而**长度**分不开 —— 见下。
+
+    实测（T-230-03，转身真值 **0**，判出的全是误报）：跨足共现率 **0.083**，
+    **低于**循环平移 400 次的随机基线 **0.140**；8 个有转身的格里 7 格共现为零。
+
+    ## 为什么不是「转身至少 N 步」
+
+    实测假转身 11/13 格是单步，看上去用长度就能筛掉。**但那是错的判别量。**
+    `separate` 的判据是**逐周期**的：`|Δ航向| ≥ turn_degrees` 的单个周期就是转身，
+    所以**一步 30° 的转弯按本模块自己的定义就是合法转身**。长度过滤器会把它判成直行。
+
+    更根本的：假转身是单步，因为漂移是**逐步噪声**；而小角度真转身**也是单步**。
+    **长度是两类共有的属性。** 合成对照直接验到这一点：`turn_strides=1` 的真转身
+    跨足共现 **5/5**，长度过滤器却会把它全杀掉。
+
+    ## 它挡不住什么
+
+    * **两只脚在同一时刻一起判错**时无效。真机上这种情况罕见（共现低于随机），但
+      `S1-sport/slow-a` 那种前向解发散的格里仍会漏过几次 —— 那一格另有缺陷。
+    * **单足会话**用不了这条规则。调用方缺一只脚时不要调它。
+    * 它**继承跨足同步质量的全部约束**（PRD §13）：两只脚的时间轴对不齐，共现判断
+      就没有意义，所以 `sync_quality` 是必需的关键字参数，与 `events.double_support`
+      同一口径。
+    """
+    if sync_quality is None:
+        raise SegmentationError(
+            "跨足转身一致性是**跨足**判断，必须附同步质量标注（PRD §13）。"
+            "两只脚的时间轴对不齐时，'同时判出'这句话本身没有意义。"
+        )
+    if tolerance_s < 0:
+        raise SegmentationError(f"tolerance_s 不得为负，收到 {tolerance_s}")
+
+    prepared = []
+    for cycles, heading_change in (left, right):
+        changes = np.asarray(heading_change, dtype=np.float64)
+        if changes.size != len(cycles):
+            raise SegmentationError(
+                f"heading_change 的长度 {changes.size} 与周期数 {len(cycles)} 不一致"
+            )
+        if turn_degrees <= 0:
+            raise SegmentationError(f"turn_degrees 必须为正，收到 {turn_degrees}")
+        kinds = np.where(np.abs(changes) >= turn_degrees, KIND_TURN, KIND_STRAIGHT)
+        prepared.append((list(cycles), changes, kinds))
+
+    windows = [
+        [
+            (float(cycle.t_ic), float(cycle.t_ic_next))
+            for cycle, kind in zip(cycles, kinds, strict=True)
+            if kind == KIND_TURN
+        ]
+        for cycles, _changes, kinds in prepared
+    ]
+
+    out: list[list[PathSegment]] = []
+    for side, (cycles, changes, kinds) in enumerate(prepared):
+        other = windows[1 - side]
+        confirmed = kinds.copy()
+        for index, (cycle, kind) in enumerate(zip(cycles, kinds, strict=True)):
+            if kind != KIND_TURN:
+                continue
+            start, stop = float(cycle.t_ic), float(cycle.t_ic_next)
+            if not any(
+                start - tolerance_s < end and other_start - tolerance_s < stop
+                for other_start, end in other
+            ):
+                # 另一只脚在同一时刻没有判出转身 —— 降级为直行，相邻直行段随之合并。
+                confirmed[index] = KIND_STRAIGHT
+        out.append(_tile(cycles, confirmed, changes))
+    return out[0], out[1]
 
 
 def select_middle_steps(

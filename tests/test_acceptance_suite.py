@@ -436,13 +436,13 @@ def _measured_headings() -> list[dict]:
     编出来的数据很容易碰巧满足它们，那样这套测试就只在测自己。
     """
     cells = [
-        _heading_row(33.5, 6, "slow", 0.028, 2.654),
-        _heading_row(11.9, 5, "slow", 0.029, 2.640),
-        _heading_row(15.4, 4, "slow", 0.046, 2.896),
-        _heading_row(12.9, 3, "slow", 0.043, 2.999),
-        _heading_row(11.4, 1, "mid", 0.089, 1.593),
+        _heading_row(33.5, 4, "slow", 0.028, 2.654),
+        _heading_row(11.9, 3, "slow", 0.029, 2.640),
+        _heading_row(15.4, 0, "slow", 0.046, 2.896),
+        _heading_row(12.9, 0, "slow", 0.043, 2.999),
+        _heading_row(11.4, 0, "mid", 0.089, 1.593),
         _heading_row(9.0, 0, "mid", 0.089, 1.581),
-        _heading_row(11.6, 3, "mid", 0.084, 1.536),
+        _heading_row(11.6, 0, "mid", 0.084, 1.536),
         _heading_row(10.0, 0, "mid", 0.086, 1.541),
         _heading_row(9.4, 0, "fast", 0.157, 0.990),
         _heading_row(4.2, 0, "fast", 0.153, 0.985),
@@ -472,7 +472,7 @@ def test_heading_drift_accepts_the_measured_shape():
 def test_heading_drift_catches_a_cell_that_got_worse():
     from acceptance import heading_drift
 
-    rows = _measured_headings() + [_heading_row(55.0, 9, "slow", 0.02, 3.5)]
+    rows = _measured_headings() + [_heading_row(55.0, 1, "slow", 0.02, 3.5)]
     assert any("变坏了" in line for line in heading_drift.judge(rows))
 
 
@@ -491,10 +491,10 @@ def test_heading_drift_catches_the_turn_count_in_both_directions():
     """转身误报真值是 0，所以判出的全是误报；总数两头都是门。"""
     from acceptance import heading_drift
 
-    worse = [_heading_row(12.0, 40, "slow"), _heading_row(12.0, 45, "fast")]
+    worse = [_heading_row(12.0, 10, "slow"), _heading_row(12.0, 9, "fast")]
     assert any("变坏了（真值是 0）" in line for line in heading_drift.judge(worse))
 
-    better = [_heading_row(12.0, 1, "slow"), _heading_row(12.0, 0, "fast")]
+    better = [_heading_row(12.0, 1, "slow"), _heading_row(12.0, 1, "fast")]
     assert any("变好了" in line for line in heading_drift.judge(better))
 
 
@@ -503,10 +503,10 @@ def test_heading_drift_catches_a_speed_dependence_that_flipped():
     from acceptance import heading_drift
 
     rows = [
-        _heading_row(5.0, 0, "slow", 0.028, 2.7),
-        _heading_row(5.0, 0, "slow", 0.029, 2.6),
-        _heading_row(20.0, 8, "fast", 0.157, 1.0),
-        _heading_row(20.0, 8, "fast", 0.153, 1.0),
+        _heading_row(5.0, 1, "slow", 0.028, 2.7),
+        _heading_row(5.0, 1, "slow", 0.029, 2.6),
+        _heading_row(20.0, 1, "fast", 0.157, 1.0),
+        _heading_row(20.0, 1, "fast", 0.153, 1.0),
     ]
     assert any("速度依赖翻转或消失了" in line for line in heading_drift.judge(rows))
 
@@ -521,10 +521,10 @@ def test_heading_drift_catches_a_collapsed_mechanism():
     from acceptance import heading_drift
 
     rows = [
-        _heading_row(12.0, 2, "slow", 0.10, 1.5),
-        _heading_row(3.0, 0, "slow", 0.14, 1.6),
-        _heading_row(12.0, 2, "fast", 0.13, 1.6),
-        _heading_row(3.0, 0, "fast", 0.11, 1.5),
+        _heading_row(12.0, 1, "slow", 0.10, 1.5),
+        _heading_row(3.0, 1, "slow", 0.14, 1.6),
+        _heading_row(12.0, 1, "fast", 0.13, 1.6),
+        _heading_row(3.0, 1, "fast", 0.11, 1.5),
     ]
     assert any("机制变了" in line for line in heading_drift.judge(rows))
 
