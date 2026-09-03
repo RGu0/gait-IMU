@@ -89,11 +89,25 @@ def _echo(message: str) -> None:
     print(message, flush=True)
 
 
+class StreamStalled(RuntimeError):
+    """采集中途断流。**带着已经收到的样本** —— 见 `_collect` 的文档。"""
+
+    def __init__(self, collected: np.ndarray) -> None:
+        super().__init__(f"数据流中断，已收 {collected.shape[0]} 个样本")
+        self.collected = collected
+
+
 async def _collect(device: WT901Device, seconds: float) -> np.ndarray:
     """收 `seconds` 秒的比力（标称 SI），返回 `(n,3)`。
 
     结束条件是**时钟**，但循环靠样本到达推进 —— 断流时 `async for` 会永远等下去，
-    而 `still` 那条路径要采十分钟，静默挂起与「正在采」在终端上长得一模一样。
+    而 `still` 那条路径要采十分钟，静默挂起与「正在采」在终端上长得一模一样。所以
+    每个样本都带超时。
+
+    断流时抛 `StreamStalled` 并**把已收到的样本带上**，而不是直接退出。十分钟的静置
+    段在第八分钟断掉时，那八分钟仍然是有用的数据；第一版把它整个丢了，只留一句错误
+    信息 —— 而重采一次要再花十分钟。调用方决定留不留（`capture` 不留：三秒的残段没有
+    价值；`still` 留）。
     """
     samples: list[tuple[float, float, float]] = []
     deadline = time.monotonic() + seconds
@@ -105,9 +119,8 @@ async def _collect(device: WT901Device, seconds: float) -> np.ndarray:
                     anext(stream), timeout=STALL_TIMEOUT_SECONDS
                 )
             except (TimeoutError, StopAsyncIteration) as error:
-                raise SystemExit(
-                    f"数据流中断（已收 {len(samples)} 个样本）。模块可能已休眠或断连，"
-                    "重新开机后再跑一次。"
+                raise StreamStalled(
+                    np.asarray(samples, dtype=np.float64)
                 ) from error
             samples.append((sample.accel.x, sample.accel.y, sample.accel.z))
             if time.monotonic() >= deadline:
@@ -168,9 +181,16 @@ async def _capture(args: argparse.Namespace) -> int:
             _echo(f"[{len(collected) + 1}/{target}] 换一个姿态，放稳")
             input("    好了按回车（Ctrl-C 中止）…")
 
-            await _collect(device, SETTLE_SECONDS)
-            _echo(f"    采集 {args.seconds:.1f} s，别碰它……")
-            acc = await _collect(device, args.seconds)
+            try:
+                await _collect(device, SETTLE_SECONDS)
+                _echo(f"    采集 {args.seconds:.1f} s，别碰它……")
+                acc = await _collect(device, args.seconds)
+            except StreamStalled as error:
+                # 三秒的残段没有保留价值，但已采到的姿态都已逐个落盘，不会丢。
+                raise SystemExit(
+                    f"数据流中断（{error}）。已采到的 {len(collected)} 个姿态已落盘，"
+                    f"模块重新开机后可继续采剩下的。"
+                ) from error
 
             try:
                 observation = observe_orientation(acc)
@@ -218,27 +238,47 @@ async def _still(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     device, mac = await _connect(args.mac, args.scan_timeout)
+    stalled = False
     try:
         _echo("")
         _echo(f"把模块平放不动，采 {args.minutes:g} min。")
         input("准备好后按回车开始…")
-        await _collect(device, SETTLE_SECONDS)
-        acc = await _collect(device, args.minutes * 60.0)
+        try:
+            # 静置等待也要包进来：模块一开始就没在推流时，不该甩一个裸 traceback 出去。
+            await _collect(device, SETTLE_SECONDS)
+            acc = await _collect(device, args.minutes * 60.0)
+        except StreamStalled as error:
+            # 断流也把已收到的留下：八分钟的静置段仍然有用，而重采要再花十分钟。
+            acc, stalled = error.collected, True
     finally:
         problem = await close_quietly(device)
         if problem:
             _echo(f"⚠ {problem}")
 
+    if acc.size == 0:
+        raise SystemExit("一个样本都没收到，没有可留的数据。确认模块已开机后重试。")
+
     np.save(out / "still.npy", acc)
     (out / "still_meta.json").write_text(
         json.dumps(
-            {"device": mac, "minutes": args.minutes, "samples": int(acc.shape[0])},
+            {
+                "device": mac,
+                "requested_minutes": args.minutes,
+                "samples": int(acc.shape[0]),
+                "stalled": stalled,
+            },
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
-    _echo(f"静置段落在 {out / 'still.npy'}（{acc.shape[0]} 样本）")
+    if stalled:
+        _echo(
+            f"⚠ 中途断流，已把收到的 {acc.shape[0]} 个样本留在 "
+            f"{out / 'still.npy'}（不足 {args.minutes:g} min）。"
+        )
+    else:
+        _echo(f"静置段落在 {out / 'still.npy'}（{acc.shape[0]} 样本）")
     return 0
 
 

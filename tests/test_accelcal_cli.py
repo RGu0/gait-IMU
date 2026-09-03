@@ -182,3 +182,55 @@ def test_connect_uses_the_real_classmethod_signature():
 
     assert "target" in inspect.signature(WT901Device.connect).parameters
     assert inspect.ismethod(WT901Device.connect), "connect 应为类方法"
+
+
+def test_still_keeps_what_it_got_when_the_stream_stalls(monkeypatch, tmp_path):
+    """十分钟的静置段在第八分钟断掉时，那八分钟仍然有用。
+
+    第一版把它整个丢了，只留一句错误信息 —— 而重采一次要再花十分钟。这条钉住
+    「断流也留数据」，并要求元数据把 `stalled` 记下来：一段不足时长的数据当成完整的
+    用，会让后面算出来的漂移看着比实际好。
+    """
+    device = FakeDevice([np.array([0.0, 0.0, STANDARD_GRAVITY])])
+    partial = np.tile(np.array([0.0, 0.0, STANDARD_GRAVITY]), (5000, 1))
+    calls = {"n": 0}
+
+    async def fake_collect(_device, _seconds):
+        calls["n"] += 1
+        if calls["n"] == 1:  # 静置等待
+            return partial[:10]
+        raise accelcal.StreamStalled(partial)
+
+    async def fake_connect(_mac, _timeout):
+        return device, "AA:BB"
+
+    monkeypatch.setattr(accelcal, "_collect", fake_collect)
+    monkeypatch.setattr(accelcal, "_connect", fake_connect)
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+
+    assert accelcal.main(["still", "--out", str(tmp_path), "--minutes", "10"]) == 0
+    saved = np.load(tmp_path / "still.npy")
+    assert saved.shape == (5000, 3)
+    meta = json.loads((tmp_path / "still_meta.json").read_text(encoding="utf-8"))
+    assert meta["stalled"] is True
+    assert meta["samples"] == 5000
+    assert device.closed
+
+
+def test_still_refuses_to_write_an_empty_file(monkeypatch, tmp_path):
+    """一个样本都没收到时不该留下一个空的 still.npy —— 它会被后续当成有效数据读走。"""
+    device = FakeDevice([np.array([0.0, 0.0, STANDARD_GRAVITY])])
+
+    async def fake_collect(_device, _seconds):
+        raise accelcal.StreamStalled(np.empty((0, 3)))
+
+    async def fake_connect(_mac, _timeout):
+        return device, "AA:BB"
+
+    monkeypatch.setattr(accelcal, "_collect", fake_collect)
+    monkeypatch.setattr(accelcal, "_connect", fake_connect)
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+
+    with pytest.raises(SystemExit, match="一个样本都没收到"):
+        accelcal.main(["still", "--out", str(tmp_path), "--minutes", "10"])
+    assert not (tmp_path / "still.npy").exists()
