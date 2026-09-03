@@ -87,7 +87,7 @@
     "report": {
       "implemented": true,
       "issue": "RAY-224",
-      "summary": "本地基础报告已接通（RAY-345 最小切法）：reportFor 从会话目录重算基础链产出 report；PDF 导出仍属 RAY-224，未实现"
+      "summary": "本地基础报告已实现（gait/report/）；PDF 导出与实际打印（V-U3）仍需 Electron，属 RAY-224 的 pdf-export scope"
     },
     "subject-directory": {
       "implemented": false,
@@ -98,6 +98,11 @@
       "implemented": false,
       "issue": "RAY-323",
       "summary": "机构操作员账号登录（P-00）没有后端：FR-01 说明它与终端预配置凭据是两件事，而 RAY-225 交付的是后者（终端身份与设备绑定）"
+    },
+    "upload-transport": {
+      "implemented": false,
+      "issue": null,
+      "summary": "会话已排进待传队列，但真正发送需要一个 IngestionClient 实现；服务端接口约定不在本仓库（同 RAY-225 边界）。尚无 Issue 认领"
     }
   }
 }

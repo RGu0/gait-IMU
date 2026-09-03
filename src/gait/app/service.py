@@ -29,22 +29,20 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
-from gait.cloud.chain import run_basic_chain
+from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, SessionMeta
 from gait.device.capture import SessionCapture
-from gait.device.footseries import load_session_foot
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
     LinkOutcome,
@@ -68,7 +66,7 @@ from gait.protocolflow.timed_walk import (
     VERDICT_INVALID,
     TimedWalk,
 )
-from gait.report.assemble import assemble_report
+from gait.report import build_report
 
 _SIDES = {"L": "左", "R": "右"}
 
@@ -78,17 +76,6 @@ _SIDES = {"L": "左", "R": "右"}
 MIN_ARRIVAL_RATE = 0.95
 
 MIN_DISK_FREE_BYTES = 2 * 1024**3
-
-#: MVP 基础报告的同步质量占位（RAY-345）。双支撑期等跨足指标要求 `sync_quality`
-#: 非空；真实同步质量待 RAY-209/213，这里与 CLI 路径共用同一份占位。
-MVP_SYNC_QUALITY: Final[dict[str, Any]] = {"determinate": True, "flagged": False}
-
-
-def _swapped_foot(label: str, swapped: bool) -> str:
-    """左右对调后，某只脚的数据应当从哪一侧的录制里读。"""
-    if not swapped:
-        return label
-    return "R" if label == "L" else "L"
 
 
 class TerminalService:
@@ -113,6 +100,13 @@ class TerminalService:
         #: 结论里去（`LinkOutcome.recording_error`），否则「这次采集有一半没落盘」
         #: 就停在一个事件里，而事件是会被错过的。
         self._recording_errors: dict[str, str] = {}
+        #: 待传队列。与会话目录同根 —— 队列记的就是那些目录，分开放会让「哪份数据
+        #: 属于哪个队列」变成一个要靠约定维持的事实。
+        self.uploads = (
+            UploadQueue(Path(session_root) / "upload-queue.sqlite3")
+            if session_root is not None
+            else None
+        )
         self.walk: TimedWalk | None = None
         self._event_seq = 0
         self._aborted: dict[str, Any] | None = None
@@ -343,14 +337,27 @@ class TerminalService:
             created_at=datetime.now(UTC).isoformat(timespec="seconds"),
             subject_uuid=new_subject_uuid(),
             scenario="walk",
-            devices={label: {"device_id": t.device_id} for label, t in self.source.transports().items()},
-            config_snapshot={"state": "pending", "reason": "配置下发快照在会话结束时补齐"},
+            devices={
+                label: {"device_id": t.device_id}
+                for label, t in self.source.transports().items()
+            },
+            config_snapshot={
+                "state": "pending",
+                "reason": "配置下发快照在会话结束时补齐",
+            },
             calib_snapshot={"state": "unimplemented", "issue": "RAY-208"},
             algo_version=f"gait-contract-{CONTRACT_VERSION}",
-            algo_params=self.config.snapshot() if hasattr(self.config, "snapshot") else {"duration_s": self.config.duration_s},
+            algo_params=self.config.snapshot()
+            if hasattr(self.config, "snapshot")
+            else {"duration_s": self.config.duration_s},
             sync_report={"state": "pending", "reason": "同步报告在会话结束后才存在"},
-            integrity_report={"state": "pending", "reason": "完整性报告在会话结束后才存在"},
-            protocol_config=self.walk.protocol_snapshot() if self.walk else {"duration_s": self.config.duration_s},
+            integrity_report={
+                "state": "pending",
+                "reason": "完整性报告在会话结束后才存在",
+            },
+            protocol_config=self.walk.protocol_snapshot()
+            if self.walk
+            else {"duration_s": self.config.duration_s},
             contract_version=CONTRACT_VERSION,
             notes="本地采集会话；元数据在会话结束时改写。停在 pending 即表示未正常结束。",
             extra={"provenance": self.source.provenance()},
@@ -402,11 +409,36 @@ class TerminalService:
                     "chunks_written": dict(status.chunks_written),
                     "problems": list(status.problems),
                 },
-                sync_report={"state": "not_computed", "reason": "主机侧同步在离线重算阶段产出"},
+                sync_report={
+                    "state": "not_computed",
+                    "reason": "主机侧同步在离线重算阶段产出",
+                },
             ),
         )
         self.capture = None
+        self._enqueue_for_upload()
         return status
+
+    def _enqueue_for_upload(self) -> None:
+        """把刚收尾的会话排进待传队列。
+
+        ## 不完整的会话**也要**上传
+
+        一份因写盘失败而安全停止的会话，数据是残的 —— 但它的元数据自己说了它是残的
+        （`integrity_report.complete = False`），而原始数据是「数据评估的生命线」
+        （RAY-226）。不排它，等于**恰恰把记录了一次故障的那份数据丢掉**，而 G-04
+        要的是数据不静默丢失，不是只保住顺利的那些。
+
+        ## 入队与发送是两件事
+
+        这里只入队。真正发出去需要一个 `IngestionClient` 实现，而服务端不在本仓库
+        （同 RAY-225 的边界）—— 见 `contract.json` 的 `upload-transport` 缺口。
+        入队本身已经有意义：它让「服务端确认前不删本地」有了记账处，也让 P-01 的
+        待传条数有真实来源。
+        """
+        if self.uploads is None or self.session_root is None or self.session_id is None:
+            return
+        enqueue_session(self.uploads, self.session_root, self.session_id)
 
     def _do_sessionResult(self, params: dict[str, Any]) -> dict[str, Any]:
         """会话有效性 + 双足完整性。两者分开记账，因为它们判的不是一件事。"""
@@ -449,7 +481,7 @@ class TerminalService:
                 action="请确认通道长度与转身标志位置，然后重新检测。",
             ).snapshot()
         # 报告是另一件事：会话有效不等于报告已生成。这里只声明「可生成」——
-        # 真正的报告由 `reportFor` 从会话目录重算（RAY-345 已接通，不再是缺口）。
+        # 真正的报告由 `reportFor` 生成（RAY-224 basic-report 已接通，不再是缺口）。
         # 会话级无效则不生成报告（PRD §13），状态让渲染端直接走「未通过 + 重测」。
         result["report"] = {
             "status": "invalid" if verdict.overall == VERDICT_INVALID else "ready",
@@ -489,41 +521,45 @@ class TerminalService:
         return _Unimplemented("calibration")
 
     def _do_reportFor(self, params: dict[str, Any]) -> Any:
-        """P-10 报告：从会话目录生成基础报告（RAY-345，接通原 RAY-224 缺口）。
+        """一份已完成会话的基础报告。
 
-        参数 `sessionId` 缺省时用当前会话（`startSession` 之后）；从「检测记录」打开
-        历史报告时由调用方显式给出。`swapped` 表示操作员在佩戴确认时执行过一键对调。
+        报告层不判会话有效性 —— PRD §13「会话级无效不生成报告」是**调用前**的判断，
+        由 `sessionResult` 给出。这里只在拿不到步态周期时拒绝，而拒绝的理由说的正是
+        这件事，免得调用方以为报告层会替它把关。
         """
-        session_id = params.get("sessionId") or self.session_id
-        if session_id is None:
-            raise protocol.ProtocolError("没有可生成报告的会话")
-        return self._report_for_session(
-            session_id, swapped=bool(params.get("swapped", False))
-        )
-
-    def _report_for_session(
-        self, session_id: str, *, swapped: bool = False
-    ) -> dict[str, Any]:
-        """读 meta + 双足 `FootSeries` → 基础链 → report dict。
-
-        报告生成在同步入口里做一次 `asyncio.run`：回放解析是 async 的，但这里是
-        一次性离线重算，不在采集热路径上，短暂阻塞可接受（FR-05 只管主线程，不涉及
-        这个离线重算点）。用了固定坐标系重排与占位同步质量 —— 见 RAY-345 降范围。
-        """
-        if self.session_root is None:
-            raise protocol.ProtocolError("未配置会话根目录，无法生成报告")
-        meta = read_meta(session_directory(self.session_root, session_id))
-        seconds = int(meta.protocol_config.get("duration_s", self.config.duration_s))
-        feet: dict[str, Any] = {}
-        for label in ("L", "R"):
-            source = _swapped_foot(label, swapped)
-            feet[label] = asyncio.run(
-                load_session_foot(self.session_root, session_id, source)
+        cycles = self._cycles_for(params)
+        if not cycles:
+            return TerminalError(
+                code="E-QLT-5003",
+                message="这次检测没有可用的步态周期，无法生成报告。",
+                action="请确认会话有效性判定的结果；会话级无效不生成报告。",
             )
-        chain = run_basic_chain(
-            feet, sync_quality=MVP_SYNC_QUALITY, protocol_seconds=seconds
+        walk = self.walk
+        return build_report(
+            cycles,
+            report_id=str(params.get("reportId") or self.session_id or "R-unknown"),
+            organization=(self.operator or {}).get("organization", "本机构"),
+            subject_label=str(params.get("subjectLabel") or "未提供"),
+            assessed_at=datetime.now(UTC).date().isoformat(),
+            duration_s=self.config.duration_s,
+            algo_version=f"gait-contract-{CONTRACT_VERSION}",
+            protocol_version=str(self.config.version),
+            valid_seconds=walk.valid_seconds if walk else 0.0,
+            turns=params.get("turns"),
+            annotations_text=params.get("annotations") or (),
         )
-        return assemble_report(chain, meta)
+
+    def _cycles_for(self, params: dict[str, Any]) -> list[Any]:
+        """本次会话的步态周期。
+
+        **目前恒为空。** 从原始数据算出周期要跑完整的 ESKF → 事件检测 → 分段链
+        （`core/` + `analysis/`），而那条链在 sidecar 里还没有被接起来 —— 与本 scope
+        之前每一次「功能齐全但没人调用」是同一个形状，只是这次它被显式记下来了。
+
+        调用方可以直接传 `cycles` 进来（离线重算与测试走这条路），所以报告本身是
+        可验的；缺的只是「从这次采集自动算出周期」那一步。
+        """
+        return list(params.get("cycles") or [])
 
     def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("subject-directory")
@@ -646,8 +682,18 @@ class TerminalService:
                 "ready": verdict.admitted,
                 "issues": list(verdict.problems),
             },
+            # P-01 顶部的「数据已同步 / 待上传」。数字来自真实队列，不是常量 ——
+            # 一个永远显示 0 的待传数会让积压这件事永远不被发现。
+            "uploadSummary": self._upload_summary(),
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
+
+    def _upload_summary(self) -> dict[str, Any]:
+        """待传积压。没有队列时说「没在记账」，而不是报 0。"""
+        if self.uploads is None:
+            return {"tracked": False}
+        report = self.uploads.backlog()
+        return {"tracked": True, **report.snapshot()}
 
     @staticmethod
     def _item(

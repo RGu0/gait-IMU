@@ -131,6 +131,19 @@ def test_events_are_guarded_too() -> None:
 # ── 三态 ──────────────────────────────────────────────────────────────────
 
 
+def test_an_implemented_capability_is_no_longer_a_gap() -> None:
+    """`report` 于 2026-09-03 翻面（RAY-224 `basic-report`）。
+
+    这条测试的存在方式本身是一条经验：上一版这里把「report 是缺口」当成事实钉住，
+    于是它在能力实现的那天变红。**那是对的** —— 契约与实现必须同时翻面
+    （见 `test_unimplemented_refuses_an_implemented_capability`）。红了就改，
+    而不是给翻面留一条不会失败的后路。
+    """
+    assert contract()["capabilities"]["report"]["implemented"] is True
+    with pytest.raises(protocol.ProtocolError, match="同时翻面"):
+        protocol.unimplemented("1", "report")
+
+
 def test_unimplemented_is_neither_ok_nor_error() -> None:
     message = protocol.unimplemented("1", "calibration")
     assert message["status"] == protocol.STATUS_UNIMPLEMENTED

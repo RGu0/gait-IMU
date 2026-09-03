@@ -163,6 +163,12 @@ def smooth(navigation: NavResult, history: FilterHistory) -> SmoothResult:
             "两者必须来自同一次 run_ins_with_history 调用。"
         )
 
+    # `delta` 初值为零，而**被跳过的段（`history.skipped`）不在下面的循环里** ——
+    # 它们的修正量因此保持零，前向值原样留下。那是对的：那段没跑滤波，没有 `Φ` 与
+    # `P` 可回传，凭空给它一个修正就是编造。
+    #
+    # 覆盖检查（上面那道）算的是含跳过段的总覆盖，所以它仍然能抓住"history 与
+    # navigation 来自不同调用"，同时不再把一个 8 采样的碎段误判成不同调用（RAY-357）。
     delta = np.zeros((n, STATE_DIM))
     regularized = 0
     for segment in history.segments:

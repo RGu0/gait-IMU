@@ -44,10 +44,10 @@ describe("三态而不是布尔", () => {
     const outcome = interpret({
       v: IPC_CONTRACT_VERSION,
       status: "unimplemented",
-      unimplemented: { capability: "calibration", issue: "RAY-208", summary: "尚未实现" },
+      unimplemented: { capability: "report", issue: "RAY-224", summary: "尚未实现" },
     });
     expect(outcome.status).toBe(STATUS_UNIMPLEMENTED);
-    expect(outcome.gap.issue).toBe("RAY-208");
+    expect(outcome.gap.issue).toBe("RAY-224");
     expect(outcome).not.toHaveProperty("result");
     expect(outcome).not.toHaveProperty("error");
   });
@@ -142,14 +142,17 @@ describe("事件流", () => {
 });
 
 describe("能力缺口", () => {
-  it("剩下的三个缺口各自指向认领它的 Issue", () => {
+  it("已实现的能力不再是缺口", () => {
+    // `report` 于 2026-09-03 翻面（RAY-224 `basic-report`）。上一版这里把「它是
+    // 缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，红了就改。
+    expect(capabilityGap("report")).toBeNull();
+    expect(CAPABILITIES.report.implemented).toBe(true);
+  });
+
+  it("仍是缺口的各自指向认领它的 Issue", () => {
     expect(capabilityGap("calibration").issue).toBe("RAY-208");
     expect(capabilityGap("subject-directory").issue).toBe("RAY-322");
     expect(capabilityGap("operator-auth").issue).toBe("RAY-323");
-  });
-
-  it("报告已在 RAY-345 接通，不再是缺口", () => {
-    expect(capabilityGap("report")).toBeNull();
   });
 
   it("每个缺口都声明了归属，且非空的号长得像 Issue 号", () => {

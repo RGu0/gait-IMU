@@ -11,6 +11,53 @@
 
 ### 变更
 
+* **`report.json` 里两个字段的读数口径变了。** `cloud/chain.py` 的事件分割改用
+  `analysis/events.py::detect_stance_intervals`（支撑相**区间**），此前走的是
+  `refine_stance_edges`（零速区间的**边缘细化**）。
+
+  真机 T-230-03 上的影响（12 趟 × 2 足）：
+
+  | 字段 | 改前 | 改后 |
+  | --- | --- | --- |
+  | `stance_ratio`（支撑相占比） | **1 ~ 16%** | **39 ~ 54%** |
+  | `double_support.fraction` | −0.945 ~ −0.590 | −6.248 ~ +0.062 |
+
+  支撑相占比此前是废数：生理值 60~75%，而零速时刻的跨度只占周期 0.7%~2.1%。
+
+  `double_support.fraction` 的**分布**变了而不是简单变好：旧路径在所有格都给
+  −0.9 上下，那是零宽区间求重叠的算术产物，**稳定地错**；改后分段判对的格给
+  +0.027~+0.062，判错的格给 −6.2（分段失效见 RAY-354）。**读数不再是伪影，
+  开始反映真实缺陷。**
+
+  `stride_length` 与 `gait_speed` 也跟着动（实测 1.115~9.297 m / 0.357~3.490 m/s，
+  受控真值 1.2 m）—— 它们同时受惯导影响，本次不设门，只记录。
+
+  **合成数据上两条路几乎不分**（+0.260 vs +0.263 / 60% vs 60%），因为那里的脚是
+  真的停住的。所以这次改动在合成回归上看不出任何差别。
+
+
+* **`core/eskf.py::run_ins` 去掉一个抛出条件，加上另一个。**
+
+  此前：`series.segments` 里只要有一段短于 `zupt_window_samples`，`detect_stance` 就会
+  抛 `ZuptError`，整条链失败。而空洞切分（RAY-210）产出这样的碎段是**正常行为** ——
+  真机 T-230-03 的 24 格切出 56 段，其中 3 段短于 15 采样（最短 8）。
+
+  现在：碎段被**整段跳过**，与 `detect_stance` 错误信息里写明的契约一致。跳过的段
+  仍然被覆盖，其样本 `zupt` / `degraded` 为 False、`score` 为 0、位置在段内不前进。
+
+  **新的抛出条件**：全部段都短于检测窗口时抛 `EskfError` —— 那时没有任何可信的初始
+  对准，返回一条轨迹只能是编的。
+
+  **没有碎段时结果逐位不变**（实测：三档时长的 `q/v/p/bg/ba/score/zupt/stances`
+  指纹与改动前完全相同）。
+
+* **`core/eskf.py` 新增 `run_ins_with_stances` 与 `SegmentDetection`。** 现有
+  `run_ins` / `run_ins_with_history` 签名不变。新入口交出滤波器**用过的那份**逐段
+  零速检测，两个用途：`SegmentDetection.skipped` 区分「整段跳过」与「分析过但没检出
+  支撑相」（两者在 `NavResult` 里读数相同、含义相反）；`detection.period` 供按周期
+  栅格取支撑相区间用（`NavResult` 拍扁时丢掉了它）。
+
+
 * **`gait.device.capture` 的回放路径新增一个抛出条件。** `replay_raw_frames` /
   `replay_session_foot` / `replay_recording` 此前只在 `DeviceStats.dropped_samples`
   非零时抛 `CaptureError`；现在 `DeviceStats.dropped_before_ready` 非零同样抛，

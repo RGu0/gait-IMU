@@ -30,7 +30,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
 import numpy as np
@@ -41,7 +42,7 @@ from gait.contracts import FootLabel, FootSeries, GaitCycle, NavResult
 from gait.core import quaternion as quat
 from gait.core import rts, stance_anchor
 from gait.core.dualfoot import DualFootError, DualFootReport, apply_distance_constraint
-from gait.core.eskf import run_ins, run_ins_with_history
+from gait.core.eskf import SegmentDetection, run_ins_with_stances
 from gait.quality import annotate as quality
 
 #: 完整链的算法版本。**进产出与报告页脚**（PRD §12 页脚含算法版本、G-08 可回溯重算）。
@@ -193,14 +194,50 @@ def _yaw_rate(navigation: NavResult) -> np.ndarray:
     return rate
 
 
+def _stance_intervals(
+    series: FootSeries,
+    detections: Sequence[SegmentDetection],
+    cfg: AlgoConfig,
+) -> list[events.StanceEdges]:
+    """逐段求支撑相区间，把段内下标搬回全局。
+
+    **按段做，不是把整条序列当一段。** `run_ins` 本来就是逐段滤波的（空洞之间不积分），
+    每段有自己的周期栅格；真机实测 24 格里有一半是 2~3 段。把它们并成一段再检测，
+    得到的会是一份与轨迹所依据的检测**不同**的检测，而且不报错。
+
+    代价已量清：1 段的格无损失，2 段 −1，3 段 −2（网格只铺在首末摆动峰之间，
+    每段各丢一个）。真机 24 格均值 −0.71 个周期。**这是按段做的固有代价，而合成
+    一段是错的** —— 那会让事件建在一份与轨迹不同的检测上。
+    """
+    edges: list[events.StanceEdges] = []
+    for segment in detections:
+        if segment.skipped:
+            # 短到没法分析的段（RAY-352）。它没有检测结果，自然也没有支撑相区间 ——
+            # 跳过而不是拿一个空的 `StanceDetection` 去装样子。
+            continue
+        window = series.acc[segment.start : segment.end]
+        for edge in events.detect_stance_intervals(window, series.fs, segment.detection, cfg):
+            edges.append(
+                replace(edge, ic=edge.ic + segment.start, to=edge.to + segment.start)
+            )
+    return edges
+
+
 def _analyse_foot(
     label: FootLabel,
     series: FootSeries,
     navigation: NavResult,
+    detections: Sequence[SegmentDetection],
     cfg: AlgoConfig,
     smooth_report: rts.SmoothReport | None,
     anchor_report: stance_anchor.AnchorReport | None,
 ) -> FootOutcome:
+    # 支撑相**区间**，不是零速时刻。零速时刻跨度只占周期 0.7%~2.1%，拿两个近似零宽的
+    # 区间算重叠，`double_support` 的 `fraction` 必然趋近 −1 个 step 时长 —— 真机实测
+    # −0.925~−0.624，而那不是双支撑期读数，是零宽区间的算术（RAY-325 / RAY-351）。
+    #
+    # 合成数据上两条路几乎不分（+0.260 vs +0.263），因为那里的脚是**真的**停住的。
+    # 所以这一行的理由只在真机上看得见，合成测试再多也看不见。
     cycles, _ = events.segment_cycles(
         label,
         navigation.t,
@@ -209,6 +246,7 @@ def _analyse_foot(
         navigation.stances,
         position=navigation.p,
         cfg=cfg,
+        stance_edges=_stance_intervals(series, detections, cfg),
     )
     if cycles:
         report = segments.analyse(cycles, navigation.t, _yaw_rate(navigation))
@@ -316,9 +354,15 @@ def run_basic_chain(
     事：对照实验与同构测试都要能在同一个进程里跑出两条链的结果来比。
     """
     cfg = cfg or AlgoConfig()
-    navigation = {label: run_ins(series, cfg) for label, series in series_by_foot.items()}
+    forward = {
+        label: run_ins_with_stances(series, cfg)
+        for label, series in series_by_foot.items()
+    }
+    navigation = {label: value[0] for label, value in forward.items()}
     feet = {
-        label: _analyse_foot(label, series_by_foot[label], navigation[label], cfg, None, None)
+        label: _analyse_foot(
+            label, series_by_foot[label], navigation[label], forward[label][1], cfg, None, None
+        )
         for label in sorted(navigation)
     }
     return _assemble(
@@ -347,8 +391,11 @@ def run_full_chain(
     navigation: dict[FootLabel, NavResult] = {}
     smooth_reports: dict[FootLabel, rts.SmoothReport] = {}
     anchor_reports: dict[FootLabel, stance_anchor.AnchorReport] = {}
+    stance_detections: dict[FootLabel, tuple[SegmentDetection, ...]] = {}
     for label, series in sorted(series_by_foot.items()):
-        forward, history = run_ins_with_history(series, cfg)
+        forward, detections, history = run_ins_with_stances(series, cfg, record=True)
+        assert history is not None
+        stance_detections[label] = detections
         smoothed = rts.smooth(forward, history)
         anchored = stance_anchor.anchor_stance_positions(smoothed.navigation)
         navigation[label] = anchored.navigation
@@ -389,7 +436,7 @@ def run_full_chain(
 
     feet = {
         label: _analyse_foot(
-            label, series_by_foot[label], navigation[label], cfg,
+            label, series_by_foot[label], navigation[label], stance_detections[label], cfg,
             smooth_reports.get(label), anchor_reports.get(label),
         )
         for label in sorted(navigation)

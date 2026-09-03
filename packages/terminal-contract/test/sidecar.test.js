@@ -111,13 +111,16 @@ describe("真实 sidecar 往返（不经 mock）", () => {
     expect(result.overall).toBe("indeterminate");
   });
 
-  it("标定以缺口出境；报告已接通，不再以缺口出境", async () => {
+  it("标定仍以缺口出境，报告则已实现", async () => {
     const calibration = await adapter.runCalibration();
     expect(adapter.gapOf(calibration)).toMatchObject({ capability: "calibration", issue: "RAY-208" });
 
-    // 报告在 RAY-345 已接通：不存在会话时走错误/协议失败，而不是缺口。
-    const report = await adapter.reportFor({ id: "whatever" }).catch((caught) => caught);
-    expect(adapter.gapOf(report)).toBeNull();
+    // report 已实现（RAY-224 `basic-report`）：没有周期时它给的是一个**错误**
+    // 而不是缺口 —— 两者在契约上是不同的结局，这条断言把它们分开。
+    await expect(adapter.reportFor({ id: "whatever" })).rejects.toMatchObject({
+      name: "TerminalFailure",
+      code: "E-QLT-5003",
+    });
   });
 
   it("错误带着 sidecar 给的码与动作到达渲染端", async () => {

@@ -27,7 +27,14 @@ SYNC = {"determinate": True, "flagged": False}
 DIGEST = "a" * 64
 
 
-def dual_series(duration=6.0):
+#: 12 s 而不是 6 s。本文件测的是重算队列的语义（幂等、版本、状态机），不是步态质量 ——
+#: 但它要跑完整条链，而链末的分段筛选会剔掉每段首尾各一步。6 s 在旧的边缘细化路径下
+#: 恰好剩 4 个周期，**余量为零**；RAY-351 把产品链路切到支撑相区间之后每个数据段少一个
+#: 周期（网格只铺在首末摆动峰之间），4 就变成 3，`trim=1` 一剔就报"把所有步都剔掉了"。
+#:
+#: 加长而不是放宽 `trim`：被测的东西与周期数无关，而一个刚好卡在边界上的夹具会在任何
+#: 与周期数有关的改动上失败，且失败信息指向的是链而不是本文件真正在测的东西。
+def dual_series(duration=12.0):
     pair = generate_dual_walk(
         WalkSpec(duration_s=duration),
         noise=NoiseModel(accel_density=1.5e-3, gyro_density=3.0e-4, seed=3),
