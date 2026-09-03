@@ -10,10 +10,10 @@
  *
  * ## 未实现不是错误，也不是成功
  *
- * `runCalibration` / `reportFor` / `lookupSubject` 在缺口未接通时**返回**一个带
- * `unimplemented` 的值，而不是 throw。throw 会让界面显示一个查无此事的故障；返回
- * 占位数据则是拿假结果冒充真结果。返回一个显式的缺口，界面就必须把它画出来 ——
- * 这正是本 scope 要的：诚实地断在半路，而不是看起来走完了。
+ * `runCalibration` / `lookupSubject` 在缺口未接通时**返回**一个带 `unimplemented`
+ * 的值，而不是 throw。throw 会让界面显示一个查无此事的故障；返回占位数据则是拿假
+ * 结果冒充真结果。返回一个显式的缺口，界面就必须把它画出来 —— 这正是本 scope 要的：
+ * 诚实地断在半路，而不是看起来走完了。`reportFor` 在 RAY-345 已接通，不再返回缺口。
  */
 import {
   STATUS_OK,
@@ -100,8 +100,12 @@ export function createSidecarAdapter(transport, { now = () => Date.now() / 1000 
 
     // 显式缺口
     runCalibration: () => call("runCalibration"),
-    reportFor: () => call("reportFor"),
     lookupSubject: (enteredId) => call("lookupSubject", { enteredId }),
+
+    // RAY-345：报告已接通。record 来自 listRecords（含 id=sessionId）；缺省时
+    // sidecar 用当前会话（startSession 之后）。swapped 是佩戴确认里的一键对调。
+    reportFor: (record) =>
+      call("reportFor", { sessionId: record?.id, swapped: record?.swapped ?? false }),
   };
 }
 

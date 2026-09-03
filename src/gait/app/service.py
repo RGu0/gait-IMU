@@ -480,11 +480,12 @@ class TerminalService:
                 ),
                 action="请确认通道长度与转身标志位置，然后重新检测。",
             ).snapshot()
-        # 报告是另一件事：会话有效不等于报告已生成。
+        # 报告是另一件事：会话有效不等于报告已生成。这里只声明「可生成」——
+        # 真正的报告由 `reportFor` 生成（RAY-224 basic-report 已接通，不再是缺口）。
+        # 会话级无效则不生成报告（PRD §13），状态让渲染端直接走「未通过 + 重测」。
         result["report"] = {
-            "status": protocol.STATUS_UNIMPLEMENTED,
-            "capability": "report",
-            "issue": "RAY-224",
+            "status": "invalid" if verdict.overall == VERDICT_INVALID else "ready",
+            "sessionId": self.session_id,
         }
         return result
 
