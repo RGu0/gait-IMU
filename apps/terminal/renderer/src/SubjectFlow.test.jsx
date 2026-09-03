@@ -48,9 +48,7 @@ function adapterWith(overrides = {}) {
 
 async function signIn(adapter) {
   render(<TerminalApp adapter={adapter} />);
-  fireEvent.change(screen.getByLabelText("机构账号"), { target: { value: "community-kangjian" } });
-  fireEvent.change(screen.getByLabelText("登录密码"), { target: { value: "secret" } });
-  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  // 最小 MVP 无登录（P-00 暂不考虑）：冷启动直接进工作台，点「开始新的检测」。
   fireEvent.click(await screen.findByRole("button", { name: "开始新的检测" }));
   return screen.findByRole("heading", { name: "受试者识别" });
 }

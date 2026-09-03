@@ -332,6 +332,11 @@ export const mockTerminalAdapter = Object.freeze({
     return () => clearInterval(id);
   },
 
+  // 真实后端在判定前会 stopSession 落盘；mock 没有真会话，这里是个诚实的空操作。
+  async stopSession() {
+    return { state: "stopped" };
+  },
+
   async sessionResult() {
     return VALID_RESULT;
   },

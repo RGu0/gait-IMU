@@ -10,7 +10,6 @@ import { describe, expect, it, vi } from "vitest";
 import { CalibrationScreen } from "./CalibrationScreen.jsx";
 import { CapabilityGap } from "./CapabilityGap.jsx";
 import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
-import { TerminalApp } from "./TerminalApp.jsx";
 import { selectAdapter } from "./main.jsx";
 import { mockTerminalAdapter } from "./mockTerminalAdapter.js";
 
@@ -90,29 +89,9 @@ const REAL_RESULT = {
     reasons: ["wearing_unknown"],
   },
   integrity: { complete: true, problems: [] },
-  report: { status: "unimplemented", capability: "report", issue: "RAY-224" },
 };
 
-describe("P-09 基础报告尚未接通", () => {
-  it("显示真实的会话判定，同时说明为什么没有报告", () => {
-    // TerminalApp 在这一步就是这个组合：真实判定当 details，报告缺口当主体。
-    render(
-      <CapabilityGap
-        gap={{
-          capability: REAL_RESULT.report.capability,
-          issue: REAL_RESULT.report.issue,
-          summary: "本地基础报告尚未实现，因此这次检测没有生成报告。",
-        }}
-        step={6}
-        details={<SessionVerdictSummary result={REAL_RESULT} />}
-        onBack={vi.fn()}
-      />,
-    );
-    expect(screen.getByText("本次会话尚不能判定")).toBeInTheDocument();
-    expect(screen.getByText(/RAY-224/)).toBeInTheDocument();
-    expect(screen.getByText(/没有生成报告/)).toBeInTheDocument();
-  });
-
+describe("P-09 会话判定三态（SessionVerdictSummary）", () => {
   it("三态判定里「评不了」不显示成「无效」", () => {
     // RAY-260：左右戴反位置法不可判定，v1.4 改为 P-06 手工裁定。把「评不了」
     // 画成「无效」会让操作员去重测一场其实没问题的检测。
@@ -151,26 +130,6 @@ describe("尚无 Issue 认领的缺口", () => {
       />,
     );
     expect(screen.getByText("尚无 Issue 认领这个缺口")).toBeInTheDocument();
-  });
-});
-
-describe("P-00 登录尚未接通", () => {
-  it("不静默穿过：登录返回缺口时停在缺口屏，不进工作台", async () => {
-    // adapter.login 返回缺口而不是抛错，所以「不接住」的后果不是报错，
-    // 是直接进入工作台 —— 一个没有登录过的工作台。
-    const adapter = {
-      ...mockTerminalAdapter,
-      login: async () => ({
-        unimplemented: { capability: "operator-auth", issue: null, summary: "登录没有后端" },
-      }),
-    };
-    render(<TerminalApp adapter={adapter} />);
-    fireEvent.change(screen.getByLabelText("机构账号"), { target: { value: "康健" } });
-    fireEvent.change(screen.getByLabelText("登录密码"), { target: { value: "x" } });
-    fireEvent.click(screen.getByRole("button", { name: "登录" }));
-
-    expect(await screen.findByText("本步骤尚未接通")).toBeInTheDocument();
-    expect(screen.queryByText("开始新的检测")).toBeNull();
   });
 });
 

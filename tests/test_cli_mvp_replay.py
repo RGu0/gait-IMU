@@ -5,6 +5,7 @@
 它是 Issue 验收第二条的可执行版。
 """
 
+import json
 import struct
 
 import numpy as np
@@ -98,3 +99,26 @@ def test_replay_produces_html_and_json(tmp_path):
     for heading in ("步态检测报告", "核心指标", "左右对比", "测试条件", "报告编号"):
         assert heading in markup
     assert "NaN" not in markup and "Infinity" not in markup
+
+
+def test_service_report_for_returns_a_real_report(tmp_path):
+    """P-10 由 reportFor 真实生成报告（RAY-345 验收 #5 的 service 半边）。
+
+    `reportFor({sessionId})` 是「检测记录」打开历史报告时走的路径：从会话目录读
+    meta + 双足录制 → 基础链 → report dict。这里验证它不再是缺口，而是真报告。
+    """
+    from gait.app.service import TerminalService
+
+    session_id = _make_session(tmp_path)
+    service = TerminalService(session_root=tmp_path)
+    report = service.handle(
+        {"id": "r", "method": "reportFor", "params": {"sessionId": session_id}}
+    )["result"]
+
+    assert report["reportId"]
+    assert report["algoVersion"] == "basic-1.0.0"
+    assert report["protocolVersion"].startswith("T-01")
+    assert report["summary"]
+    for key in ("summary", "advice", "metrics", "comparison", "parameters", "timeline", "conditions"):
+        assert key in report
+    assert "NaN" not in json.dumps(report) and "Infinity" not in json.dumps(report)

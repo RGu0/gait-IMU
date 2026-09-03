@@ -29,19 +29,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
+from gait.cloud.chain import run_basic_chain
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, SessionMeta
 from gait.device.capture import SessionCapture
+from gait.device.footseries import load_session_foot
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
     LinkOutcome,
@@ -65,6 +68,7 @@ from gait.protocolflow.timed_walk import (
     VERDICT_INVALID,
     TimedWalk,
 )
+from gait.report.assemble import assemble_report
 
 _SIDES = {"L": "左", "R": "右"}
 
@@ -74,6 +78,17 @@ _SIDES = {"L": "左", "R": "右"}
 MIN_ARRIVAL_RATE = 0.95
 
 MIN_DISK_FREE_BYTES = 2 * 1024**3
+
+#: MVP 基础报告的同步质量占位（RAY-345）。双支撑期等跨足指标要求 `sync_quality`
+#: 非空；真实同步质量待 RAY-209/213，这里与 CLI 路径共用同一份占位。
+MVP_SYNC_QUALITY: Final[dict[str, Any]] = {"determinate": True, "flagged": False}
+
+
+def _swapped_foot(label: str, swapped: bool) -> str:
+    """左右对调后，某只脚的数据应当从哪一侧的录制里读。"""
+    if not swapped:
+        return label
+    return "R" if label == "L" else "L"
 
 
 class TerminalService:
@@ -433,11 +448,12 @@ class TerminalService:
                 ),
                 action="请确认通道长度与转身标志位置，然后重新检测。",
             ).snapshot()
-        # 报告是另一件事：会话有效不等于报告已生成。
+        # 报告是另一件事：会话有效不等于报告已生成。这里只声明「可生成」——
+        # 真正的报告由 `reportFor` 从会话目录重算（RAY-345 已接通，不再是缺口）。
+        # 会话级无效则不生成报告（PRD §13），状态让渲染端直接走「未通过 + 重测」。
         result["report"] = {
-            "status": protocol.STATUS_UNIMPLEMENTED,
-            "capability": "report",
-            "issue": "RAY-224",
+            "status": "invalid" if verdict.overall == VERDICT_INVALID else "ready",
+            "sessionId": self.session_id,
         }
         return result
 
@@ -472,8 +488,42 @@ class TerminalService:
     def _do_runCalibration(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("calibration")
 
-    def _do_reportFor(self, _: dict[str, Any]) -> Any:
-        return _Unimplemented("report")
+    def _do_reportFor(self, params: dict[str, Any]) -> Any:
+        """P-10 报告：从会话目录生成基础报告（RAY-345，接通原 RAY-224 缺口）。
+
+        参数 `sessionId` 缺省时用当前会话（`startSession` 之后）；从「检测记录」打开
+        历史报告时由调用方显式给出。`swapped` 表示操作员在佩戴确认时执行过一键对调。
+        """
+        session_id = params.get("sessionId") or self.session_id
+        if session_id is None:
+            raise protocol.ProtocolError("没有可生成报告的会话")
+        return self._report_for_session(
+            session_id, swapped=bool(params.get("swapped", False))
+        )
+
+    def _report_for_session(
+        self, session_id: str, *, swapped: bool = False
+    ) -> dict[str, Any]:
+        """读 meta + 双足 `FootSeries` → 基础链 → report dict。
+
+        报告生成在同步入口里做一次 `asyncio.run`：回放解析是 async 的，但这里是
+        一次性离线重算，不在采集热路径上，短暂阻塞可接受（FR-05 只管主线程，不涉及
+        这个离线重算点）。用了固定坐标系重排与占位同步质量 —— 见 RAY-345 降范围。
+        """
+        if self.session_root is None:
+            raise protocol.ProtocolError("未配置会话根目录，无法生成报告")
+        meta = read_meta(session_directory(self.session_root, session_id))
+        seconds = int(meta.protocol_config.get("duration_s", self.config.duration_s))
+        feet: dict[str, Any] = {}
+        for label in ("L", "R"):
+            source = _swapped_foot(label, swapped)
+            feet[label] = asyncio.run(
+                load_session_foot(self.session_root, session_id, source)
+            )
+        chain = run_basic_chain(
+            feet, sync_quality=MVP_SYNC_QUALITY, protocol_seconds=seconds
+        )
+        return assemble_report(chain, meta)
 
     def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("subject-directory")

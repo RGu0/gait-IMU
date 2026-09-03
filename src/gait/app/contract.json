@@ -85,9 +85,9 @@
       "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未实现；gait/calib/ 目前是空包"
     },
     "report": {
-      "implemented": false,
+      "implemented": true,
       "issue": "RAY-224",
-      "summary": "本地基础报告尚未实现；gait/report/ 目前是空包"
+      "summary": "本地基础报告已接通（RAY-345 最小切法）：reportFor 从会话目录重算基础链产出 report；PDF 导出仍属 RAY-224，未实现"
     },
     "subject-directory": {
       "implemented": false,

@@ -111,12 +111,13 @@ describe("真实 sidecar 往返（不经 mock）", () => {
     expect(result.overall).toBe("indeterminate");
   });
 
-  it("标定与报告以缺口出境，adapter 不把它们当结果", async () => {
+  it("标定以缺口出境；报告已接通，不再以缺口出境", async () => {
     const calibration = await adapter.runCalibration();
     expect(adapter.gapOf(calibration)).toMatchObject({ capability: "calibration", issue: "RAY-208" });
 
-    const report = await adapter.reportFor({ id: "whatever" });
-    expect(adapter.gapOf(report)).toMatchObject({ capability: "report", issue: "RAY-224" });
+    // 报告在 RAY-345 已接通：不存在会话时走错误/协议失败，而不是缺口。
+    const report = await adapter.reportFor({ id: "whatever" }).catch((caught) => caught);
+    expect(adapter.gapOf(report)).toBeNull();
   });
 
   it("错误带着 sidecar 给的码与动作到达渲染端", async () => {

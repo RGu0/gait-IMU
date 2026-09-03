@@ -49,7 +49,7 @@ def test_every_response_carries_the_version() -> None:
     for message in (
         protocol.ok("1", {"a": 1}),
         protocol.error("2", TerminalError("E-BLE-1001", "未连接。", "请重连。")),
-        protocol.unimplemented("3", "report"),
+        protocol.unimplemented("3", "calibration"),
         protocol.event("session.tick", 1, {"remainingSeconds": 3}),
     ):
         assert message["v"] == protocol.IPC_CONTRACT_VERSION
@@ -283,13 +283,24 @@ def test_session_integrity_is_accounted_separately_from_validity() -> None:
     assert any("断连" in problem for problem in result["integrity"]["problems"])
 
 
-def test_session_result_never_pretends_a_report_exists() -> None:
+def test_session_result_declares_report_ready_when_session_is_valid() -> None:
+    """RAY-345：报告已接通。有效会话的判定声明「可生成」，而不是缺口。"""
     service = _finished_session()
     result = service.handle(
         {"id": "r", "method": "sessionResult", "params": {"wearing": "pass"}}
     )["result"]
-    assert result["report"]["status"] == protocol.STATUS_UNIMPLEMENTED
-    assert result["report"]["issue"] == "RAY-224"
+    assert result["report"]["status"] == "ready"
+    assert result["report"]["sessionId"] == service.session_id
+
+
+def test_session_result_declares_report_invalid_when_session_is_invalid() -> None:
+    """会话级无效不生成报告（PRD §13）：判定里声明 report 不可生成。"""
+    service = _finished_session(stop_at=30.0)
+    result = service.handle(
+        {"id": "r", "method": "sessionResult", "params": {"wearing": "pass"}}
+    )["result"]
+    assert result["overall"] == "invalid"
+    assert result["report"]["status"] == "invalid"
 
 
 def test_every_capability_declares_who_owns_it() -> None:
@@ -346,7 +357,6 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
     ("method", "capability", "issue"),
     [
         ("runCalibration", "calibration", "RAY-208"),
-        ("reportFor", "report", "RAY-224"),
         ("lookupSubject", "subject-directory", "RAY-322"),
         ("login", "operator-auth", "RAY-323"),
     ],
@@ -354,7 +364,7 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
 def test_gaps_are_visible_not_faked(
     method: str, capability: str, issue: str | None
 ) -> None:
-    """本 scope 的三个缺口都必须以第三种结局出境。
+    """本 scope 剩下的缺口都必须以第三种结局出境（report 已在 RAY-345 接通）。
 
     返回一个看起来正常的假值会让「流程已端到端验证」变成一句空话 —— 那正是这条
     测试要挡住的事。

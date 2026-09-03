@@ -48,8 +48,8 @@ describe("接管发生在所有其他屏之前", () => {
       <TerminalApp adapter={mockTerminalAdapter} lifecycle={lifecycleAt("unavailable", DOWN)} />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent("采集服务连续 3 次未能启动");
-    // 登录屏的东西不该同时在场
-    expect(screen.queryByLabelText("机构账号")).toBeNull();
+    // 工作台的东西不该同时在场
+    expect(screen.queryByRole("heading", { name: "工作台" })).toBeNull();
   });
 
   it("重启中同样接管 —— 此刻点什么都只会再失败一次", () => {
@@ -62,16 +62,16 @@ describe("接管发生在所有其他屏之前", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("正在自动重新启动");
   });
 
-  it("ready 时不接管", () => {
+  it("ready 时不接管", async () => {
     render(<TerminalApp adapter={mockTerminalAdapter} lifecycle={lifecycleAt("ready")} />);
-    expect(screen.getByLabelText("机构账号")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "工作台" })).toBeVisible();
   });
 
-  it("没有 lifecycle（mock 路径）时不接管", () => {
+  it("没有 lifecycle（mock 路径）时不接管", async () => {
     // 走 mock 时没有进程可看护。给它造一个永远 ready 的假生命周期，
     // 等于让「进程健康」这件事在没有进程时也报告通过。
     render(<TerminalApp adapter={mockTerminalAdapter} />);
-    expect(screen.getByLabelText("机构账号")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "工作台" })).toBeVisible();
   });
 });
 
