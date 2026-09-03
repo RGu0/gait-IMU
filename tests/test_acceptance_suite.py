@@ -37,7 +37,7 @@ MODULES = sorted(
 
 def test_the_suite_is_not_empty():
     """空的套件会让下面每一条参数化测试都变成零次调用 —— 全绿，而且什么也没测。"""
-    assert len(MODULES) >= 11
+    assert len(MODULES) >= 12
 
 
 @pytest.mark.parametrize("name", MODULES)
