@@ -19,11 +19,14 @@ RAY-230（PRD v1.2 §17.1 V1）的三条判据：
 ## 判据只有一处家
 
 三条判据写在 `STRAIGHT_LINE_MAX_ERROR`、`CLOSED_LOOP_MAX_ERROR` 与
-`CONSISTENCY_REPORTING_ONLY`，各自的 `verdict` 是它们唯一的执行点；判据一另有一条
-场地约束 `STRAIGHT_LINE_MIN_DISTANCE_M`，执行点在 `TrialGeometry.__post_init__`。判据**开跑前
+`CONSISTENCY_REPORTING_ONLY`，各自的 `verdict` 是它们唯一的执行点。判据**开跑前
 定死、跑完不得修改**（《06 测试与验证方案》§5 的冻结声明，照 `v3prime.py` 的
 `NEGLIGIBLE_*` 先例）—— 写成具名常量而不是散在判断里，是为了让"有没有人在跑完
 之后动过判据"这件事在 git 历史里一眼可查。
+
+判据一还有第二条约束：场地下限 `STRAIGHT_LINE_MIN_DISTANCE_M`（需求修订 R3）。
+它的执行点不在 `verdict` 而在 `TrialGeometry.__post_init__` —— 因为它约束的是
+**这一趟算不算数**，不是**这一趟过没过**。太短的道在构造处就被拒收，进不到判定里。
 
 ## 空样本返回 None，不返回"合格"
 
