@@ -21,10 +21,10 @@
 
 ## 「散不散」只提示，不拦
 
-采集时会告诉操作员这个姿态与之前的接近程度，但那是**建议**。真正的判据是解算时的
-雅可比条件数 —— 它直接回答「这九个参数可不可辨」，而两两夹角只是它的一个粗糙代理。
-在采集端再设一道夹角闸，就会与解算端的条件数形成两处判据，而两处判据迟早对不上
-（`calib.still` 与 `calib.accel` 都因为这条删过闸）。
+采集时会告诉操作员这个姿态与之前的接近程度，但那是**建议**。判据在解算端（姿态数
+下限 + 雅可比条件数，两道互补的闸，见 `calib/accel.py`）。在采集端再设一道夹角闸，
+就会与解算端形成两处判据，而两处判据迟早对不上（`calib.still` 与 `calib.accel` 都
+因为这条删过闸）。
 
 ## 采集与解算分开，是因为采集跑不到解算里
 
@@ -55,6 +55,7 @@ from gait.calib.accel import (
     MIN_ORIENTATIONS,
     STANDARD_GRAVITY,
     OrientationObservation,
+    observability,
     observe_orientation,
     solve_orientations,
 )
@@ -83,6 +84,10 @@ STALL_TIMEOUT_SECONDS: float = 3.0
 
 #: 提示「这个姿态和之前某个很接近」的夹角。**只提示不拦**，见模块文档。
 CLOSE_HINT_DEG: float = 12.0
+
+#: 采集上限。达标就停，但得有个尽头 —— 若因为某种原因永远达不到标，
+#: 不该让操作员无限摆下去，而该告诉他出了什么事。
+MAX_ORIENTATIONS: int = 50
 
 
 def _echo(message: str) -> None:
@@ -171,14 +176,23 @@ async def _capture(args: argparse.Namespace) -> int:
     device, mac = await _connect(args.mac, args.scan_timeout)
 
     collected: list[OrientationObservation] = []
-    target = max(args.count, MIN_ORIENTATIONS)
+    floor = max(args.count, MIN_ORIENTATIONS)
+    status = None
     try:
         _echo("")
-        _echo(f"要采 {target} 个姿态。每次把模块换一个**任意**稳定姿态（平放、侧立、")
-        _echo("靠着书斜放都行），放稳、手离开，再按回车。不需要对准任何轴。")
-        while len(collected) < target:
+        _echo(f"至少 {floor} 个姿态，够了就停 —— 工装会边采边算，达标时告诉你。")
+        _echo("每次把模块换一个**任意**稳定姿态（平放、侧立、靠着书斜放都行），")
+        _echo("放稳、手离开，再按回车。不需要对准任何轴。")
+        while True:
+            if status is not None and status.sufficient and len(collected) >= floor:
+                break
+            if len(collected) >= MAX_ORIENTATIONS:
+                _echo("")
+                _echo(f"⚠ 已采 {len(collected)} 个仍未达标（{status.advice if status else ''}）。")
+                _echo("  先停下来，用 solve 看看是哪一项卡住。")
+                break
             _echo("")
-            _echo(f"[{len(collected) + 1}/{target}] 换一个姿态，放稳")
+            _echo(f"[{len(collected) + 1}] 换一个姿态，放稳")
             input("    好了按回车（Ctrl-C 中止）…")
 
             try:
@@ -209,6 +223,14 @@ async def _capture(args: argparse.Namespace) -> int:
             )
             np.save(out / f"orientation_{len(collected):02d}.npy", acc)
             collected.append(observation)
+
+            status = observability(collected)
+            if np.isfinite(status.bias_sigma_mg):
+                _echo(
+                    f"      预测精度：零偏 ±{status.bias_sigma_mg:.2f} mg，"
+                    f"交叉轴 ±{status.cross_sigma_ppt:.2f} ‰"
+                )
+            _echo(f"      {status.advice}")
     finally:
         problem = await close_quietly(device)
         if problem:
@@ -222,6 +244,7 @@ async def _capture(args: argparse.Namespace) -> int:
                 "captured_at": datetime.now(UTC).isoformat(),
                 "seconds_per_orientation": args.seconds,
                 "orientations": len(collected),
+                "sufficient": bool(status.sufficient) if status else False,
             },
             ensure_ascii=False,
             indent=2,
@@ -229,7 +252,13 @@ async def _capture(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     _echo("")
-    _echo(f"{len(collected)} 个姿态都采到了，落在 {out}")
+    if status is not None and status.sufficient:
+        _echo(
+            f"{len(collected)} 个姿态达标（零偏 ±{status.bias_sigma_mg:.2f} mg，"
+            f"交叉轴 ±{status.cross_sigma_ppt:.2f} ‰），落在 {out}"
+        )
+    else:
+        _echo(f"{len(collected)} 个姿态（**未达标**）落在 {out}")
     _echo(f"接着跑：python -m gait.cli.accelcal solve --dir {out}")
     return 0
 

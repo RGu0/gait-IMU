@@ -17,13 +17,17 @@ import numpy as np
 import pytest
 
 from gait.calib.accel import (
+    DEFAULT_SIGMA_MG,
     MILLI_G,
     MIN_ORIENTATIONS,
     MIN_SAMPLES_PER_ORIENTATION,
     PARAMETER_COUNT,
     STANDARD_GRAVITY,
+    TARGET_BIAS_SIGMA_MG,
+    TARGET_CROSS_SIGMA_PPT,
     AccelCalibration,
     OrientationObservation,
+    observability,
     observe_orientation,
     solve_orientations,
 )
@@ -297,3 +301,104 @@ def test_parameter_count_matches_the_symmetric_model():
     """9 = 对称 A 的 6 个独立分量 + c 的 3 个。改了模型却忘了改这个常数，
     姿态数下限的理由就与实现脱节了。"""
     assert PARAMETER_COUNT == 9
+
+
+# --- 自适应引导：边采边判「够了没有」 -------------------------------------------
+
+
+def flat_only(count: int = 22) -> list[OrientationObservation]:
+    """只平放：姿态全落在六个轴向附近。这是最容易出现的坏采集。"""
+    rng = np.random.default_rng(0)
+    axes = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+    out = []
+    for index in range(count):
+        direction = np.array(axes[index % 6], dtype=float) + rng.normal(scale=0.04, size=3)
+        direction /= np.linalg.norm(direction)
+        out.append(observe_orientation(synth(direction, seed=index)))
+    return out
+
+
+def test_observability_predicts_what_monte_carlo_measures():
+    """停止判据建立在 `σ²(JᵀJ)⁻¹` 上。它若与实际误差对不上，整条引导就是假的。
+
+    这里用一组姿态做小规模蒙特卡洛，断言预测的零偏不确定度与实测 RMS 误差同量级。
+    """
+    observations = observe_all(count=24)
+    predicted = observability(observations).bias_sigma_mg
+
+    rng = np.random.default_rng(5)
+    errors = []
+    for _ in range(60):
+        noisy = [
+            OrientationObservation(
+                mean=item.mean + rng.normal(0.0, DEFAULT_SIGMA_MG * MILLI_G, 3),
+                std=item.std,
+                samples=item.samples,
+            )
+            for item in observations
+        ]
+        errors.append(
+            float(np.linalg.norm(solve_orientations("x", noisy).bias - TRUE_BIAS) / MILLI_G)
+        )
+    measured = float(np.sqrt(np.mean(np.square(errors))))
+    assert 0.6 < measured / predicted < 1.7, (
+        f"预测 {predicted:.2f} mg 与实测 {measured:.2f} mg 差得太远，"
+        "这个数不能用来判「够了没有」"
+    )
+
+
+def test_flat_only_capture_is_not_called_sufficient():
+    """**只看零偏会漏掉一整类坏采集。**
+
+    22 个只平放的姿态零偏 σ 已经达标，但交叉轴 σ 差 5 倍。没有交叉轴那一条，工装会
+    对一个只会平放的操作员说「够了」，而那正是 R2 要避开的失效（六面法的 180‰ 是它
+    的极端版）。
+    """
+    status = observability(flat_only())
+    assert status.bias_sigma_mg <= TARGET_BIAS_SIGMA_MG, "前提变了：零偏本来是达标的"
+    assert status.cross_sigma_ppt > TARGET_CROSS_SIGMA_PPT
+    assert not status.sufficient
+    assert "斜着" in status.advice
+
+
+def test_following_the_advice_converges():
+    """**引导有没有用，判据是它收不收敛。**
+
+    上一条的反面：`sufficient` 恒为 False 也能让上一条通过，而那样的工装会让操作员
+    永远摆下去。这条模拟一个照着建议做的操作员 —— 只要建议说「斜着放」就补一个斜
+    姿态 —— 并要求在有限步内达标。
+
+    步数也断言了上界：一条把人往错方向指的建议同样会收敛，只是要摆很多个。
+    """
+    rng = np.random.default_rng(1)
+    observations = flat_only()
+    assert not observability(observations).sufficient
+
+    added = 0
+    while added < 30:
+        status = observability(observations)
+        if status.sufficient:
+            break
+        assert "斜着" in status.advice, f"建议变成了别的：{status.advice}"
+        direction = np.array([1.0, 1.0, 0.3]) + rng.normal(scale=0.5, size=3)
+        direction /= np.linalg.norm(direction)
+        observations.append(observe_orientation(synth(direction, seed=100 + added)))
+        added += 1
+
+    status = observability(observations)
+    assert status.sufficient, f"照着建议补了 {added} 个仍未达标"
+    assert status.cross_sigma_ppt <= TARGET_CROSS_SIGMA_PPT
+    assert added <= 15, f"照着建议要补 {added} 个才达标，引导得太差"
+
+
+def test_a_good_spread_capture_is_sufficient_at_the_floor():
+    """方向分散时，到姿态数下限就该达标 —— 否则引导会白白拖长流程。"""
+    status = observability(observe_all(count=MIN_ORIENTATIONS))
+    assert status.sufficient
+
+
+def test_observability_refuses_to_guess_below_the_parameter_count():
+    """姿态数少于参数个数时 `(JᵀJ)⁻¹` 没有意义，不该报一个看起来正常的 σ。"""
+    status = observability(observe_all(count=24)[:6])
+    assert not status.sufficient
+    assert not np.isfinite(status.bias_sigma_mg)

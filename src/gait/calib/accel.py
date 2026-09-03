@@ -52,8 +52,17 @@ R1 的原方案是六面法 —— 摆六个轴向面，假设每个面的真值
 | 6 个轴向面 | 6.35 mg | 102.6 ‰（不可用） |
 | 26 个分散姿态 | 0.00 mg | 1.35 ‰（即那个看不见的反对称部分） |
 
-「够散」由**高斯牛顿雅可比的条件数**判定，而不是数姿态个数：二十个几乎相同的姿态，
-个数达标而信息量不达标，且不报错。条件数直接量的就是这九个参数可不可辨。
+姿态数下限与条件数是**两道互补的闸，缺一不可**，这一点容易想当然：
+
+* **条件数**抓「姿态挤成一团」：二十个几乎相同的姿态个数达标而信息量不达标，条件数
+  会到 1e9 量级。
+* **姿态数**抓「个数不足」，而这一条**条件数抓不到**。实测：六个轴向面的雅可比条件数
+  只有 **12.7**，稳稳落在上限之内 —— 因为 6 个观测解 9 个参数是欠定的，`cond` 对一个
+  6×9 矩阵只看得到 6 个奇异值，那三个**完全没有被约束**的方向根本不在它的视野里。
+  也就是说，若只留条件数这一道闸，R1 的六面法会畅通无阻地通过，而它的矩阵误差是
+  180‰。
+
+先卡个数，才让条件数变得有意义（n > 参数个数之后 `cond` 才反映真实可辨性）。
 
 ## 为什么必须有留一交叉验证
 
@@ -122,6 +131,27 @@ MAX_MAGNITUDE_DEVIATION: Final[float] = 0.10
 #
 # `calib.still` 因为同一个理由删过一道重复的闸：同一件事有两处判据，它们迟早对不上。
 
+#: 每个姿态的有效误差，mg。**实测值**：真机 24 姿态的残差 0.54 mg，按 n/(n-k) 修正
+#: 得 0.68 mg。
+#:
+#: 注意它**不是白噪声**：姿态内标准差 0.0086 m/s²，600 个样本取均值后只有 0.036 mg ——
+#: 相差 19 倍。主导误差是器件本身的非线性/滞后，所以**每个姿态多静置一会儿没有用**，
+#: 只有增加姿态数才有用。这条直接决定了采集流程的形状。
+DEFAULT_SIGMA_MG: Final[float] = 0.68
+
+#: 预测零偏不确定度的目标，mg。达到它就可以停止采集。取 1.0 是因为验收要 2~5 mg，
+#: 留一倍余量给「预测」与「实际」之间的偏差（实测两者相差 0~6%）。
+TARGET_BIAS_SIGMA_MG: Final[float] = 1.0
+
+#: 预测交叉轴不确定度的目标，千分比。
+#:
+#: **必须与零偏目标并列，只看零偏会漏掉一整类坏采集**：实测 22 个「只平放」的姿态，
+#: 零偏 σ 有 0.49 mg（达标），交叉轴 σ 却有 5.97 ‰ —— 补 6 个斜姿态后降到 1.21 ‰。
+#: 也就是说只看零偏的话，工装会对一个只会平放的操作员说「够了」，而 6 ‰ 的交叉耦合
+#: 在 1 g 下就是 6 mg，比整个零偏预算还大。足部模块在步态里会经历各种朝向，交叉轴项
+#: 定不准就直接进数据 —— 这正是 R2 要避开的那类失效，六面法的 180 ‰ 只是它的极端版。
+TARGET_CROSS_SIGMA_PPT: Final[float] = 2.0
+
 #: 雅可比条件数上限。分散良好时实测 15~22；显著高于它说明姿态挤在一起，
 #: 此时解对噪声极度敏感 —— **而它不会报错，只会给出一组很离谱的参数**。
 MAX_CONDITION_NUMBER: Final[float] = 60.0
@@ -144,8 +174,12 @@ __all__ = [
     "MIN_SAMPLES_PER_ORIENTATION",
     "PARAMETER_COUNT",
     "STANDARD_GRAVITY",
+    "TARGET_BIAS_SIGMA_MG",
+    "TARGET_CROSS_SIGMA_PPT",
     "AccelCalibration",
+    "Observability",
     "OrientationObservation",
+    "observability",
     "observe_orientation",
     "solve_orientations",
 ]
@@ -418,4 +452,110 @@ def solve_orientations(
         loo_mg=loo,
         condition_number=condition,
         orientations=observations,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Observability:
+    """当前这批姿态把九个参数定到了什么程度。
+
+    供采集工装**边采边判**：达标就停，不达标就告诉操作员还缺什么。没有它，采集端只能
+    数个数，而「二十个姿态」既可能绰绰有余、也可能远远不够，取决于摆得散不散 ——
+    实测随机 24 姿态在不同运气下零偏误差在 0.43~1.10 mg 之间，相差 2.6 倍。
+    """
+
+    count: int
+    condition_number: float
+    #: 预测的零偏不确定度，mg。由 `σ²(JᵀJ)⁻¹` 的零偏块算出。
+    bias_sigma_mg: float
+    #: 预测的交叉轴项不确定度，千分比。
+    cross_sigma_ppt: float
+    sufficient: bool
+    advice: str
+
+
+def observability(
+    observations: list[OrientationObservation] | tuple[OrientationObservation, ...],
+    *,
+    sigma_mg: float = DEFAULT_SIGMA_MG,
+) -> Observability:
+    """从已采到的姿态预测标定精度，并给出下一步建议。
+
+    `σ²(JᵀJ)⁻¹` 是最小二乘的标准协方差近似。它在这里**可信**，不是纸上推导 ——
+    与蒙特卡洛实测对照过六组姿态集，预测与实测相差 0~6%（见 scope 证据）。
+
+    停止判据取四条并列：姿态数够（让条件数有意义）、条件数够低、预测**零偏**不确定度
+    达标、预测**交叉轴**不确定度达标。后两条才是真正想要的东西，前两条是让它们算得
+    出来、算得准的前提。
+
+    零偏与交叉轴必须**分开判**：只看零偏时，一批「只平放」的姿态会被判为够了，而它的
+    交叉轴项其实差得远（见 `TARGET_CROSS_SIGMA_PPT` 的实测数据）。
+    """
+    observations = tuple(observations)
+    count = len(observations)
+    if count < PARAMETER_COUNT:
+        return Observability(
+            count=count,
+            condition_number=float("inf"),
+            bias_sigma_mg=float("inf"),
+            cross_sigma_ppt=float("inf"),
+            sufficient=False,
+            advice=f"还差 {PARAMETER_COUNT - count} 个姿态才够解出参数，继续采。",
+        )
+
+    measured = np.array([item.mean for item in observations], dtype=np.float64)
+    try:
+        _matrix, _offset, jacobian = _fit(measured)
+    except CalibrationError:
+        return Observability(
+            count=count,
+            condition_number=float("inf"),
+            bias_sigma_mg=float("inf"),
+            cross_sigma_ppt=float("inf"),
+            sufficient=False,
+            advice="这批姿态还解不出来，换个方向再采几个。",
+        )
+
+    condition = float(np.linalg.cond(jacobian))
+    sigma = sigma_mg * MILLI_G
+    try:
+        covariance = np.linalg.inv(jacobian.T @ jacobian) * sigma**2
+    except np.linalg.LinAlgError:
+        covariance = np.full((PARAMETER_COUNT, PARAMETER_COUNT), np.inf)
+
+    bias_sigma = float(np.sqrt(np.trace(covariance[6:, 6:])) / MILLI_G)
+    # 交叉轴项是参数向量的第 4~6 个（`_SYMMETRIC_INDEX` 的后三个）。
+    cross_sigma = float(np.sqrt(np.trace(covariance[3:6, 3:6])) * 1000.0)
+
+    sufficient = (
+        count >= MIN_ORIENTATIONS
+        and condition <= MAX_CONDITION_NUMBER
+        and bias_sigma <= TARGET_BIAS_SIGMA_MG
+        and cross_sigma <= TARGET_CROSS_SIGMA_PPT
+    )
+
+    if sufficient:
+        advice = "够了，可以停。"
+    elif count < MIN_ORIENTATIONS:
+        advice = f"继续采，至少还要 {MIN_ORIENTATIONS - count} 个。"
+    else:
+        # 交叉轴项的不确定度相对最大时，缺的是**倾斜**姿态 —— 轴向姿态定不出它们
+        # （六个轴向面的矩阵误差 180‰ 就是这么来的）。
+        if cross_sigma > TARGET_CROSS_SIGMA_PPT:
+            advice = (
+                "把模块**斜着**放几个 —— 让两根轴同时分到重力（垫高一角、靠着书）。"
+                "只平放的话，交叉轴项定不出来。"
+            )
+        else:
+            coverage = np.abs(np.array([item.direction for item in observations])).sum(axis=0)
+            axis = "XYZ"[int(np.argmin(coverage))]
+            advice = f"多摆几个让 {axis} 轴方向受力的姿态 —— 目前那个方向的姿态最少。"
+
+    return Observability(
+        count=count,
+        condition_number=condition,
+        bias_sigma_mg=bias_sigma,
+        cross_sigma_ppt=cross_sigma,
+        sufficient=sufficient,
+        advice=advice,
     )
