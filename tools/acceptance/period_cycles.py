@@ -154,6 +154,11 @@ def main() -> int:
             f"{row['cycles']:>8d}{row['error_pct']:>+7.0f}%{row['control_cycles']:>12d}"
         )
 
+    if not rows:
+        # 采集目录给对了但一趟都没读出来 —— 说出来，别在 min() 上抛。
+        print("没有可用的趟次")
+        return report(rows, ["没有可用的趟次"], "周期数与速度档一致性", args.out)
+
     counts = [row["cycles"] for row in rows]
     control = [row["control_cycles"] for row in rows]
     print(

@@ -135,6 +135,11 @@ def judge(rows: list[dict]) -> list[str]:
     return failures
 
 
+def _number(value, spec: str = "{:+.3f}") -> str:
+    """`None` 打成破折号而不是让 `format` 抛异常。"""
+    return "—" if value is None else spec.format(value)
+
+
 def _span(rows: list[dict], path: str, key: str) -> str:
     values = [row[path][key] for row in rows if row[path][key] is not None]
     if not values:
@@ -155,13 +160,14 @@ def main() -> int:
     print(f"{'趟':22s}{'DS新':>9s}{'DS旧(对照)':>13s}{'同足':>6s}{'支撑%':>10s}{'区间数':>9s}")
     for row in rows:
         new, old = row["new"], row["old"]
-        pct = new["stance_pct"]
+        # 有一只脚没算出周期时 `ds_fraction` 是 `None`。judge 会把它记成不达标，
+        # **表格不能因此崩掉** —— 崩在格式化上就看不到是哪一格出的事了。
         print(
             f"{row['trial'] + '/' + row['walk']:22s}"
-            f"{new['ds_fraction']:>+9.3f}{old['ds_fraction']:>+13.3f}"
-            f"{new['same_foot']:>6d}"
-            f"{'/'.join(f'{v:.0f}' for v in pct):>10s}"
-            f"{'/'.join(str(v) for v in new['intervals']):>9s}"
+            f"{_number(new['ds_fraction']):>9s}{_number(old['ds_fraction']):>13s}"
+            f"{_number(new['same_foot'], '{:d}'):>6s}"
+            f"{'/'.join(f'{v:.0f}' for v in new['stance_pct']) or '—':>10s}"
+            f"{'/'.join(str(v) for v in new['intervals']) or '—':>9s}"
         )
 
     print(

@@ -21,6 +21,7 @@ import ast
 import importlib
 import pkgutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import acceptance
 import pytest
@@ -327,3 +328,33 @@ def test_selfcheck_contrast_trips_when_the_coarse_path_stops_being_near_minus_on
 
     failures = selfcheck_contrast.judge([_contrast_row(-0.2, -0.068, -0.925)])
     assert any("不一定是缺陷" in line for line in failures)
+
+
+@pytest.mark.parametrize(
+    "name,row",
+    [
+        ("stance_intervals", _interval_row(0.0, -0.9)),
+        ("selfcheck_contrast", _contrast_row(-1.0, -0.068, -0.925)),
+    ],
+)
+def test_a_degenerate_cell_does_not_crash_the_report(name, row, capsys):
+    """某一格算不出来时，表格要打成破折号，**不能崩在格式化上**。
+
+    judge 早就把 `None` 记成不达标了；崩在 `format` 上的后果是那条不达标根本印不
+    出来 —— 「崩了没人知道」正是本 Issue 在治的病，不该由这套脚本自己再犯一次。
+    """
+    module = importlib.import_module(f"acceptance.{name}")
+    empty = dict.fromkeys(("ds_fraction", "same_foot"))
+    for key in ("new", "old", "selfcheck", "refined", "control"):
+        if key in row:
+            row[key] = {**row[key], **empty}
+
+    args = SimpleNamespace(trials=[], out=None)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(module, "parse_args", lambda _: args)
+    monkey.setattr(module, "analyse", lambda *_: [row])
+    try:
+        module.main()
+    finally:
+        monkey.undo()
+    assert "—" in capsys.readouterr().out

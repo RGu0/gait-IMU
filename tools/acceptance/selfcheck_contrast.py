@@ -74,6 +74,15 @@ def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
     return rows
 
 
+def _number(value, spec: str = "{:+.3f}") -> str:
+    """`None` 打成破折号而不是让 `format` 抛异常。"""
+    return "—" if value is None else spec.format(value)
+
+
+def _gap(value: float | None, baseline: float) -> float | None:
+    return None if value is None else value - baseline
+
+
 def _worst(rows: list[dict], key: str) -> float | None:
     values = [row[key]["ds_fraction"] for row in rows if row[key]["ds_fraction"] is not None]
     return min(values) if values else None
@@ -128,12 +137,14 @@ def main() -> int:
 
     print(f"{'趟':22s}{'粗判':>9s}{'旧细化(对照)':>15s}{'现行':>9s}{'粗判同足':>10s}")
     for row in rows:
+        # 任何一条路径都可能在某一格算不出来（有一只脚没有周期）。judge 会把它记成
+        # 不达标，**表格不能因此崩掉**。
         print(
             f"{row['trial'] + '/' + row['walk']:22s}"
-            f"{row['selfcheck']['ds_fraction']:>+9.3f}"
-            f"{row['control']['ds_fraction']:>+15.3f}"
-            f"{row['refined']['ds_fraction']:>+9.3f}"
-            f"{row['selfcheck']['same_foot']:>10d}"
+            f"{_number(row['selfcheck']['ds_fraction']):>9s}"
+            f"{_number(row['control']['ds_fraction']):>15s}"
+            f"{_number(row['refined']['ds_fraction']):>9s}"
+            f"{_number(row['selfcheck']['same_foot'], '{:d}'):>10s}"
         )
 
     coarse, refined, control = (
@@ -142,10 +153,14 @@ def main() -> int:
         _worst(rows, "control"),
     )
     print(
-        f"\n最差 DS：粗判 {coarse:+.3f} | 旧细化 {control:+.3f} | 现行 {refined:+.3f}"
-        f"\n差距：现行 {refined - coarse:.3f}（门 {MIN_GAP}）；"
-        f"对照 {control - coarse:.3f}（必须够不着这道门）"
+        f"\n最差 DS：粗判 {_number(coarse)} | 旧细化 {_number(control)} "
+        f"| 现行 {_number(refined)}"
     )
+    if coarse is not None:
+        print(
+            f"差距：现行 {_number(_gap(refined, coarse), '{:.3f}')}（门 {MIN_GAP}）；"
+            f"对照 {_number(_gap(control, coarse), '{:.3f}')}（必须够不着这道门）"
+        )
 
     return report(
         rows,
