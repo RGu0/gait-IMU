@@ -51,11 +51,15 @@ from typing import Any
 
 import numpy as np
 from wt901 import WT901Device, scan
-from wt901.transport.ble import BleTransport
 
 from gait.calib.accel import FACES, MILLI_G, observe_face, solve_six_face
 from gait.calib.still import CalibrationError
-from gait.device.ble import StreamConfig, configure_streaming, start_streaming
+from gait.device.ble import (
+    StreamConfig,
+    close_quietly,
+    configure_streaming,
+    start_streaming,
+)
 from gait.device.identity import read_device_identity
 
 for _stream in (sys.stdout, sys.stderr):
@@ -68,6 +72,10 @@ DEFAULT_FACE_SECONDS: float = 4.0
 
 #: 操作员摆好之后、开始收数之前的静置等待。手离开模块时会带一下，这段丢掉。
 SETTLE_SECONDS: float = 1.5
+
+#: 多久收不到新样本就当断流。200 Hz 下正常间隔是 5 ms，3 s 已经是三个数量级的余量，
+#: 只会在真的断了时触发。
+STALL_TIMEOUT_SECONDS: float = 3.0
 
 FACE_HINTS: dict[str, str] = {
     "+Z": "模块正面朝上平放（Z 轴朝上）",
@@ -84,13 +92,31 @@ def _echo(message: str) -> None:
 
 
 async def _collect(device: WT901Device, seconds: float) -> np.ndarray:
-    """收 `seconds` 秒的比力（标称 SI），返回 `(n,3)`。"""
+    """收 `seconds` 秒的比力（标称 SI），返回 `(n,3)`。
+
+    结束条件是**时钟**，但循环靠样本到达推进 —— 断流时 `async for` 会永远等下去，
+    而 `still` 那条路径要采十分钟，静默挂起与「正在采」在终端上长得一模一样。所以
+    每个样本都带超时：`STALL_TIMEOUT_SECONDS` 内没有新样本就当断流报出来。
+    """
     samples: list[tuple[float, float, float]] = []
     deadline = time.monotonic() + seconds
-    async for sample in device.samples():
-        samples.append((sample.accel.x, sample.accel.y, sample.accel.z))
-        if time.monotonic() >= deadline:
-            break
+    stream = device.samples()
+    try:
+        while True:
+            try:
+                sample = await asyncio.wait_for(
+                    anext(stream), timeout=STALL_TIMEOUT_SECONDS
+                )
+            except (TimeoutError, StopAsyncIteration) as error:
+                raise SystemExit(
+                    f"数据流中断（已收 {len(samples)} 个样本）。模块可能已休眠或断连，"
+                    "重新开机后再跑一次。"
+                ) from error
+            samples.append((sample.accel.x, sample.accel.y, sample.accel.z))
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        await stream.aclose()
     return np.asarray(samples, dtype=np.float64)
 
 
@@ -106,8 +132,10 @@ async def _connect(mac: str | None, scan_timeout: float) -> tuple[WT901Device, s
         raise SystemExit(f"扫到多台设备（{listed}）。用 --mac 指定要标定哪一台。")
 
     discovered = found[0]
-    device = WT901Device(BleTransport(discovered.address), auto_reconnect=False)
-    await device.connect()
+    # 把整个 `DiscoveredDevice` 传进去，**不要只传地址**：macOS 上的地址只是
+    # CoreBluetooth 分配的会话内标识，跨扫描会话解析并不可靠，失败时报的是
+    # 「设备未找到」，哪怕模块就在眼前（wt901 `WT901Device.connect` 的文档）。
+    device = await WT901Device.connect(discovered, auto_reconnect=False)
     identity = await read_device_identity(device)
     _echo(f"已连接 {identity.value}")
 
@@ -162,7 +190,9 @@ async def _capture(args: argparse.Namespace) -> int:
                 np.save(out / f"face_{observation.face.replace('+', 'p').replace('-', 'm')}.npy", acc)
                 break
     finally:
-        await device.disconnect()
+        problem = await close_quietly(device)
+        if problem:
+            _echo(f"⚠ {problem}")
 
     meta = {
         "device": mac,
@@ -191,7 +221,9 @@ async def _still(args: argparse.Namespace) -> int:
         await _collect(device, SETTLE_SECONDS)
         acc = await _collect(device, seconds)
     finally:
-        await device.disconnect()
+        problem = await close_quietly(device)
+        if problem:
+            _echo(f"⚠ {problem}")
 
     np.save(out / "still.npy", acc)
     (out / "still_meta.json").write_text(

@@ -30,21 +30,24 @@ class FakeSample:
 class FakeDevice:
     """按脚本产出比力的假设备。
 
-    `script` 是一串 `(3,)` 向量；每次 `_collect` 调用消耗一个，并把它重复成足够长的
-    一段。`_collect` 靠时钟决定采多久，测试里把时钟也换掉，免得真等 4 秒。
+    **方法名必须与真的 `WT901Device` 对得上**，由
+    `test_the_fake_device_matches_the_real_one` 钉住。第一版这里叫 `disconnect()`，
+    因为 CLI 当时写的就是 `device.disconnect()` —— 而真的 `WT901Device` 只有
+    `close()`。替身照着**被测代码的错误假设**长，于是这几条测试全绿，真机一跑就
+    `TypeError`。替身与真物的接口一致性得单独有人验，否则测的是自己的想象。
     """
 
     def __init__(self, script):
         self.script = list(script)
-        self.disconnected = False
+        self.closed = False
 
     async def samples(self):
         current = self.script[0]
         while True:
             yield FakeSample(current)
 
-    async def disconnect(self):
-        self.disconnected = True
+    async def close(self):
+        self.closed = True
 
 
 def install_fakes(monkeypatch, script, *, samples_per_call=MIN_SAMPLES_PER_FACE * 2):
@@ -115,7 +118,7 @@ def test_capture_recovers_when_the_operator_repeats_a_face(monkeypatch, tmp_path
     assert sorted(meta["faces"]) == sorted(FACES)
 
 
-def test_capture_disconnects_even_when_interrupted(monkeypatch, tmp_path):
+def test_capture_closes_the_device_even_when_interrupted(monkeypatch, tmp_path):
     """Ctrl-C 也要把设备放掉。wt901 的 ble 文档警告过：没断干净的连接会让下一次
     connect 直接失败 —— 操作员会以为是模块坏了。"""
     device = install_fakes(monkeypatch, [face_reading(face) for face in FACES])
@@ -125,7 +128,7 @@ def test_capture_disconnects_even_when_interrupted(monkeypatch, tmp_path):
 
     monkeypatch.setattr("builtins.input", boom)
     assert sixface.main(["capture", "--out", str(tmp_path)]) == 130
-    assert device.disconnected
+    assert device.closed
 
 
 def test_solve_refuses_a_directory_that_is_missing_a_face(tmp_path):
@@ -137,3 +140,35 @@ def test_solve_refuses_a_directory_that_is_missing_a_face(tmp_path):
         )
     with pytest.raises(SystemExit, match="缺少"):
         sixface.main(["solve", "--dir", str(tmp_path)])
+
+
+def test_the_fake_device_matches_the_real_one():
+    """替身用到的每个方法，真的 `WT901Device` 上都得有。
+
+    这条是补一个真实的窟窿：上面那几条测试曾经全绿，而 CLI 在真机上第一行就
+    `TypeError` —— 因为替身实现的是 `disconnect()`，跟着当时 CLI 的错误假设走，
+    真类只有 `close()`。**替身照着被测代码长，就永远不会揭穿被测代码。**
+
+    只比方法名，不比签名：签名要真调才知道，而那正是这一层测不到的部分（它由真机
+    冒烟承担）。但名字对不上这种最粗的错，不该留到操作员摆完六个面才发现。
+    """
+    from wt901 import WT901Device
+
+    used = {name for name in vars(FakeDevice) if not name.startswith("_")}
+    missing = sorted(name for name in used if not hasattr(WT901Device, name))
+    assert not missing, f"替身有这些方法，真的 WT901Device 没有：{missing}"
+
+
+def test_connect_uses_the_real_classmethod_signature():
+    """`WT901Device.connect` 是**类方法**且收一个 target。
+
+    CLI 第一版写成 `WT901Device(BleTransport(address))` + `await device.connect()`，
+    两处都错：构造器要的是 transport 实例（不是地址），而 `connect` 是类方法。
+    """
+    import inspect
+
+    from wt901 import WT901Device
+
+    signature = inspect.signature(WT901Device.connect)
+    assert "target" in signature.parameters
+    assert inspect.ismethod(WT901Device.connect), "connect 应为类方法"
