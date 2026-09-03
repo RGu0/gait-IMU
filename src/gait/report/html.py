@@ -175,14 +175,14 @@ def render_report_html(report: dict[str, Any]) -> str:
             "<body>",
             # ① 封面
             '<section class="cover">',
-            f'<h1>步态检测报告</h1>',
-            f'<p><span class="org">{_text(report.get("organization", ""))}</span>'
-            f'<span class="edition">{_text(report.get("edition", ""))}</span></p>',
+            '<h1>步态检测报告</h1>',
+            (f'<p><span class="org">{_text(report.get("organization", ""))}</span>'
+            f'<span class="edition">{_text(report.get("edition", ""))}</span></p>'),
             "<dl>",
             f"<dt>受检者编号：{_text(report.get('subjectLabel', ''))}</dt>",
             f"<dt>检测日期：{_text(report.get('assessedAt', ''))}</dt>",
-            f"<dt>测试项目：{_text(report.get('protocolName', ''))}"
-            f"（{_text(report.get('protocolSeconds', ''))} 秒）</dt>",
+            (f"<dt>测试项目：{_text(report.get('protocolName', ''))}"
+            f"（{_text(report.get('protocolSeconds', ''))} 秒）</dt>"),
             "</dl>",
             "</section>",
             # ② 标注条（紧接封面）
@@ -227,9 +227,9 @@ def render_report_html(report: dict[str, Any]) -> str:
             "</section>",
             # 页脚
             '<footer class="footer">',
-            f"报告编号 {_text(report.get('reportId', ''))} · "
+            (f"报告编号 {_text(report.get('reportId', ''))} · "
             f"算法版本 {_text(report.get('algoVersion', ''))} · "
-            f"协议配置 {_text(report.get('protocolVersion', ''))}",
+            f"协议配置 {_text(report.get('protocolVersion', ''))}"),
             "</footer>",
             "</body>",
             "</html>",

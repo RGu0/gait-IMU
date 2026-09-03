@@ -209,8 +209,8 @@ def assemble_report(
 
     speed_median, speed_foot = _foot_value(chain.feet, "gait_speed")
     cadence_median, _ = _foot_value(chain.feet, "cadence")
-    stride_median, stride_foot = _foot_value(chain.feet, "stride_length")
-    stance_median, stance_foot = _foot_value(chain.feet, "stance_ratio")
+    _stride_median, stride_foot = _foot_value(chain.feet, "stride_length")
+    _stance_median, stance_foot = _foot_value(chain.feet, "stance_ratio")
     swing_median, _ = _foot_value(chain.feet, "swing_ratio")
     stride_time_median, _ = _foot_value(chain.feet, "stride_time")
 

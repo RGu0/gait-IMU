@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from wt901.protocol.units import accel_to_m_s2, angular_velocity_to_rad_s
 
-from gait.contracts import FootLabel, FootSeries, Quality, RawFrame
+from gait.contracts import FootSeries, Quality, RawFrame
 from gait.device.footseries import (
     FootSeriesError,
     frames_to_foot_series,

@@ -18,8 +18,8 @@ from wt901.protocol.units import (
 from wt901.recording import RecordedChunk, Recording, write_recording
 
 from gait.cli.mvp import main
-from gait.io.session import create_session, new_session_id, raw_path
 from gait.contracts import SessionMeta
+from gait.io.session import create_session, new_session_id, raw_path
 from gait.validate.synthetic import WalkSpec, generate_dual_walk
 
 
