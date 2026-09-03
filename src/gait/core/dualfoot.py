@@ -567,7 +567,14 @@ class CrossFootPeriod:
 
     @property
     def new_information(self) -> bool:
-        """跨脚闸说了单脚闸没说的话：两脚各自自洽，但彼此对不上。"""
+        """跨脚闸说了单脚闸没说的话：两脚各自自洽，但彼此对不上。
+
+        **这里读 `consistent` 是对的，不要跟着 RAY-347 改成 `fallback`。** 那次改动
+        把「按周期可不可信降级」的消费者换到了 `fallback` 上，本属性不是那种消费者：
+        它比的是**两个读数说了什么**，而 `consistent` 恰好就是"单脚闸说了什么"。
+        换成 `fallback` 会把问题变成"单脚的周期是不是退化来的"，那是另一件事，
+        回答不了"这一票是不是新增信息"。
+        """
         return not self.agrees and self.left_consistent and self.right_consistent
 
     def snapshot(self) -> dict[str, float | bool]:
