@@ -37,7 +37,7 @@ MODULES = sorted(
 
 def test_the_suite_is_not_empty():
     """空的套件会让下面每一条参数化测试都变成零次调用 —— 全绿，而且什么也没测。"""
-    assert len(MODULES) >= 12
+    assert len(MODULES) >= 13
 
 
 @pytest.mark.parametrize("name", MODULES)
@@ -140,8 +140,8 @@ def test_a_crashed_script_is_reported_as_crashed_not_as_passing(monkeypatch):
 
     assert outcome.crashed is not None
     assert "KeyError" in outcome.crashed
-    assert outcome.failures == []          # 一条判据都没跑到
-    assert outcome.passed is False         # 但绝不算通过
+    assert outcome.failures == []  # 一条判据都没跑到
+    assert outcome.passed is False  # 但绝不算通过
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,8 +187,12 @@ def test_the_registry_does_not_list_the_private_helpers():
 
 def _period_row(cycles: int, control: int, speed: str = "mid", **extra) -> dict:
     row = {
-        "trial": "T", "walk": f"{speed}-a", "foot": "L", "speed": speed,
-        "cycles": cycles, "error_pct": (cycles - 38) / 38 * 100.0,
+        "trial": "T",
+        "walk": f"{speed}-a",
+        "foot": "L",
+        "speed": speed,
+        "cycles": cycles,
+        "error_pct": (cycles - 38) / 38 * 100.0,
         "control_cycles": control,
     }
     row.update(extra)
@@ -200,8 +204,10 @@ def test_period_cycles_accepts_the_measured_shape():
     from acceptance import period_cycles
 
     rows = [
-        _period_row(36, 17, "slow"), _period_row(37, 18, "slow"),
-        _period_row(38, 18, "mid"), _period_row(39, 18, "fast"),
+        _period_row(36, 17, "slow"),
+        _period_row(37, 18, "slow"),
+        _period_row(38, 18, "mid"),
+        _period_row(39, 18, "fast"),
         _period_row(36, 16, "fast"),
     ]
     assert period_cycles.judge(rows) == []
@@ -223,8 +229,10 @@ def test_period_cycles_catches_a_sign_reversal_across_speed_bands():
     from acceptance import period_cycles
 
     rows = [
-        _period_row(41, 18, "slow"), _period_row(42, 18, "slow"),
-        _period_row(35, 17, "fast"), _period_row(36, 17, "fast"),
+        _period_row(41, 18, "slow"),
+        _period_row(42, 18, "slow"),
+        _period_row(35, 17, "fast"),
+        _period_row(36, 17, "fast"),
     ]
     assert any("两端反号" in line for line in period_cycles.judge(rows))
 
@@ -238,20 +246,34 @@ def test_period_cycles_does_not_call_a_band_touching_zero_a_reversal():
     from acceptance import period_cycles
 
     rows = [
-        _period_row(36, 17, "slow"), _period_row(37, 18, "slow"),
-        _period_row(36, 17, "fast"), _period_row(39, 18, "fast"),
+        _period_row(36, 17, "slow"),
+        _period_row(37, 18, "slow"),
+        _period_row(36, 17, "fast"),
+        _period_row(39, 18, "fast"),
     ]
     assert period_cycles.judge(rows) == []
 
 
-def _interval_row(new_ds: float, old_ds: float, same_foot: int = 0,
-                  stance_pct=(53.0, 54.0)) -> dict:
+def _interval_row(
+    new_ds: float, old_ds: float, same_foot: int = 0, stance_pct=(53.0, 54.0)
+) -> dict:
     return {
-        "trial": "T", "walk": "mid-a",
-        "new": {"path": "new", "ds_fraction": new_ds, "same_foot": same_foot,
-                "stance_pct": list(stance_pct), "intervals": [36, 36]},
-        "old": {"path": "old", "ds_fraction": old_ds, "same_foot": 3,
-                "stance_pct": [9.0, 9.0], "intervals": [37, 36]},
+        "trial": "T",
+        "walk": "mid-a",
+        "new": {
+            "path": "new",
+            "ds_fraction": new_ds,
+            "same_foot": same_foot,
+            "stance_pct": list(stance_pct),
+            "intervals": [36, 36],
+        },
+        "old": {
+            "path": "old",
+            "ds_fraction": old_ds,
+            "same_foot": 3,
+            "stance_pct": [9.0, 9.0],
+            "intervals": [37, 36],
+        },
     }
 
 
@@ -286,12 +308,23 @@ def test_stance_intervals_catches_a_collapse_back_to_zero_width_intervals():
 
 def _contrast_row(coarse: float, refined: float, control: float) -> dict:
     return {
-        "trial": "T", "walk": "mid-a",
+        "trial": "T",
+        "walk": "mid-a",
         "selfcheck": {"path": "selfcheck", "ds_fraction": coarse, "same_foot": 1},
-        "refined": {"path": "new", "ds_fraction": refined, "same_foot": 0,
-                    "stance_pct": [53.0], "intervals": [36]},
-        "control": {"path": "old", "ds_fraction": control, "same_foot": 3,
-                    "stance_pct": [9.0], "intervals": [37]},
+        "refined": {
+            "path": "new",
+            "ds_fraction": refined,
+            "same_foot": 0,
+            "stance_pct": [53.0],
+            "intervals": [36],
+        },
+        "control": {
+            "path": "old",
+            "ds_fraction": control,
+            "same_foot": 3,
+            "stance_pct": [9.0],
+            "intervals": [37],
+        },
     }
 
 
@@ -358,6 +391,155 @@ def test_a_degenerate_cell_does_not_crash_the_report(name, row, capsys):
     finally:
         monkey.undo()
     assert "—" in capsys.readouterr().out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-356：航向漂移哨兵。**四条判据全是双向门**，所以每条都要两个方向各测一次 ——
+# 只测"变坏会红"会漏掉这套判据真正的新意：它在缺陷被修好时也响。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _heading_row(heading, turns=0, speed="mid", zupt=0.09, free=1.6, **extra):
+    row = {
+        "kind": "cell",
+        "trial": "T",
+        "walk": f"{speed}-a",
+        "foot": "L",
+        "speed": speed,
+        "heading_p50": heading,
+        "turns": turns,
+        "cycles": 38,
+        "zupt_fraction": zupt,
+        "free_run_p50": free,
+    }
+    row.update(extra)
+    return row
+
+
+def _control_row(heading, duration=20.0, foot="L"):
+    return {
+        "kind": "control",
+        "duration_s": duration,
+        "foot": foot,
+        "heading_p50": heading,
+        "turns": 0,
+        "cycles": 16,
+        "zupt_fraction": 0.20,
+        "free_run_p50": 0.30,
+    }
+
+
+def _measured_headings() -> list[dict]:
+    """实测的那个形状（`S1-sport` 十二格 + 四格合成对照）。
+
+    这里**必须**用真实读数而不是随手编的数：判据 3、4 钉的是速度依赖与机制相关，
+    编出来的数据很容易碰巧满足它们，那样这套测试就只在测自己。
+    """
+    cells = [
+        _heading_row(33.5, 6, "slow", 0.028, 2.654),
+        _heading_row(11.9, 5, "slow", 0.029, 2.640),
+        _heading_row(15.4, 4, "slow", 0.046, 2.896),
+        _heading_row(12.9, 3, "slow", 0.043, 2.999),
+        _heading_row(11.4, 1, "mid", 0.089, 1.593),
+        _heading_row(9.0, 0, "mid", 0.089, 1.581),
+        _heading_row(11.6, 3, "mid", 0.084, 1.536),
+        _heading_row(10.0, 0, "mid", 0.086, 1.541),
+        _heading_row(9.4, 0, "fast", 0.157, 0.990),
+        _heading_row(4.2, 0, "fast", 0.153, 0.985),
+        _heading_row(8.8, 0, "fast", 0.164, 0.992),
+        _heading_row(3.2, 0, "fast", 0.153, 0.987),
+    ]
+    controls = [
+        _control_row(0.21),
+        _control_row(0.19, foot="R"),
+        _control_row(0.09, 40.0),
+        _control_row(0.07, 40.0, foot="R"),
+    ]
+    return cells + controls
+
+
+def test_heading_drift_accepts_the_measured_shape():
+    """实测形状一条不报 —— 否则这套哨兵在自己的正样本上就是红的。"""
+    from acceptance import heading_drift
+
+    assert heading_drift.judge(_measured_headings()) == []
+
+
+def test_heading_drift_catches_a_cell_that_got_worse():
+    from acceptance import heading_drift
+
+    rows = _measured_headings() + [_heading_row(55.0, 9, "slow", 0.02, 3.5)]
+    assert any("变坏了" in line for line in heading_drift.judge(rows))
+
+
+def test_heading_drift_catches_a_cell_that_got_better():
+    """**这一条是本 Issue 的要点**：漂移被修好，判据也必须红。
+
+    钉"不得更坏"会把 33.5° 当成基线供起来 —— 下一个人看到绿灯，以为这里没问题。
+    """
+    from acceptance import heading_drift
+
+    rows = _measured_headings() + [_heading_row(0.8, 0, "fast", 0.30, 0.4)]
+    assert any("变好了" in line for line in heading_drift.judge(rows))
+
+
+def test_heading_drift_catches_the_turn_count_in_both_directions():
+    """转身误报真值是 0，所以判出的全是误报；总数两头都是门。"""
+    from acceptance import heading_drift
+
+    worse = [_heading_row(12.0, 40, "slow"), _heading_row(12.0, 45, "fast")]
+    assert any("变坏了（真值是 0）" in line for line in heading_drift.judge(worse))
+
+    better = [_heading_row(12.0, 1, "slow"), _heading_row(12.0, 0, "fast")]
+    assert any("变好了" in line for line in heading_drift.judge(better))
+
+
+def test_heading_drift_catches_a_speed_dependence_that_flipped():
+    """慢档反而比快档好 = 机制变了，RAY-356 的结论要重新审视，不该默默继续用。"""
+    from acceptance import heading_drift
+
+    rows = [
+        _heading_row(5.0, 0, "slow", 0.028, 2.7),
+        _heading_row(5.0, 0, "slow", 0.029, 2.6),
+        _heading_row(20.0, 8, "fast", 0.157, 1.0),
+        _heading_row(20.0, 8, "fast", 0.153, 1.0),
+    ]
+    assert any("速度依赖翻转或消失了" in line for line in heading_drift.judge(rows))
+
+
+def test_heading_drift_catches_a_collapsed_mechanism():
+    """观测密度不再解释漂移 —— 守的是**解释**，不是病本身。
+
+    这里让两个机制量**有变化但不相关**，而不是把它们钉成常数：常数会让
+    `corrcoef` 除以零方差、判据靠 `nan` 走到同一条失败上 —— 那测的是退化路径，
+    不是"相关塌了"这个真实失效。
+    """
+    from acceptance import heading_drift
+
+    rows = [
+        _heading_row(12.0, 2, "slow", 0.10, 1.5),
+        _heading_row(3.0, 0, "slow", 0.14, 1.6),
+        _heading_row(12.0, 2, "fast", 0.13, 1.6),
+        _heading_row(3.0, 0, "fast", 0.11, 1.5),
+    ]
+    assert any("机制变了" in line for line in heading_drift.judge(rows))
+
+
+def test_heading_drift_catches_a_dead_positive_control():
+    """合成步态航向近乎无漂；它都触不红下限门，那道门就没有通电。"""
+    from acceptance import heading_drift
+
+    rows = [row for row in _measured_headings() if row["kind"] == "cell"]
+    rows.append(_control_row(5.0))
+    assert any("没有通电" in line for line in heading_drift.judge(rows))
+
+
+def test_heading_drift_notices_a_missing_positive_control():
+    """对照一格都没跑出来 = 静默失效，比红灯更危险，必须报。"""
+    from acceptance import heading_drift
+
+    rows = [row for row in _measured_headings() if row["kind"] == "cell"]
+    assert any("对照没跑出任何一格" in line for line in heading_drift.judge(rows))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
