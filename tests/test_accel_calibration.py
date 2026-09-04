@@ -18,6 +18,7 @@ import pytest
 
 from gait.calib.accel import (
     DEFAULT_SIGMA_MG,
+    MAX_CONDITION_NUMBER,
     MILLI_G,
     MIN_ORIENTATIONS,
     MIN_SAMPLES_PER_ORIENTATION,
@@ -193,18 +194,49 @@ def test_enough_orientations_is_accepted():
     assert calibration.condition_number < 60.0
 
 
-def test_orientations_clustered_in_one_direction_are_refused():
-    """姿态个数够，但都挤在一起 —— 个数达标而信息量不达标，且不报错。"""
+def clustered(scale: float, seed: int = 3) -> list[OrientationObservation]:
+    """姿态个数够，但都挤在 +Z 附近。`scale` 控制挤的程度。"""
+    rng = np.random.default_rng(seed)
     base = np.array([0.0, 0.0, 1.0])
-    rng = np.random.default_rng(11)
     observations = []
     for index in range(MIN_ORIENTATIONS + 6):
-        jitter = rng.normal(scale=0.01, size=3)
-        direction = base + jitter
+        direction = base + rng.normal(scale=scale, size=3)
         direction /= np.linalg.norm(direction)
         observations.append(observe_orientation(synth(direction, seed=index)))
-    with pytest.raises(CalibrationError, match="只差|条件数"):
-        solve_orientations("AA:BB", observations)
+    return observations
+
+
+def test_severely_clustered_orientations_fail_to_converge():
+    """挤得很紧时高斯牛顿收不敛 —— 而**不收敛必须报错**。
+
+    没有这条，`_fit` 会把迭代用尽时手上那组参数当结果返回：量纲对、量级也对，只是
+    错的，且与真正收敛的结果在返回值上长得一模一样。
+    """
+    with pytest.raises(CalibrationError, match="收敛"):
+        solve_orientations("AA:BB", clustered(0.05))
+
+
+def test_moderately_clustered_orientations_are_refused_by_conditioning():
+    """挤得没那么紧时拟合能收敛，但条件数上不了台面（实测 70~930）。
+
+    **这条与上一条必须并存**：它们各自守着一段不同的区间，而两段都是真实可达的。
+    只留一条，另一条守的那段就没人管 —— 而那段照样会给出很离谱的参数且不报错。
+    """
+    with pytest.raises(CalibrationError, match="条件数|分布不足"):
+        solve_orientations("AA:BB", clustered(0.5))
+
+
+def test_the_conditioning_gate_is_reachable_not_dead_code():
+    """钉住上一条守的区间**确实存在**（拟合收敛、条件数超限）。
+
+    `calib.still` 有过一道够不着的闸：看起来在保护什么，实际永远轮不到它。这条防止
+    条件数闸变成同一种东西 —— 若哪天收敛判据收紧到把这段也吃掉，它会红。
+    """
+    from gait.calib.accel import _fit
+
+    measured = np.array([item.mean for item in clustered(0.5)])
+    _matrix, _offset, jacobian = _fit(measured)  # 收敛，不抛
+    assert np.linalg.cond(jacobian) > MAX_CONDITION_NUMBER
 
 
 def test_six_axis_faces_alone_are_refused():

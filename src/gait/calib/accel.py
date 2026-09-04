@@ -156,6 +156,11 @@ TARGET_CROSS_SIGMA_PPT: Final[float] = 2.0
 #: 此时解对噪声极度敏感 —— **而它不会报错，只会给出一组很离谱的参数**。
 MAX_CONDITION_NUMBER: Final[float] = 60.0
 
+#: 高斯牛顿的迭代上限与收敛判据。正常数据一两步就收敛；跑满上限是数据有问题的信号，
+#: 由 `_fit` 报错而不是把没收敛的参数当结果返回。
+MAX_ITERATIONS: Final[int] = 200
+CONVERGENCE_STEP: Final[float] = 1e-14
+
 #: 对称 A 的六个独立分量在参数向量里的位置。
 _SYMMETRIC_INDEX: Final[tuple[tuple[int, int], ...]] = (
     (0, 0),
@@ -168,6 +173,7 @@ _SYMMETRIC_INDEX: Final[tuple[tuple[int, int], ...]] = (
 
 __all__ = [
     "MAX_CONDITION_NUMBER",
+    "MAX_ITERATIONS",
     "MAX_ORIENTATION_STD",
     "MILLI_G",
     "MIN_ORIENTATIONS",
@@ -300,7 +306,8 @@ def _fit(measured: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     parameters = np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     offset = np.zeros(3, dtype=np.float64)
     jacobian = np.zeros((measured.shape[0], PARAMETER_COUNT))
-    for _ in range(200):
+    converged = False
+    for _ in range(MAX_ITERATIONS):
         matrix = _matrix_from(parameters)
         corrected = measured @ matrix.T + offset
         norms = np.linalg.norm(corrected, axis=1)
@@ -310,8 +317,18 @@ def _fit(measured: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         step, *_ = np.linalg.lstsq(jacobian, -(norms - STANDARD_GRAVITY), rcond=None)
         parameters = parameters + step[:6]
         offset = offset + step[6:]
-        if float(np.linalg.norm(step)) < 1e-14:
+        if float(np.linalg.norm(step)) < CONVERGENCE_STEP:
+            converged = True
             break
+
+    # **没收敛必须报错，不能把手上这组参数当结果返回。** 迭代用尽与收敛在返回值上
+    # 长得一模一样，而一组没收敛的参数看起来完全正常 —— 量纲对、量级也对，只是错的。
+    # 正常数据从 A=I 起步一两步就收敛，跑满上限意味着数据有问题，那件事该说出来。
+    if not converged:
+        raise CalibrationError(
+            f"高斯牛顿在 {MAX_ITERATIONS} 次迭代内没有收敛。这批姿态里可能混了非静止段，"
+            "或者姿态方向几乎共面。"
+        )
     return _matrix_from(parameters), offset, jacobian
 
 
@@ -435,14 +452,25 @@ def solve_orientations(
     # 留一：每次留出一个姿态、用其余的拟合，再看留出的那个模长错多少。
     # 它比残差多回答一件事 —— 这组参数对**没参与拟合**的姿态还准不准。
     errors = []
+    failed = 0
     for index in range(len(observations)):
         rest = np.delete(measured, index, axis=0)
         try:
             fold_matrix, fold_offset, _ = _fit(rest)
         except CalibrationError:
+            failed += 1
             continue
         errors.append(_residual_mg(measured[index : index + 1], fold_matrix, fold_offset))
-    loo = float(np.sqrt(np.mean(np.square(errors)))) if errors else float("nan")
+
+    # **一个折叠都不该失败。** 留出一个之后仍有 ≥19 个姿态，远多于 9 个参数；此时解不
+    # 出来说明这批数据本身有问题。第一版这里是 `continue` 了事，于是「一半折叠失败」
+    # 与「全部成功」会给出同样健康的 loo —— 幸存者平均出来的数看不出任何异常。
+    if failed:
+        raise CalibrationError(
+            f"留一交叉验证有 {failed}/{len(observations)} 个折叠解不出来。"
+            "留出一个后仍有足够姿态，解不出说明这批数据有问题，不能只拿剩下的算。"
+        )
+    loo = float(np.sqrt(np.mean(np.square(errors))))
 
     return AccelCalibration(
         device=device,
