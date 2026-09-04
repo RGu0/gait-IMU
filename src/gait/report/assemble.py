@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -41,6 +42,7 @@ from gait.quality.annotate import (
     GRADE_NORMAL,
     GRADE_UNCOMPUTABLE,
 )
+from gait.report.wording import reason_text
 
 #: 前端 `qualityLabel` 的三档中文。等级是机器读的，这串字是给人看的。
 _QUALITY_LABELS: Final[dict[str, str]] = {
@@ -49,8 +51,13 @@ _QUALITY_LABELS: Final[dict[str, str]] = {
     GRADE_UNCOMPUTABLE: "不适用",
 }
 
-#: 不可算项统一给的理由。与「测了但没值」区分开的正是这句话。
-_UNCOMPUTABLE_REASON: Final[str] = "本次有效步数不足，未计算出该项。"
+#: 不可算项的理由从**标注自己带的 reasons** 翻出来，而不是一句写死的话。
+#:
+#: 这里原本写死「本次有效步数不足，未计算出该项。」。它在「确实是步数不足」时是对的，
+#: 但一个不可算项可以来自别的原因 —— 例如**没有同步质量依据**。写死那句话会让报告
+#: 说出一个**具体而错误**的解释，那比不解释更糟：读的人会去补步数。
+#:
+#: 翻译表在 `report/wording.py`（RAY-224 的那一份），本模块不另写第二份。
 
 #: 前端 `edition` 由计算链决定。基础链与完整链的报告必须看得出差别。
 _EDITIONS: Final[dict[str, str]] = {
@@ -92,14 +99,30 @@ def _fmt(value: float | None, ndigits: int) -> str:
     return text
 
 
-def _grade(annotations: list[quality.QualityAnnotation], metric: str) -> str:
-    """取名为 `metric`（或以其为 `.` 前缀）的注解里的最差等级。"""
-    grades = [
-        item.grade
+def _matching(
+    annotations: list[quality.QualityAnnotation], metric: str
+) -> list[quality.QualityAnnotation]:
+    return [
+        item
         for item in annotations
         if item.metric == metric or item.metric.startswith(metric + ".")
     ]
-    return quality.worst(grades)
+
+
+def _grade(annotations: list[quality.QualityAnnotation], metric: str) -> str:
+    """取名为 `metric`（或以其为 `.` 前缀）的注解里的最差等级。"""
+    return quality.worst([item.grade for item in _matching(annotations, metric)])
+
+
+def _reasons(annotations: list[quality.QualityAnnotation], metric: str) -> list[str]:
+    """把这项指标**被判成最差那一级**的理由收上来。
+
+    只取最差那一级的理由：别的等级的理由解释不了当前这个等级，把它们一起印出来
+    会让读者去猜哪条要紧。这与 `wording.reason_text` 只翻第一条是同一个道理。
+    """
+    matched = _matching(annotations, metric)
+    worst = quality.worst([item.grade for item in matched])
+    return [reason for item in matched if item.grade == worst for reason in item.reasons]
 
 
 def _foot_value(
@@ -124,11 +147,12 @@ def _metric_item(
     value: float | None,
     grade: str,
     ndigits: int,
+    reasons: Sequence[str] = (),
 ) -> dict[str, Any]:
     """一个核心指标块：可算给 `value`，不可算给 `reason`。"""
     item: dict[str, Any] = {"key": key, "title": title, "unit": unit, "grade": grade}
     if grade == GRADE_UNCOMPUTABLE:
-        item["reason"] = _UNCOMPUTABLE_REASON
+        item["reason"] = reason_text(list(reasons))
     else:
         item["value"] = _fmt(value, ndigits)
     return item
@@ -221,8 +245,14 @@ def assemble_report(
 
     # ③ 核心指标。
     metrics = [
-        _metric_item("speed", "步速", "m/s", speed_median, _grade(annotations, "gait_speed"), 2),
-        _metric_item("cadence", "步频", "步/分", cadence_median, _grade(annotations, "cadence"), 1),
+        _metric_item(
+            "speed", "步速", "m/s", speed_median,
+            _grade(annotations, "gait_speed"), 2, _reasons(annotations, "gait_speed"),
+        ),
+        _metric_item(
+            "cadence", "步频", "步/分", cadence_median,
+            _grade(annotations, "cadence"), 1, _reasons(annotations, "cadence"),
+        ),
         _metric_item(
             "ds",
             "双支撑期占比",
@@ -230,8 +260,13 @@ def assemble_report(
             (ds_fraction * 100) if ds_fraction is not None else None,
             _grade(annotations, "double_support_ratio"),
             1,
+            _reasons(annotations, "double_support_ratio"),
         ),
-        _metric_item("cv", "步长变异系数", "%", _finite(stride_cv), _grade(annotations, "stride_length_cv"), 1),
+        _metric_item(
+            "cv", "步长变异系数", "%", _finite(stride_cv),
+            _grade(annotations, "stride_length_cv"), 1,
+            _reasons(annotations, "stride_length_cv"),
+        ),
     ]
 
     # ④ 左右对比。数值必须是数字；缺失用 0 占位（图表至少画得出来）。
