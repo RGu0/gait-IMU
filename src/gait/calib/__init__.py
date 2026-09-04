@@ -5,6 +5,7 @@
 
 出厂标定（RAY-207 R2，服务方工装）：
 `accel.py` —— 加计多姿态标定：模长判据解对称 3×3 标度/非正交矩阵与零偏向量。
+`store.py` —— 标定参数库：按设备身份存取，缺失或失效阻断新会话（FR-04）。
 """
 
 from gait.calib.accel import (
@@ -26,6 +27,14 @@ from gait.calib.still import (
     check_looseness,
     verdict,
 )
+from gait.calib.store import (
+    FIRMWARE_UNKNOWN,
+    CalibrationRecord,
+    CalibrationStore,
+    StoreVerdict,
+    admit_devices,
+    record_from_calibration,
+)
 from gait.calib.walk import (
     MIN_PEAK_ASYMMETRY,
     MIN_PRINCIPAL_RATIO,
@@ -34,6 +43,7 @@ from gait.calib.walk import (
 )
 
 __all__ = [
+    "FIRMWARE_UNKNOWN",
     "LOOSENESS_LIMIT_DEG",
     "MILLI_G",
     "MIN_ORIENTATIONS",
@@ -42,15 +52,20 @@ __all__ = [
     "MIN_STILL_SECONDS",
     "AccelCalibration",
     "CalibrationError",
+    "CalibrationRecord",
+    "CalibrationStore",
     "CalibrationVerdict",
     "LoosenessCheck",
     "MountingCalibration",
     "OrientationObservation",
     "StillCalibration",
+    "StoreVerdict",
+    "admit_devices",
     "calibrate_still",
     "check_looseness",
     "estimate_mounting",
     "observe_orientation",
+    "record_from_calibration",
     "solve_orientations",
     "verdict",
 ]
