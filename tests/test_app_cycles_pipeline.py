@@ -191,3 +191,81 @@ def test_the_recomputed_payload_is_what_the_template_reads(recorded_session):
 
     # 它要跨 IPC（RAY-248 契约），不能带任何非 JSON 的东西。
     json.dumps(report, ensure_ascii=False)
+
+
+def _write_session(root: Path, seconds: float) -> str:
+    """把一段合成双足步行写成会话目录，时长可控。
+
+    `recorded_session` fixture 走的是同一条路，这里拆出来只为让「太短」这个条件
+    可调 —— 短到只剩一两个周期时，分段层会抛错而不是返回空集。
+    """
+    session_id = new_session_id()
+    create_session(
+        root,
+        SessionMeta(
+            session_id=session_id,
+            created_at="2026-09-04T00:00:00Z",
+            subject_uuid=new_subject_uuid(),
+            scenario="walk",
+            devices={"L": {"mac": "aa"}, "R": {"mac": "bb"}},
+            config_snapshot={"rate_hz": 200},
+            calib_snapshot={"L": {"note": "none"}},
+            algo_version="test",
+            algo_params={"preset": "default"},
+            sync_report={"synthetic": True},
+            integrity_report={"loss_rate": 0.0},
+            protocol_config={"duration_s": round(seconds)},
+        ),
+    )
+    dual = generate_dual_walk(WalkSpec(duration_s=seconds), noise=NOISE)
+    for label, (series, _truth) in dual.items():
+        acc, gyr = _to_counts(series.acc, series.gyr)
+        chunks = tuple(
+            RecordedChunk(
+                t=round(index / 200.0, 6),
+                data=b"\x55\x61" + struct.pack("<9h", *acc[index], *gyr[index], 0, 0, 0),
+            )
+            for index in range(len(acc))
+        )
+        write_recording(
+            raw_path(root, session_id, label),
+            Recording(device_id=f"dev-{label}", created_utc="", note="", chunks=chunks),
+        )
+    return session_id
+
+
+def test_analysis_failure_is_not_reported_as_a_disk_failure(tmp_path):
+    """数据读得回来、只是**算不出步态**，不能报成「原始数据读不回来」。
+
+    这条是真机数据逼出来的。RAY-230 的录制里有三个段落回了 `E-BLE-1021`，而那三份
+    数据读得好好的（7376~12232 帧全部读出）—— 真正抛的是
+    `analysis.segments.SegmentationError`（「剔除策略把所有步都剔掉了：直行段 1 个」），
+    而它是 `ValueError` 的子类，被一个包得太宽的 `except (OSError, ValueError)` 归成了
+    读盘失败。
+
+    后果是反向的同一个错：一次**分析层的结论**被说成一次**磁盘故障**，操作员会去查
+    一个完好的文件。所以分类的依据必须是**失败在哪一段**，不是异常类型。
+
+    这里用一段 4 s 的步行复现同一个结局：数据完好、周期只有两个，分段层的剔除策略
+    把它们全剔掉，于是 `SegmentationError` 从链里抛出来 —— 与真机上那三段同一条路。
+    """
+    session_id = _write_session(tmp_path, seconds=4.0)
+    outcome = TerminalService(session_root=tmp_path)._do_reportFor({"sessionId": session_id})
+
+    assert hasattr(outcome, "code"), "太短的会话算不出报告，应当给一个错误"
+    assert outcome.code == "E-QLT-5003", (
+        f"数据读得回来、只是算不出周期，应当报质量不足，实际 {outcome.code}"
+    )
+
+
+def test_a_missing_recording_still_reports_a_read_failure(tmp_path):
+    """另一半：文件真的没了，仍然报 `E-BLE-1021`。
+
+    与上一条成对 —— 两个结局必须**同时**分得开。只有其中一条时，把两者合并成同一个
+    码也能让它通过。
+    """
+    session_id = _write_session(tmp_path, seconds=float(SECONDS))
+    shutil.rmtree(tmp_path / session_id / "raw")
+
+    outcome = TerminalService(session_root=tmp_path)._do_reportFor({"sessionId": session_id})
+    assert outcome.code == "E-BLE-1021"
