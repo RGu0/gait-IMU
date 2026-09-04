@@ -20,22 +20,46 @@
 这三条牺牲共同保证一件事：回放数据能走通整条链、产出报告，数字**有限且量级正确**，
 但精确值不作保证——这正是「暂不追求精度」的含义。
 
-## 坐标系重排（F2.3）是本模块唯一「有物理对错」的地方
+## 坐标系重排（F2.3）是本模块唯一「有物理对错」的地方 —— 而它现在是**恒等**
 
-《BS-BT91 硬件适配》§2 与《MVP-v1 功能清单》F2.3 都写明：
+**结论先写：`MODULE_TO_FOOT` 是单位矩阵，两只脚同一个。** 它不是「还没做」的
+占位，是实测的结果。下面写清楚为什么，因为一个恒等的矩阵最容易被后来的人当成
+遗漏而「补」上一次重排，那会把已经对了的东西改错。
 
-* 模块体体系：**X 左 / Y 前 / Z 上**
-* 足部解剖系：**X 前 / Y 外侧 / Z 上**
+### 曾经不是恒等，而那是照着一份写错的文档写的
 
-因此固定重排为 `foot = [module_y, ±module_x, module_z]`，其中 Y 的符号由脚决定：
-左足外侧 = 左 = `+module_x`，右足外侧 = 右 = `−module_x`。**这个转换必须显式写成
-常量并加单元测试**（硬件适配文档原话），因为一旦错，后续所有角度/方向指标的符号
-都会静默地错——而那不是报错，是给出一份看着正常的错误报告。
+《BS-BT91 硬件适配》§2 把模块系写成「ENU；**X 左 / Y 前 / Z 上**」，于是这里曾经
+做 `foot = [module_y, ±module_x, module_z]` 的轴交换。那份描述有两处站不住：
 
-⚠ **这个固定重排在左足上是镜射不是旋转**（行列式 −1），而角速度是伪矢量，于是
-左足步长静默偏低 17.8%、步频步时全对。已立 RAY-390（Urgent），需求裁定未下之前
-本模块不动它 —— 下面的标定路径 `calibrated_foot_series` 用实测旋转并显式校验
-行列式，**不继承**该缺陷。
+1. **它自相矛盾。** ENU 是右手系，而 `(左, 前, 上)` 是**左手**的 —— 右手三元组是
+   `(前, 左, 上)`（即 ROS 的 FLU）。同一句话里两个说法不能同时成立。
+2. **它与真机数据不符。** 步态里占绝对主导的转动是矢状面的踝背屈/跖屈，绕
+   **内外侧轴**。RAY-230 T-230-03 的 24 个格子（两种鞋型 × 慢/中/快 × 两只脚）
+   里，陀螺能量有 **67%~90% 压在模块 Y 轴**上 —— 所以 Y 是内外侧轴，X 才是前后轴。
+   若 Y 真朝前，能量该压在 X 上。
+
+而 2026-08-28 的现场记录《佩戴与坐标约定》写的正是实测的那一套：模块绑在**脚面**
+（不是脚踝），**X 前 / Y 左 / Z 上，右手系**。
+
+### 于是 module 系与 foot 系是同一个系
+
+RAY-390 的需求修订 R1 裁定足部系为**右手系**：`X 前 / Y 左 / Z 上`。「外侧」不再是
+坐标轴的语义 —— 偏侧性由 `FootSeries.label` 承载，内外侧的解读归报告层。
+
+两个系逐轴相同，所以映射是恒等。**两只脚用同一个映射**：让左右脚的映射不同，
+正是上一版那个缺陷的根源。
+
+### 上一版那个缺陷值得留在这里
+
+`foot = [module_y, +module_x, module_z]`（左足）的行列式是 **−1** —— 它是镜射，
+不是旋转。而角速度是**伪矢量**：改向的正交变换下它要多带一个 `det` 的符号。同一个
+矩阵套在比力与角速度上，左足角速度整体反号，ESKF 积出来的姿态朝相反方向转，于是
+**步长静默偏低 17.8%，而步频、步时分毫不差** —— 报告里没有一处看着不对，它只表现为
+一个左右不对称，而左右不对称在步态报告里是个临床读数。
+
+所以这里有两条**能失败**的单测，缺一不可：行列式必须是 +1，**而且**轴的对应必须
+对。只守行列式拦不住错的轴交换 —— 上一版右足的映射 det 就是 +1，却同样把内外侧轴
+当成了前进轴。
 
 ## 标定路径（RAY-360 `raw-to-series`）：把上面三条牺牲还回来两条半
 
@@ -112,6 +136,8 @@ from gait.sync.integrity import find_gaps, split_segments
 from gait.sync.timebase import Timebase, build_timebase
 
 __all__ = [
+    "FOOT_AXES",
+    "MODULE_TO_FOOT",
     "NOMINAL_FS",
     "NO_ACCEL_CALIBRATION",
     "AccelCalibration",
@@ -128,12 +154,15 @@ __all__ = [
 #: 器件标称采样率，Hz。真实值会由 `sync/timebase` 从到达时刻解出，MVP 直接用它。
 NOMINAL_FS: Final[float] = 200.0
 
-#: 足部系各分量取自模块体系的哪个下标（F2.3）：`foot[0]=module[1]`（前=前）、
-#: `foot[1]=module[0]`（外=左）、`foot[2]=module[2]`（上=上）。
-_AXIS_INDEX: Final[tuple[int, int, int]] = (1, 0, 2)
+#: 模块体系 → 足部系。**恒等，两只脚同一个** —— 见模块文档「而它现在是恒等」。
+#: 写成显式常量而不是省略掉，是因为《BS-BT91 硬件适配》原话要求「这个转换要写成
+#: 显式的常量矩阵并加单元测试」，而一个**被写出来的**恒等矩阵才拦得住下一个人
+#: 顺手「补」一次重排。
+MODULE_TO_FOOT: Final[np.ndarray] = np.eye(3)
 
-#: Y（外侧）分量的符号：左足外侧朝左（=+X），右足外侧朝右（=−X）。
-_Y_SIGN: Final[dict[str, float]] = {"L": 1.0, "R": -1.0}
+#: 足部系三轴的语义，给测试与文档用。前后 = X、内外侧 = Y、上 = Z。
+#: 「内外侧」而不是「外侧」：Y 恒指向左，哪一侧是外由 `FootSeries.label` 决定。
+FOOT_AXES: Final[tuple[str, str, str]] = ("前后", "内外侧", "上")
 
 
 class FootSeriesError(ValueError):
@@ -143,26 +172,24 @@ class FootSeriesError(ValueError):
 def reorder_module_to_foot(
     acc: np.ndarray, gyr: np.ndarray, label: FootLabel
 ) -> tuple[np.ndarray, np.ndarray]:
-    """把模块体体系（X左/Y前/Z上）的比力与角速度重排到足部系（X前/Y外/Z上）。
+    """把模块体系（X前/Y左/Z上）的比力与角速度送进足部系（X前/Y左/Z上）。
 
-    `acc`/`gyr` 都是 `(n,3)` 的 SI 数组，顺序为模块体系的 (x,y,z)。返回同样形状的
-    足部系数组。左足 Y 取 +X，右足 Y 取 −X —— 见模块文档。
+    `acc`/`gyr` 都是 `(n,3)` 的 SI 数组。**两个系逐轴相同，所以这是恒等映射**，
+    两只脚一样 —— 理由见模块文档，不是遗漏。
+
+    `label` 仍然收下并校验：偏侧性由它承载（R1 裁定），而一个悄悄接受 `"X"` 的
+    接口迟早会把某处的脚标错误放过去。
+
+    函数留着而不是让调用方直接用 `MODULE_TO_FOOT`，是为了让「模块系到足部系」
+    这件事在代码里仍然有一个名字。哪天佩戴方式变了，改的是这里一处。
     """
-    if label not in _Y_SIGN:
+    if label not in ("L", "R"):
         raise FootSeriesError(f"label 应为 'L' 或 'R'，收到 {label!r}")
-    sign = _Y_SIGN[label]
-    index = _AXIS_INDEX
-
-    foot_acc = np.empty_like(acc, dtype=np.float64)
-    foot_acc[:, 0] = acc[:, index[0]]
-    foot_acc[:, 1] = sign * acc[:, index[1]]
-    foot_acc[:, 2] = acc[:, index[2]]
-
-    foot_gyr = np.empty_like(gyr, dtype=np.float64)
-    foot_gyr[:, 0] = gyr[:, index[0]]
-    foot_gyr[:, 1] = sign * gyr[:, index[1]]
-    foot_gyr[:, 2] = gyr[:, index[2]]
-    return foot_acc, foot_gyr
+    rotation = MODULE_TO_FOOT
+    return (
+        np.asarray(acc, dtype=np.float64) @ rotation.T,
+        np.asarray(gyr, dtype=np.float64) @ rotation.T,
+    )
 
 
 def _to_si(acc_raw: np.ndarray, gyr_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
