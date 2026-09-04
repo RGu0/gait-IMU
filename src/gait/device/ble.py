@@ -61,7 +61,9 @@ PRD 的列举是「解锁→200 Hz→带宽→6 轴→保存」。手册 §6 明
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, replace
+from typing import Final
 
 from wt901 import (
     AlgorithmMode,
@@ -79,10 +81,14 @@ __all__ = [
     "MOTION_OUTPUT",
     "AppliedConfig",
     "StreamConfig",
+    "close_quietly",
     "configure_streaming",
     "read_battery_at_low_rate",
     "start_streaming",
 ]
+
+#: 关闭设备的超时。**必须有** —— 见 `close_quietly` 的文档。
+CLOSE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 #: 手册 §4.2 带宽档位表的 42 Hz 编码。尚未在真机核实（见模块 docstring）。
 BANDWIDTH_42HZ = 0x03
@@ -304,3 +310,29 @@ async def read_battery_at_low_rate(device: WT901Device) -> Battery | None:
         return await device.telemetry.read_battery()
     except (TransportTimeoutError, WT901Error):
         return None
+
+
+async def close_quietly(device: WT901Device, *, timeout: float = CLOSE_TIMEOUT_SECONDS) -> str | None:
+    """关闭一台设备，**永远不会挂住，也永远不抛**。返回问题描述，正常时为 None。
+
+    必须带超时。真机实测两次：对一台**已经断连**（或连接失败）的 peripheral 调
+    bleak 的 disconnect，CoreBluetooth 不会再回调，``await`` 就永远等下去。
+
+    - RAY-200 round-2：卡在采集**完成之后、写报告之前**，30 分钟数据被扣在进程里。
+    - RAY-200 round-3：卡在**连接失败的清理路径**里 —— 第二台连不上，清理第一台时
+      挂住，整个重试循环停摆，一次采集都没开始。
+
+    第一次只修了前者，没有把所有 ``close()`` 调用点一起收口，于是第二处又栽了一遍。
+    清理路径的失败不该有资格拖住主流程 —— 本函数就是那个收口，新的采集入口一律用它，
+    不要再各写一份。
+
+    （`cli/linktest.py` 里还有一份同源的私有实现，早于本函数；两者应当合并，但那属
+    RAY-199/200 的文件，本 scope 不去动它。）
+    """
+    try:
+        await asyncio.wait_for(device.close(), timeout=timeout)
+    except TimeoutError:
+        return f"关闭设备超时（{timeout:g} s）—— 连接可能已经断了，CoreBluetooth 不再回调"
+    except Exception as error:  # noqa: BLE001 - 清理路径不该有资格拖住主流程
+        return f"关闭设备时出错：{error}"
+    return None
