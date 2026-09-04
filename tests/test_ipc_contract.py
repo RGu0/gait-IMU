@@ -214,22 +214,97 @@ def test_preflight_keeps_unreadable_battery_distinct_from_low_battery() -> None:
     assert "换电池解决不了" in _battery_item(unread)["error"]["message"]
 
 
-def test_preflight_passes_when_everything_reads_well() -> None:
-    items = TerminalService(source=StubDeviceSource()).handle(
+def _seed_calibrations(root, source: StubDeviceSource, *, feet=("L", "R")) -> None:
+    """把指定几只脚的标定参数放进库里。
+
+    **测试要表达「这台没标定」，改的是库里有没有它，不是在 stub 上写一个布尔值。**
+    那正是本 scope 换掉的东西：结论必须从事实推出来。
+    """
+    from gait.calib.store import CalibrationRecord, CalibrationStore
+
+    store = CalibrationStore(root)
+    for label in feet:
+        reading = source.device_readings()[label]
+        store.put(
+            CalibrationRecord(
+                kind=reading["kind"],
+                value=reading["value"],
+                provenance=reading["provenance"],
+                firmware=reading["firmware"],
+                recorded_at="2026-09-04T00:00:00+00:00",
+                calib_snapshot={"method": "multi-orientation-magnitude"},
+            )
+        )
+
+
+def test_preflight_passes_when_everything_reads_well(tmp_path) -> None:
+    source = StubDeviceSource()
+    _seed_calibrations(tmp_path, source)
+    items = TerminalService(source=source, session_root=tmp_path).handle(
         {"id": "1", "method": "runPreflight"}
     )["result"]
-    assert all(item["status"] == "pass" for item in items)
+    assert all(item["status"] == "pass" for item in items), [
+        i for i in items if i["status"] != "pass"
+    ]
     assert all(item["error"] is None for item in items)
 
 
-def test_preflight_blocks_on_missing_factory_calibration() -> None:
-    source = StubDeviceSource(calibrated={"L": True, "R": False})
-    items = TerminalService(source=source).handle(
+def test_preflight_blocks_when_one_foot_has_no_calibration(tmp_path) -> None:
+    """右脚那台不在库里 —— 结论从**库里有没有**推出来，不是 fixture 写的。"""
+    source = StubDeviceSource()
+    _seed_calibrations(tmp_path, source, feet=("L",))
+    items = TerminalService(source=source, session_root=tmp_path).handle(
         {"id": "1", "method": "runPreflight"}
     )["result"]
     item = next(i for i in items if i["id"] == "factory-cal")
     assert item["status"] == "fail"
     assert item["error"]["code"] == "E-CAL-3001"
+    # 具体到哪只脚、以及下一步做什么，都要说出来。
+    assert "右" in item["error"]["action"]  # 具体到哪只脚（_SIDES 用「左」/「右」）
+    assert "服务方" in item["error"]["action"]
+
+
+def test_preflight_blocks_when_the_firmware_moved_on(tmp_path) -> None:
+    """标定在库里，但模块固件升级了 —— 与「没标定」是两件事，提示也不同。
+
+    没有这条，把判定写成「库里有没有这台」就能让上一条通过，而那样会放行一份
+    不再描述这台模块的参数。
+    """
+    source = StubDeviceSource()
+    _seed_calibrations(tmp_path, source)
+    for reading in source.identities.values():
+        reading["firmware"] = "9.9.9"
+    items = TerminalService(source=source, session_root=tmp_path).handle(
+        {"id": "1", "method": "runPreflight"}
+    )["result"]
+    item = next(i for i in items if i["id"] == "factory-cal")
+    assert item["status"] == "fail"
+    assert "固件" in item["error"]["action"]
+    assert "重新标定" in item["error"]["action"]
+
+
+def test_preflight_blocks_when_no_store_is_configured() -> None:
+    """没有会话根就没有参数库 —— **阻断而不是放行**，与「读不到电量也阻断」同一口径。
+
+    第一版的端口在这种情况下会返回 stub 写死的 `True`，于是一个根本没有参数库的
+    部署也能通过自检。
+    """
+    items = TerminalService(source=StubDeviceSource()).handle(
+        {"id": "1", "method": "runPreflight"}
+    )["result"]
+    item = next(i for i in items if i["id"] == "factory-cal")
+    assert item["status"] == "fail"
+    assert item["error"]["code"] == "E-CAL-3001"
+
+
+def test_module_page_shows_the_derived_calibration_state(tmp_path) -> None:
+    """设备页那一栏也必须是**派生**的，不能由设备源自报。"""
+    source = StubDeviceSource()
+    _seed_calibrations(tmp_path, source, feet=("L",))
+    service = TerminalService(source=source, session_root=tmp_path)
+    modules = service.handle({"id": "1", "method": "deviceSupport"})["result"]["modules"]
+    by_side = {m["side"]: m["factoryCalibrated"] for m in modules}
+    assert by_side == {"left": True, "right": False}
 
 
 def test_tick_counts_down_against_real_protocol_time() -> None:

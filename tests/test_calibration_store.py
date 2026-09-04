@@ -414,3 +414,56 @@ def test_normalize_key_is_the_only_place_the_rule_lives(tmp_path):
     assert (written.kind, written.value) == (kind, value)
     assert store.path_for("mac", MAC.lower()) == store.path_for("mac", MAC)
     assert store.get("mac", MAC.lower()) is not None
+
+
+def test_each_foot_is_judged_by_its_own_provenance(tmp_path):
+    """`kind` 与 `value` 是逐只读的，`provenance` 也必须是。
+
+    第一版把推导当成全局的、拿参数里那一个套在两只脚上。设备源完全可能对两台读到
+    不同的推导（`binding.stale_identity_kinds` 守的就是这一类事）。
+
+    **构造成让旧实现答错**：右脚的读数与它库里那份都用 `new/2027` —— 自洽，应当放行。
+    旧实现拿 `current_provenance`（`PROVENANCE`）去比库里的 `new/2027`，会**误判成失效**
+    并拦下一台完全正常的模块。
+    """
+    from gait.calib.store import admit_devices
+
+    newer = "wt901-read-mac/be/2027-01-01"
+    other = "AA:BB:CC:DD:EE:FF"
+    store = CalibrationStore(tmp_path)
+    store.put(record())                                  # 左：PROVENANCE
+    store.put(record(value=other, provenance=newer))     # 右：newer
+
+    verdicts = admit_devices(
+        store,
+        {
+            "L": {"kind": "mac", "value": MAC, "provenance": PROVENANCE,
+                  "firmware": FIRMWARE},
+            "R": {"kind": "mac", "value": other, "provenance": newer,
+                  "firmware": FIRMWARE},
+        },
+        current_provenance=PROVENANCE,
+    )
+    assert verdicts["L"].admitted
+    assert verdicts["R"].admitted, (
+        "右脚的读数与它库里那份用的是同一套推导，自洽 —— 拿另一只脚的推导去判它"
+        "会拦下一台完全正常的模块"
+    )
+
+
+def test_a_reading_without_provenance_falls_back_to_the_argument(tmp_path):
+    """读数里没带推导时用 `current_provenance` 缺省 —— 缺省不等于跳过检查。"""
+    from gait.calib.store import admit_devices
+
+    store = CalibrationStore(tmp_path)
+    store.put(record(provenance="old/2025"))
+    verdicts = admit_devices(
+        store,
+        {
+            "L": {"kind": "mac", "value": MAC, "firmware": FIRMWARE},
+            "R": {"kind": "mac", "value": MAC, "firmware": FIRMWARE},
+        },
+        current_provenance=PROVENANCE,
+    )
+    assert not verdicts["L"].admitted
+    assert verdicts["L"].reason == "stale-provenance"
