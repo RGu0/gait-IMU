@@ -40,10 +40,12 @@ from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
 from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
+from gait.cloud.chain import ChainResult, run_basic_chain
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
-from gait.contracts import CONTRACT_VERSION, SessionMeta
+from gait.contracts import CONTRACT_VERSION, FootLabel, FootSeries, SessionMeta
 from gait.device.capture import SessionCapture
+from gait.device.footseries import frames_to_foot_series, load_session_frames
 from gait.device.identity import MAC_PROVENANCE
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
@@ -590,7 +592,19 @@ class TerminalService:
         由 `sessionResult` 给出。这里只在拿不到步态周期时拒绝，而拒绝的理由说的正是
         这件事，免得调用方以为报告层会替它把关。
         """
-        cycles = self._cycles_for(params)
+        try:
+            cycles = self._cycles_for(params)
+        except (OSError, ValueError):
+            # 会话目录里的录制读不回来：文件不在、被截断到读不出、或格式不认识。
+            # **不能落到 E-QLT-5003**（「质量不足」）—— 那会把一次读盘失败说成一次
+            # 采集质量问题，让操作员去重做一场其实采得好好的检测。
+            # `FootSeriesError` 是 `ValueError` 的子类，一并落在这里。
+            return TerminalError(
+                code="E-BLE-1021",
+                message="这次会话的原始数据读不回来，无法重新计算。",
+                action="请确认会话目录仍然完整；若数据已损坏，这次检测需要重做。",
+                blocking=True,
+            )
         if not cycles:
             return TerminalError(
                 code="E-QLT-5003",
@@ -600,7 +614,15 @@ class TerminalService:
         walk = self.walk
         return build_report(
             cycles,
-            report_id=str(params.get("reportId") or self.session_id or "R-unknown"),
+            report_id=str(
+                params.get("reportId")
+                # 给哪一次会话出报告，`reportId` 就该跟着那一次 —— 而重算历史会话时
+                # `self.session_id` 是空的（那是**本进程**当前的会话）。漏了这一层，
+                # 每一份历史报告的 id 都会是 "R-unknown"，而报告 id 是它唯一的把手。
+                or params.get("sessionId")
+                or self.session_id
+                or "R-unknown"
+            ),
             organization=(self.operator or {}).get("organization", "本机构"),
             subject_label=str(params.get("subjectLabel") or "未提供"),
             assessed_at=datetime.now(UTC).date().isoformat(),
@@ -609,20 +631,78 @@ class TerminalService:
             protocol_version=str(self.config.version),
             valid_seconds=walk.valid_seconds if walk else 0.0,
             turns=params.get("turns"),
-            annotations_text=params.get("annotations") or (),
+            annotations_text=self._report_annotations(params),
         )
+
+    #: 从会话目录重算时必须写进报告的一句话。见 `_chain_for` 的文档。
+    _UNCALIBRATED_NOTE = (
+        "本次报告由采集端就地重算，未使用标定参数（出厂加计标定与会话安装角）。"
+        "各项数值可用于对比同一台设备的多次检测，不作为绝对精度依据。"
+    )
+
+    def _report_annotations(self, params: dict[str, Any]) -> list[str]:
+        """报告顶部的标注条。
+
+        调用方给的标注照原样带上；**另外**，当周期是本层从会话目录重算出来的时候，
+        补一句「未使用标定参数」。
+
+        为什么非写不可：这条路径走的是 MVP 桥，没有标定补偿（见 `_chain_for`）。
+        一份没有标定的报告与一份有标定的报告在版面上**长得一模一样** —— 指标齐全、
+        质量标注全绿。读的人无从分辨，除非这里说出来。
+
+        调用方直接传了 `cycles` 就不加这句：那些周期从哪来本层不知道，替它声明
+        「未标定」同样是在编。
+        """
+        given = [str(text) for text in (params.get("annotations") or ())]
+        if params.get("cycles"):
+            return given
+        return [*given, self._UNCALIBRATED_NOTE]
 
     def _cycles_for(self, params: dict[str, Any]) -> list[Any]:
         """本次会话的步态周期。
 
-        **目前恒为空。** 从原始数据算出周期要跑完整的 ESKF → 事件检测 → 分段链
-        （`core/` + `analysis/`），而那条链在 sidecar 里还没有被接起来 —— 与本 scope
-        之前每一次「功能齐全但没人调用」是同一个形状，只是这次它被显式记下来了。
+        两条来路，顺序有意：
 
-        调用方可以直接传 `cycles` 进来（离线重算与测试走这条路），所以报告本身是
-        可验的；缺的只是「从这次采集自动算出周期」那一步。
+        1. 调用方直接传 `cycles`（离线重算与测试走这条），
+        2. 否则**从会话目录把录制读回来跑一遍基础链**。
+
+        直传优先，是因为一个明确给了周期的调用方不该被一次磁盘读覆盖掉；而没给的
+        时候，从前一直是空列表 —— 那正是 RAY-360 要补的那一段。
         """
-        return list(params.get("cycles") or [])
+        provided = list(params.get("cycles") or [])
+        if provided:
+            return provided
+        chain = self._chain_for(params)
+        if chain is None:
+            return []
+        # `selected` 是分段筛选之后的中段步，也就是分析层认为可用的那些。传全部
+        # `cycles` 会把转身那几步算进指标里 —— 那是 `analysis/segments` 存在的理由。
+        return [cycle for outcome in chain.feet.values() for cycle in outcome.selected]
+
+    def _chain_for(self, params: dict[str, Any]) -> ChainResult | None:
+        """把一次已落盘的会话跑过基础链。拿不到数据就返回 `None`。
+
+        **只用基础链**（前向 ESKF，不做 RTS 平滑 / 零速锚定 / 双足距离约束）：完整链
+        属 `cloud/`，由重算侧跑，采集端不在这里替它做决定。
+
+        走 MVP 桥 `frames_to_foot_series` 而不是 `calibrated_foot_series`：后者要
+        `StillCalibration` 与 `MountingCalibration`，而会话目录里只有 `calib_snapshot`
+        这份**快照**，从快照重建标定对象是另一件事。所以这条路上的数据**没有标定
+        补偿**，报告里会写明（见 `_do_reportFor`）—— 不写明地用一份未标定的数据出
+        一份看不出区别的报告，比出不了报告危险得多。
+        """
+        session_id = params.get("sessionId") or self.session_id
+        if not session_id or self.session_root is None:
+            return None
+        series_by_foot: dict[FootLabel, FootSeries] = {}
+        for label in ("L", "R"):
+            frames = load_session_frames(self.session_root, str(session_id), label)
+            if not frames:
+                continue
+            series_by_foot[label] = frames_to_foot_series(frames, label)
+        if not series_by_foot:
+            return None
+        return run_basic_chain(series_by_foot, protocol_seconds=self.config.duration_s)
 
     def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
         return _Unimplemented("subject-directory")
