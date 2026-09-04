@@ -27,6 +27,7 @@ from wt901 import Battery, Transport
 from wt901.transport.memory import MemoryTransport
 
 from gait.contracts import FootLabel
+from gait.device.identity import MAC_PROVENANCE
 
 #: 链路三档（UI 设计 §4.2）。采集中唯一允许的链路表达（FR-07）。
 LINK_GRADES: tuple[str, ...] = ("good", "fair", "bad")
@@ -57,8 +58,18 @@ class DeviceSource(Protocol):
     def link_grades(self) -> dict[str, str]:
         """左右链路档位，取自 `LINK_GRADES`。"""
 
-    def factory_calibrated(self) -> dict[str, bool]:
-        """出厂标定参数是否按 MAC 匹配到（FR-04，缺失即阻断）。"""
+    def device_readings(self) -> dict[str, dict[str, str]]:
+        """左右各一份设备读数：`kind` / `value` / `provenance` / `firmware`。
+
+        **这是读数，不是判定。** 出厂标定匹不匹配（FR-04）由
+        `calib.store.admit_devices` 从这些读数推出来 —— 与
+        `read_batteries()` → `preflight_battery()` 完全同构。
+
+        第一版这里是 `factory_calibrated() -> dict[str, bool]`，端口直接返回结论。
+        那与本模块开头那条规矩自相矛盾（「stub 只被允许提供读数，不能决定准入」），
+        且它让 `E-CAL-3001` 那道 PRD §6.1 的阻断变成**由 fixture 写死**的 ——
+        「流程验证过了」于是又变成一句空话，正是本模块存在要避免的事。
+        """
 
     def disk_free_bytes(self) -> int: ...
 
@@ -107,7 +118,25 @@ class StubDeviceSource:
     arrival: dict[str, float] = field(default_factory=lambda: {"L": 0.99, "R": 0.98})
     steps: dict[str, int] = field(default_factory=lambda: {"L": 0, "R": 0})
     links: dict[str, str] = field(default_factory=lambda: {"L": "good", "R": "good"})
-    calibrated: dict[str, bool] = field(default_factory=lambda: {"L": True, "R": True})
+    #: 设备读数。**不是「标定过没有」** —— 那是判定，由 `calib.store` 推。
+    #: 默认给一对形状正确的身份；测试要验「没标定」时改的是**参数库里有没有这台**，
+    #: 不是改这里的布尔值。
+    identities: dict[str, dict[str, str]] = field(
+        default_factory=lambda: {
+            "L": {
+                "kind": "mac",
+                "value": "F9:B3:4F:46:C9:4C",
+                "provenance": MAC_PROVENANCE,
+                "firmware": "1.4.2",
+            },
+            "R": {
+                "kind": "mac",
+                "value": "F9:B3:4F:46:C9:51",
+                "provenance": MAC_PROVENANCE,
+                "firmware": "1.4.2",
+            },
+        }
+    )
     disk_free: int = 64 * 1024**3
     #: 每秒往每只脚推多少帧合成字节。0 表示不推 —— 默认不推，因为大多数测试
     #: 只关心状态机，不需要磁盘上真的长出东西来。
@@ -128,8 +157,8 @@ class StubDeviceSource:
     def link_grades(self) -> dict[str, str]:
         return dict(self.links)
 
-    def factory_calibrated(self) -> dict[str, bool]:
-        return dict(self.calibrated)
+    def device_readings(self) -> dict[str, dict[str, str]]:
+        return {label: dict(reading) for label, reading in self.identities.items()}
 
     def disk_free_bytes(self) -> int:
         return self.disk_free
@@ -139,7 +168,6 @@ class StubDeviceSource:
             {
                 "side": "left" if label == "L" else "right",
                 "maskedAddress": "…:9A:4C" if label == "L" else "…:9A:51",
-                "factoryCalibrated": self.calibrated[label],
                 "batteryPercent": (
                     self.batteries[label].percent if self.batteries[label] else None
                 ),

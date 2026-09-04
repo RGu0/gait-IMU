@@ -39,10 +39,12 @@ from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
+from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, SessionMeta
 from gait.device.capture import SessionCapture
+from gait.device.identity import MAC_PROVENANCE
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
     LinkOutcome,
@@ -107,6 +109,13 @@ class TerminalService:
             if session_root is not None
             else None
         )
+        #: 出厂标定参数库（FR-04）。与 `UploadQueue` 同根 —— 「哪份数据属于哪个库」
+        #: 不该变成靠约定维持的事实。`session_root` 缺席时库为空，于是每台设备都判
+        #: 「缺失」并阻断；这与 `preflight_battery` 的「读不到也阻断」同一口径，
+        #: 而不是悄悄放行。
+        self.calibrations = (
+            CalibrationStore(session_root) if session_root is not None else None
+        )
         self.walk: TimedWalk | None = None
         self._event_seq = 0
         self._aborted: dict[str, Any] | None = None
@@ -161,10 +170,61 @@ class TerminalService:
     def _do_recheckDevices(self, _: dict[str, Any]) -> dict[str, Any]:
         return self._snapshot()
 
+    def _modules_with_calibration(self) -> list[dict[str, Any]]:
+        """设备页摘要 + **派生**出来的 `factoryCalibrated`。
+
+        这一栏由 service 补，不由 `module_info()` 给：设备源只提供读数，
+        「标定匹没匹配上」是判定。
+        """
+        verdicts = self._calibration_verdicts()
+        modules = self.source.module_info()
+        for module in modules:
+            label = "L" if module.get("side") == "left" else "R"
+            verdict = verdicts.get(label)
+            module["factoryCalibrated"] = bool(verdict and verdict.admitted)
+        return modules
+
+    def _calibration_verdicts(self) -> dict[str, StoreVerdict]:
+        """从设备**读数**推出每只脚的出厂标定准入（FR-04）。
+
+        与 `preflight_battery(readings)` 同构：端口只给读数，结论在这里由
+        `calib.store` 推出来。第一版这里读的是 `source.factory_calibrated()` —— 一个
+        由 stub 写死的 `dict[str, bool]`，于是 `E-CAL-3001` 这道阻断的结论是 fixture
+        给的，不是从「库里有没有这台设备的参数」推出来的。
+        """
+        readings = self.source.device_readings()
+        if self.calibrations is None:
+            # 没有会话根就没有参数库。**阻断而不是放行** —— 与「读不到电量也阻断」
+            # 同一条理由：拿不到依据时不能假设它是好的。
+            return {
+                label: StoreVerdict(
+                    admitted=False,
+                    reason="missing",
+                    problems=(
+                        (
+                            "本机没有配置标定参数库位置，无法确认出厂标定。"
+                            "请联系服务方下发。"
+                        ),
+                    ),
+                )
+                for label in ("L", "R")
+            }
+        provenance = next(
+            (
+                reading.get("provenance")
+                for reading in readings.values()
+                if reading.get("provenance")
+            ),
+            MAC_PROVENANCE,
+        )
+        return admit_devices(
+            self.calibrations, readings, current_provenance=provenance
+        )
+
     def _do_runPreflight(self, _: dict[str, Any]) -> list[dict[str, Any]]:
         """P-05 自检。每一项的结论都由真实实现推出来，不是写死的。"""
         items: list[dict[str, Any]] = []
-        calibrated = self.source.factory_calibrated()
+        calibration = self._calibration_verdicts()
         arrival = self.arrival_rates_checked()
         batteries = self.source.read_batteries()
         verdict = preflight_battery(batteries)
@@ -185,7 +245,15 @@ class TerminalService:
                 )
             )
 
-        all_calibrated = all(calibrated.get(label, False) for label in ("L", "R"))
+        all_calibrated = all(verdict.admitted for verdict in calibration.values())
+        # 失败时把**这一次**的具体原因带出来，而不是一句通用话：缺失要联系服务方
+        # 标定（十分钟流程），而身份推导变了/固件变了/文件拷错了只需要重新下发。
+        # 操作员的下一步不同，提示就不该一样。
+        reasons = tuple(
+            f"{_SIDES[label]}：{verdict.problems[0]}"
+            for label, verdict in sorted(calibration.items())
+            if not verdict.admitted
+        )
         items.append(
             self._item(
                 "factory-cal",
@@ -195,7 +263,8 @@ class TerminalService:
                 fail=TerminalError(
                     code="E-CAL-3001",
                     message="有模块没有匹配到出厂标定参数。",
-                    action="请联系服务方按模块 MAC 下发标定参数；机构侧不做六面法。",
+                    action=" ".join(reasons)
+                    or "请联系服务方按模块 MAC 下发标定参数；机构侧不做六面法。",
                 ),
             )
         )
@@ -511,7 +580,7 @@ class TerminalService:
 
     def _do_deviceSupport(self, _: dict[str, Any]) -> dict[str, Any]:
         return {
-            "modules": self.source.module_info(),
+            "modules": self._modules_with_calibration(),
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
 
