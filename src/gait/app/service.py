@@ -209,16 +209,10 @@ class TerminalService:
                 )
                 for label in ("L", "R")
             }
-        provenance = next(
-            (
-                reading.get("provenance")
-                for reading in readings.values()
-                if reading.get("provenance")
-            ),
-            MAC_PROVENANCE,
-        )
+        # 每只脚用它自己读到的 provenance；这里的 MAC_PROVENANCE 只是读数里没带
+        # 推导时的缺省值，不是拿一只脚的推导去套另一只（见 `admit_devices` 的文档）。
         return admit_devices(
-            self.calibrations, readings, current_provenance=provenance
+            self.calibrations, readings, current_provenance=MAC_PROVENANCE
         )
 
     def _do_runPreflight(self, _: dict[str, Any]) -> list[dict[str, Any]]:

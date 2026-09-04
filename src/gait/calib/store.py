@@ -395,7 +395,13 @@ def admit_devices(
     *,
     current_provenance: str,
 ) -> dict[str, StoreVerdict]:
-    """双足各判一次。`readings` 是**读数**：每只脚一份 `{kind, value, firmware}`。
+    """双足各判一次。`readings` 是**读数**：每只脚一份 `{kind, value, provenance, firmware}`。
+
+    **每只脚用它自己的 **`provenance`**；`current_provenance` 只是缺省值。** 第一版把
+    推导当成全局的、拿第一只脚的套在两只脚上 —— 而 `kind` 与 `value` 明明是逐只读的，
+    只有 `provenance` 例外。这种不对称迟早出事：设备源完全可能对一台读到 MAC、对另一台
+    退化到别的推导（`binding.stale_identity_kinds` 守的就是这件事），那时第二只脚会被
+    拿第一只脚的推导去判。
 
     形状刻意与 `device/orchestration.preflight_battery(readings)` 一致：**入参是读数，
     出参是判定**。`app/sources.py` 的模块文档把这条写成了原则 —— stub「只被允许提供
@@ -423,7 +429,7 @@ def admit_devices(
         verdicts[label] = store.admit(
             kind,
             value,
-            current_provenance=current_provenance,
+            current_provenance=reading.get("provenance") or current_provenance,
             current_firmware=firmware or FIRMWARE_UNKNOWN,
         )
     return verdicts
