@@ -42,10 +42,21 @@ FORBIDDEN_WORDS: Final[tuple[str, ...]] = (
 )
 
 #: 机器可读的 reason → 客户能看懂的原因。**穷举**，见模块文档。
+#: 机器 reason → 给客户看的一句话。**键必须与 `quality/annotate.py` 实际产出的
+#: 字符串逐字对上** —— `tests/test_report_wording.py` 直接从那份源码里抓
+#: `reasons.append(...)` 的字面量来查，抄错一个字母就变红。
+#:
+#: 这条守卫是补出来的：第一版这里写的是 `"missing_sync"`，而 `annotate` 产出的是
+#: `"missing_sync_quality"` —— **那个键从来没有匹配过任何东西**，看着像在覆盖同步
+#: 那一类，实际一直落到兜底句上。另外三个 sync/zupt 的 reason 则根本没有条目。
+#: 兜底句本身是安全的（不编原因），所以这件事不会报错，也没有测试会红。
 _REASON_TEXT: Final[dict[str, str]] = {
     "not_computable": "本次协议不产出该项。",
     "no_steps": "本次没有采到有效步。",
-    "missing_sync": "本次两侧同步证据不足。",
+    "missing_sync_quality": "本次没有两侧同步质量的依据。",
+    "sync_indeterminate": "本次两侧同步质量未能判定。",
+    "sync_flagged": "本次两侧同步质量被标记为存疑。",
+    "zupt_degraded": "本次零速判定有降级，该项证据有限。",
 }
 
 
