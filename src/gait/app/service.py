@@ -70,6 +70,17 @@ from gait.protocolflow.timed_walk import (
 )
 from gait.report import build_report
 
+
+class SessionDataUnreadable(OSError):
+    """会话目录里的录制**读不回来**。
+
+    自成一类而不是复用 `OSError` / `ValueError`：这一层要把「文件读不回来」与
+    「数据读回来了但算不出东西」分成两个结局，而按**异常类型**分不开它们 ——
+    `analysis.segments.SegmentationError` 也是 `ValueError`。所以按**失败在哪一段**
+    分：读盘那一步抛这个，链那一步抛什么都算「算不出」。
+    """
+
+
 _SIDES = {"L": "左", "R": "右"}
 
 #: 到达率低于此值即自检不通过。PRD §6.1「到达率（≥ 5 s 观察）」没有给数字，
@@ -531,17 +542,26 @@ class TerminalService:
         """
         try:
             cycles = self._cycles_for(params)
-        except (OSError, ValueError):
-            # 会话目录里的录制读不回来：文件不在、被截断到读不出、或格式不认识。
+        except SessionDataUnreadable:
+            # 录制**读不回来**：文件不在、被截断到读不出、或格式不认识。
             # **不能落到 E-QLT-5003**（「质量不足」）—— 那会把一次读盘失败说成一次
             # 采集质量问题，让操作员去重做一场其实采得好好的检测。
-            # `FootSeriesError` 是 `ValueError` 的子类，一并落在这里。
             return TerminalError(
                 code="E-BLE-1021",
                 message="这次会话的原始数据读不回来，无法重新计算。",
                 action="请确认会话目录仍然完整；若数据已损坏，这次检测需要重做。",
                 blocking=True,
             )
+        except ValueError:
+            # 数据读回来了，是**链算不出可用周期**：零速检不出、直行段不够、
+            # 剔除策略把步剔光。与下面「周期为空」是同一个结局，所以同一个码。
+            #
+            # 这一分支是真机数据逼出来的：上一版把它和读盘失败包在同一个
+            # `except (OSError, ValueError)` 里，于是 `SegmentationError`
+            # （`ValueError` 的子类）被报成了「原始数据读不回来」—— 一次**分析层的
+            # 结论**被说成一次**磁盘故障**，操作员会去查一个完好的文件。
+            # 合成数据查不出这一层：合成步行永远是一条干净的直线。
+            cycles = []
         if not cycles:
             return TerminalError(
                 code="E-QLT-5003",
@@ -633,12 +653,19 @@ class TerminalService:
             return None
         series_by_foot: dict[FootLabel, FootSeries] = {}
         for label in ("L", "R"):
-            frames = load_session_frames(self.session_root, str(session_id), label)
+            # **只把读盘这一步包起来。** 包宽一点就会把下游任何一个 ValueError
+            # 都归成「读不回来」—— 那正是本函数上一版犯的错，见 `_do_reportFor`。
+            try:
+                frames = load_session_frames(self.session_root, str(session_id), label)
+            except (OSError, ValueError) as error:
+                raise SessionDataUnreadable(str(error)) from error
             if not frames:
                 continue
             series_by_foot[label] = frames_to_foot_series(frames, label)
         if not series_by_foot:
             return None
+        # 链与分析层的异常**照原样上抛**：它们说的是「这段数据算不出东西」，
+        # 与「文件读不回来」是两个结局，不能在这里被抹平成同一个。
         return run_basic_chain(series_by_foot, protocol_seconds=self.config.duration_s)
 
     def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
