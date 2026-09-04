@@ -687,6 +687,10 @@ body {
   accent-color: var(--brand-primary);
 }
 
+/* 与 .consent-gate 同一处置：说明主动作为什么还不能按，而不是让操作员对着
+   一个灰按钮猜。禁用状态本身不解释自己。 */
+.wear-gate { margin: 0; color: var(--text-secondary); font: var(--text-secondary-size); }
+
 .calib-instruction { margin: 0; font: var(--text-body-lg); }
 .calib-substep { margin: 0; color: var(--text-secondary); font: var(--text-secondary-size); }
 
