@@ -387,6 +387,23 @@ class AccelCalibration:
         off_diagonal = self.matrix[~np.eye(3, dtype=bool)]
         return float(np.max(np.abs(off_diagonal)) * 1000.0)
 
+    @property
+    def name(self) -> str:
+        """进会话元数据的标识。**要能让人一眼看出这份数据标没标定、标得怎么样。**
+
+        满足 `device/footseries.AccelCalibration` 那个 Protocol（RAY-360 定的消费侧
+        接口）。加它是因为两边差一点就接不上：`calibrated_foot_series` 收的是那个
+        Protocol，而本类只有 `apply` 没有 `name` 时 `isinstance` 为假 —— 两个 scope
+        各自都跑得通、合在一起却传不进去。有一条测试直接断言 `isinstance`，免得再漂。
+
+        与 `NoAccelCalibration.name`（`"none(未做出厂加计标定)"`）成对：一份会话元
+        数据里看到哪一个，就知道这条数据有没有经过出厂补偿。
+        """
+        return (
+            f"multi-orientation({self.device}, {len(self.orientations)} 姿态, "
+            f"留一 {self.loo_mg:.2f} mg)"
+        )
+
     def apply(self, acc: np.ndarray) -> np.ndarray:
         """把标称 SI 的比力改正到标定后的值。`(n,3) -> (n,3)`，也接受 `(3,)`。
 
@@ -406,6 +423,7 @@ class AccelCalibration:
         """进 `SessionMeta.calib_snapshot`（PRD §6.1 强制字段）。"""
         return {
             "device": self.device,
+            "name": self.name,
             "method": "multi-orientation-magnitude",
             "matrix": [[float(v) for v in row] for row in self.matrix],
             "offset": [float(v) for v in self.offset],
