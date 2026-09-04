@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 
 from gait.calib.still import CalibrationError
 
@@ -78,6 +79,7 @@ __all__ = [
     "CalibrationStore",
     "StoreVerdict",
     "admit_devices",
+    "normalize_key",
     "record_from_calibration",
 ]
 
@@ -86,6 +88,23 @@ def _require_text(value: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CalibrationError(f"{field} 不能为空")
     return value.strip()
+
+
+def normalize_key(kind: str, value: str) -> tuple[str, str]:
+    """把身份规范化成入库用的键。**唯一的一处** —— 记录、路径、读回校验都用它。
+
+    与 `DeviceIdentity.__post_init__` 同一套规则：同一个 MAC 写成 `aa:bb…` 与
+    `AA-BB…` 是同一台设备。两处对不上的话，写进去的键取不出来，而那种失败在日志里
+    看起来和「这台模块没标定过」一模一样。
+
+    第一版把这套规则抄在了三个地方（记录的 `__post_init__`、`path_for`、读回校验），
+    抄第三遍时就写歪了 —— 同一件事有三处实现，它们迟早对不上。
+    """
+    kind = _require_text(kind, "kind")
+    value = _require_text(value, "value")
+    if kind == "mac":
+        value = value.upper().replace("-", ":")
+    return kind, value
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,17 +130,12 @@ class CalibrationRecord:
     calib_snapshot: dict[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", _require_text(self.kind, "kind"))
         object.__setattr__(self, "provenance", _require_text(self.provenance, "provenance"))
         object.__setattr__(self, "firmware", _require_text(self.firmware, "firmware"))
         object.__setattr__(self, "recorded_at", _require_text(self.recorded_at, "recorded_at"))
-        # 与 `DeviceIdentity.__post_init__` 同一套规范化：同一个 MAC 写成 aa:bb… 与
-        # AA-BB… 是同一台设备，而「大小写不同就认不出」这种失败在日志里看起来和
-        # 「设备换了一台」一模一样。两处必须一致，否则写进去的键取不出来。
-        normalized = _require_text(self.value, "value")
-        if self.kind == "mac":
-            normalized = normalized.upper().replace("-", ":")
-        object.__setattr__(self, "value", normalized)
+        kind, value = normalize_key(self.kind, self.value)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "value", value)
         if not isinstance(self.calib_snapshot, dict) or not self.calib_snapshot:
             raise CalibrationError(
                 "calib_snapshot 不能为空 —— 一条没有参数的记录不是记录"
@@ -195,12 +209,17 @@ class StoreVerdict:
 
 
 def _filename(kind: str, value: str) -> str:
-    """键 → 文件名。冒号在 Windows 上不是合法文件名字符，换成短横。
+    """键 → 文件名。冒号在 Windows 上不是合法文件名字符，必须转义。
 
-    只做替换不做哈希：服务方要能在文件管理器里一眼看出某台设备的参数在不在。
+    用**百分号转义**而不是把 `:` 换成 `-`。第一版就是后者，而它**不是单射**：
+    `serial:AB:CD` 与 `serial:AB-CD` 会落到同一个文件名上，后写的那台设备静默覆盖
+    前一台。MAC 因为先被规范化成冒号形式而侥幸不受影响，但 `serial` 同样是
+    `binding._PORTABLE_KINDS` 里的可移植身份，这条路是走得通的。
+
+    百分号转义可逆，因此不同的值一定落到不同的文件；而 `F9%3AB3%3A…` 仍然一眼能认
+    出是哪台设备，服务方在文件管理器里找得到 —— 这是当初选可读文件名的理由，没有丢。
     """
-    safe = value.replace(":", "-")
-    return f"{kind}-{safe}.json"
+    return f"{quote(kind, safe='')}-{quote(value, safe='')}.json"
 
 
 class CalibrationStore:
@@ -214,11 +233,7 @@ class CalibrationStore:
         self.root = Path(root) / STORE_DIRNAME
 
     def path_for(self, kind: str, value: str) -> Path:
-        kind = _require_text(kind, "kind")
-        value = _require_text(value, "value")
-        if kind == "mac":
-            value = value.upper().replace("-", ":")
-        return self.root / _filename(kind, value)
+        return self.root / _filename(*normalize_key(kind, value))
 
     def put(self, record: CalibrationRecord) -> Path:
         """写入一条记录，覆盖同一台设备的旧记录。"""
@@ -250,7 +265,21 @@ class CalibrationStore:
                 f"标定记录 {target.name} 读不出来（JSON 损坏）。这不是「没有标定」，"
                 "是文件坏了 —— 请重新下发而不是重新标定。"
             ) from error
-        return CalibrationRecord.from_snapshot(data)
+        loaded = CalibrationRecord.from_snapshot(data)
+
+        # 文件**内容**必须与它被找到的那个键一致。这不是重复上面的文件名规则：
+        # 文件名管的是「本程序写出去的键不会撞」，这一条管的是「这个文件是不是被
+        # 放错了地方」—— 而下发是服务方**手工拷贝**文件的操作，拷到隔壁设备的名字
+        # 下完全可能发生，且拷错之后一切看起来都正常：读得出、schema 对、参数也像
+        # 真的，只是那是另一台模块的参数。
+        expected_kind, expected_value = normalize_key(kind, value)
+        if (loaded.kind, loaded.value) != (expected_kind, expected_value):
+            raise CalibrationError(
+                f"标定记录 {target.name} 里记的是 {loaded.key}，与请求的 "
+                f"{expected_kind}:{expected_value} 对不上。这份文件多半是被放错了位置"
+                "（下发时拷错），拿它去补偿等于用另一台模块的参数。"
+            )
+        return loaded
 
     def admit(
         self,

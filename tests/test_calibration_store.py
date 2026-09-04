@@ -350,3 +350,67 @@ def test_admit_devices_treats_a_missing_firmware_reading_as_unknown(tmp_path):
     assert not verdicts["L"].admitted
     assert verdicts["L"].reason == "stale-firmware"
     assert verdicts["R"].admitted
+
+
+# ── 自评查出的两处 ────────────────────────────────────────────────────────
+
+
+def test_distinct_identities_never_share_a_file(tmp_path):
+    """**文件名必须是单射。**
+
+    第一版把 `:` 换成 `-`，于是 `serial:AB:CD` 与 `serial:AB-CD` 落到同一个文件名上，
+    后写的那台设备**静默覆盖**前一台。MAC 因为先被规范化成冒号形式而侥幸躲过，但
+    `serial` 同样是 `binding._PORTABLE_KINDS` 里的可移植身份，这条路走得通。
+    """
+    store = CalibrationStore(tmp_path)
+    assert store.path_for("serial", "AB:CD") != store.path_for("serial", "AB-CD")
+
+    store.put(record(kind="serial", value="AB:CD", firmware="1.0.0"))
+    store.put(record(kind="serial", value="AB-CD", firmware="2.0.0"))
+    assert store.get("serial", "AB:CD").firmware == "1.0.0"
+    assert store.get("serial", "AB-CD").firmware == "2.0.0"
+
+
+def test_a_file_copied_to_the_wrong_name_is_caught(tmp_path):
+    """下发是服务方**手工拷贝**文件的操作，拷到隔壁设备的名字下完全可能发生。
+
+    拷错之后一切看起来都正常：读得出、schema 对、参数也像真的 —— 只是那是另一台
+    模块的参数，拿去补偿会静默地把整场会话的数据搞错。所以读回时要核内容里的键。
+
+    这条与文件名单射**不重复**：那条管「本程序写出去的键不会撞」，这条管「这个文件
+    是不是被放错了地方」。
+    """
+    store = CalibrationStore(tmp_path)
+    store.put(record())  # 记的是 MAC
+    other = "AA:BB:CC:DD:EE:FF"
+    # 把左脚那台的文件原样拷到另一台设备的名字下 —— 内容还是原来那台的。
+    store.path_for("mac", other).write_text(
+        store.path_for("mac", MAC).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    with pytest.raises(CalibrationError, match="对不上|放错"):
+        store.get("mac", other)
+
+    verdict = store.admit(
+        "mac", other, current_provenance=PROVENANCE, current_firmware=FIRMWARE
+    )
+    assert not verdict.admitted
+    assert verdict.reason == "unreadable"
+
+
+def test_normalize_key_is_the_only_place_the_rule_lives(tmp_path):
+    """规范化规则只有一处。记录、路径、读回校验都走 `normalize_key`。
+
+    第一版把这套规则抄在三个地方，抄第三遍时写歪了。这条钉住三者一致 ——
+    不一致的症状是「写进去的键取不出来」，而它在日志里看起来和「没标定过」一样。
+    """
+    from gait.calib.store import normalize_key
+
+    store = CalibrationStore(tmp_path)
+    written = record(value=MAC.lower().replace(":", "-"))
+    store.put(written)
+
+    kind, value = normalize_key("mac", MAC.lower())
+    assert (written.kind, written.value) == (kind, value)
+    assert store.path_for("mac", MAC.lower()) == store.path_for("mac", MAC)
+    assert store.get("mac", MAC.lower()) is not None
