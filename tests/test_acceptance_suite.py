@@ -262,7 +262,12 @@ def _interval_row(
         "walk": "mid-a",
         "new": {
             "path": "new",
+            # 判据读的是**中位**（RAY-354 判据 2）：`fraction` 建在均值上，被单个
+            # 离群相位支配 —— 实测一个 +4.412 s 的静止前导伪影就能把它顶起 0.07，
+            # 而中位纹丝不动。两个都给，但只有中位进判据。
             "ds_fraction": new_ds,
+            "ds_median": new_ds,
+            "ds_excluded": 0,
             "same_foot": same_foot,
             "stance_pct": list(stance_pct),
             "intervals": [36, 36],
@@ -270,6 +275,8 @@ def _interval_row(
         "old": {
             "path": "old",
             "ds_fraction": old_ds,
+            "ds_median": old_ds,
+            "ds_excluded": 0,
             "same_foot": 3,
             "stance_pct": [9.0, 9.0],
             "intervals": [37, 36],

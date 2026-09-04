@@ -410,23 +410,61 @@ def detect_stance_intervals(
     return refined
 
 
+#: 相位超过这么多个步态周期就不是双支撑期，是两足步序错开的配对伪影（RAY-354 判据 7）。
+#: 实测最负相位：`S1-sport/slow-a` −5.58 个周期，其余 11 格 −0.96 ~ −0.02。
+#: 取 1.5 是保守值 —— 1.0~1.5 之间只有 `S1-sport/mid-b` 一格（−0.96），它该不该一并
+#: 剔掉，现有数据定不了，所以不拿单一格调参。
+MAX_PHASE_STRIDES: Final[float] = 1.5
+
+#: 配对达成率的下限（RAY-354 判据 1）。实测 0.88~1.00，**当前没有格触发**；
+#: 但 RAY-354 判据 6 落地**之前**，`S1-sport/slow-a` 是 5 个相位 / 20 个中段步
+#: = 0.26 —— 那种失效真发生过，所以这是一道有历史正样本的休眠守卫。
+MIN_PAIRING_COVERAGE: Final[float] = 0.5
+
+
 @dataclass(frozen=True)
 class DoubleSupport:
-    """双支撑期。**跨足指标，强制附同步质量**（PRD §13）。"""
+    """双支撑期。**跨足指标，强制附同步质量**（PRD §13）。
 
-    #: 每个双支撑相位的时长，s。
+    ## 为什么不只报 `fraction`（RAY-354 判据 2）
+
+    `fraction` 建在均值上，而**均值被单个离群相位支配**。真机实测
+    `最小相位 vs fraction` 的相关是 **r = +0.931**；`S1-flat/slow-b` 只有 **1** 个
+    负相位（−6.296 s），占比就从中位 +0.086 被拉到 −0.038。
+
+    所以这里同时带上 `median`（稳健）、`count`（多少个相位撑着这个数）、
+    `worst`（最负的那一个）。**只报 fraction 等于只报一个离群值检测器。**
+    """
+
+    #: 每个双支撑相位的时长，s。**已剔除物理上不可能的配对**，见 `excluded`。
     phases: np.ndarray
     mean: float
     #: 占一个 step 时长的比例。生理值 10~25%（整体设计 §6.2）。
     fraction: float
     #: 同步质量标注。**不是可选的** —— 见模块文档 §4。
     sync_quality: dict[str, Any]
+    #: 相位中位数，s。**比 `fraction` 稳健**，见类文档。
+    median: float = float("nan")
+    #: 最负的那个相位，s。它基本决定了 `fraction`，所以要能看见。
+    worst: float = float("nan")
+    #: 剔除物理上不可能的配对之后，还剩几个相位。
+    count: int = 0
+    #: 被剔掉的配对数（跨过 `MAX_PHASE_STRIDES` 个步态周期的那些）。
+    #: **静默地扰动一个指标比报错还坏**，所以剔了几个必须留在读数里。
+    excluded: int = 0
+    #: 配对达成率 = 相位数 ÷ (nL + nR − 1)。低说明两足步序配不上。
+    coverage: float = float("nan")
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "phases": [float(value) for value in self.phases],
             "mean": self.mean,
             "fraction": self.fraction,
+            "median": self.median,
+            "worst": self.worst,
+            "count": self.count,
+            "excluded": self.excluded,
+            "coverage": self.coverage,
             "sync_quality": dict(self.sync_quality),
             "version": EVENTS_VERSION,
         }
@@ -553,16 +591,50 @@ def double_support(
         phases.append(to_first - ic_second)
 
     values = np.array(phases, dtype=np.float64)
-    step_times = np.array(
-        [cycle.stride_time / STEPS_PER_STRIDE for cycle in [*left, *right]]
-    )
-    step_time = float(np.median(step_times)) if step_times.size else float("nan")
-    mean = float(values.mean()) if values.size else float("nan")
+
+    # ── 判据 1：配对达成率 ────────────────────────────────────────────────────
+    # 完全交替时能配出 nL + nR − 1 个相位。达成率低说明两只脚的步序**配不上**，
+    # 剩下的配对跨过了对侧缺掉的那些步 —— 那时给出一个数比不给更坏。
+    attainable = len(left) + len(right) - 1
+    coverage = float(values.size / attainable) if attainable > 0 else 0.0
+    if coverage < MIN_PAIRING_COVERAGE:
+        raise EventError(
+            f"两足步序配不上：{values.size} 个相位 / 可配 {attainable} 个 "
+            f"= 达成率 {coverage:.2f} < {MIN_PAIRING_COVERAGE}。"
+            "此时的双支撑期不是一个差的读数，它不是读数 —— 标为不可计算。"
+        )
+
+    strides = np.array([cycle.stride_time for cycle in [*left, *right]])
+    stride_time = float(np.median(strides)) if strides.size else float("nan")
+
+    # ── 判据 7：相位的物理合理性 ──────────────────────────────────────────────
+    # 相位是 `to_first − ic_second`，量级不该超过一个步态周期。跨过整步的配对
+    # 是两只脚在那里错开了，不是双支撑期读数。真机实测最负 −5.58 个周期
+    # （`S1-sport/slow-a`），其余 11 格在 −0.96 ~ −0.02 之间。
+    if np.isfinite(stride_time) and stride_time > 0:
+        keep = np.abs(values) <= MAX_PHASE_STRIDES * stride_time
+        excluded = int((~keep).sum())
+        values = values[keep]
+    else:
+        excluded = 0
+
+    if not values.size:
+        raise EventError(
+            "剔除跨步配对之后一个相位都不剩 —— 标为不可计算，而不是返回 nan。"
+        )
+
+    step_time = stride_time / STEPS_PER_STRIDE if stride_time > 0 else float("nan")
+    mean = float(values.mean())
     return DoubleSupport(
         phases=values,
         mean=mean,
         fraction=mean / step_time if step_time > 0 else float("nan"),
         sync_quality=dict(sync_quality),
+        median=float(np.median(values)),
+        worst=float(values.min()),
+        count=int(values.size),
+        excluded=excluded,
+        coverage=coverage,
     )
 
 

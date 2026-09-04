@@ -515,7 +515,15 @@ def _assemble(
 
     double = None
     if left and right and sync_quality is not None:
-        double = events.double_support(left, right, sync_quality=sync_quality)
+        try:
+            double = events.double_support(left, right, sync_quality=sync_quality)
+        except events.EventError:
+            # RAY-354 判据 1 / 7：两足步序配不上、或剔掉跨步配对后一个相位不剩时，
+            # `double_support` 抛错。**接住它、标为不可计算**，而不是让一份本可以出
+            # （其余指标照常）的报告整个打掉 —— 与 `variability.analyse` 同一处理。
+            # `_annotate_all` 把可算性绑在 `double is not None` 上，所以置 None 就
+            # 足够让页脚如实说"这项没算出来"。
+            double = None
 
     session_variability = None
     if left or right:

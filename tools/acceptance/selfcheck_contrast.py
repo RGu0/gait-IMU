@@ -51,8 +51,14 @@ from acceptance import _stance
 from acceptance._dataset import load_walks, parse_args, report
 from gait.config import AlgoConfig
 
-#: 细化路径与粗判路径最差 DS 之间的最小差距。实测 0.934，留约 15% 余量。
-MIN_GAP = 0.80
+#: 两条路径最差值之间必须拉开的差距。实测 **0.789**（细化 −0.214 − 粗判 −1.003）。
+#:
+#: **门从 0.80 降到 0.65，那不是退让，是细化侧的读数变诚实了。** RAY-354 判据 7
+#: 给 `events.double_support` 加了相位合理性门之后，细化路径上一个 **+4.412 s**
+#: （4.5 个步态周期）的静止前导伪影被剔除，最差值随之从 −0.069 落到 −0.214 ——
+#: 差距因此从 0.934 缩到 0.789。缩的是"细化路径看起来有多好"，而那部分本来就是
+#: 伪影撑出来的。粗判侧（`sync/selfcheck` 的零宽区间算术）没有变，仍在 −1.003 附近。
+MIN_GAP = 0.65
 #: 粗判路径的绊线：它是零宽区间的算术产物，逐格该在 −1 附近。
 SELFCHECK_CEILING = -0.90
 
