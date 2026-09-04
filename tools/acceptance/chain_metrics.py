@@ -137,6 +137,32 @@ def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
                     if chain.double_support
                     else None
                 ),
+                # RAY-354 判据 2：占比被单个离群相位支配（实测
+                # `最小相位 vs 占比 r = +0.931`），所以稳健量也要逐格记下来。
+                "ds_median": (
+                    round(float(chain.double_support.median), 4)
+                    if chain.double_support
+                    else None
+                ),
+                "ds_count": chain.double_support.count if chain.double_support else None,
+                "ds_excluded": (
+                    chain.double_support.excluded if chain.double_support else None
+                ),
+                "ds_coverage": (
+                    round(float(chain.double_support.coverage), 3)
+                    if chain.double_support
+                    else None
+                ),
+                # RAY-354 判据 3：中段步保留率 = 中段步 ÷ 周期。
+                # 上限由 `trim` 定死（trim=1 时 (n−2)/n），下限就是分段损害。
+                "retention": {
+                    label: (
+                        round(len(outcome.selected) / len(outcome.cycles), 3)
+                        if outcome.cycles
+                        else None
+                    )
+                    for label, outcome in sorted(chain.feet.items())
+                },
                 "stance_pct": {
                     label: (
                         round(float(outcome.spatiotemporal.stance_ratio), 1)
@@ -195,6 +221,16 @@ def analyse(trial_dir: Path, cfg: AlgoConfig) -> list[dict]:
     return rows
 
 
+#: 达到中段步保留率理论上限（`(n−2)/n`，`trim=1`）的**足数**允许的带，共 24 只脚。
+#: 实测 **22/24** —— 只有 `S1-sport/slow-a` 两只脚在下面（0.515 / 0.548），那是已知的
+#: 前向解发散格。**双向**：涨到 24 说明有人把那格修好了，该来收紧这条。
+AT_CAP_FEET_BAND = (18, 23)
+
+#: 被判据 7 剔掉的跨步配对总数允许的带。实测 **2**，两个都在 `S1-sport/slow-a`。
+#: **双向**：掉到 0 说明配对伪影没了（好事，该更新判据）；涨上去说明步序在退化。
+EXCLUDED_PHASES_BAND = (1, 6)
+
+
 def judge(rows: list[dict]) -> list[str]:
     failures: list[str] = []
     reachable = 0
@@ -207,6 +243,15 @@ def judge(rows: list[dict]) -> list[str]:
             failures.append(f"性质 1：{cell} 链路没有算出双支撑期")
         elif ds >= DS_FLOOR:
             reachable += 1
+
+        # RAY-354 判据 1：配对达成率。低于门说明两足步序配不上，那时 DS 不可计算。
+        coverage = row["ds_coverage"]
+        if coverage is not None and coverage < events.MIN_PAIRING_COVERAGE:
+            failures.append(
+                f"性质 5：{cell} 的配对达成率 {coverage:.2f} < "
+                f"{events.MIN_PAIRING_COVERAGE} —— 两足步序配不上，"
+                f"链路本该把 DS 标为不可计算却给出了读数"
+            )
 
         for label, value in row["stance_pct"].items():
             low, high = STANCE_PCT_RANGE
@@ -244,6 +289,40 @@ def judge(rows: list[dict]) -> list[str]:
         )
     if rows and control_caught == 0:
         failures.append("性质 3：一趟对照都没被抓出 —— 这道门在这份数据上无从证明有牙")
+
+    # ── RAY-354 判据 3：中段步保留率的双向哨兵 ────────────────────────────────
+    # 上限由 `trim` 定死（`(n−2)/n`），所以"有多少只脚顶到上限"才是能双向走的量。
+    at_cap = sum(
+        1
+        for row in rows
+        for label, value in row["retention"].items()
+        if value is not None
+        and row["cycles"].get(label)
+        and abs(value - (row["cycles"][label] - 2) / row["cycles"][label]) < 1e-3
+    )
+    low, high = AT_CAP_FEET_BAND
+    if rows and at_cap > high:
+        failures.append(
+            f"性质 6：{at_cap} 只脚的中段步保留率顶到理论上限 > {high} —— **变好了**，"
+            f"分段损害比记录时更小，该来收紧这条判据"
+        )
+    elif rows and at_cap < low:
+        failures.append(
+            f"性质 6：只有 {at_cap} 只脚顶到保留率上限 < {low} —— 分段又在吃步了"
+        )
+
+    # ── RAY-354 判据 7：被剔掉的跨步配对，双向 ────────────────────────────────
+    excluded = sum(row["ds_excluded"] or 0 for row in rows)
+    low, high = EXCLUDED_PHASES_BAND
+    if rows and excluded > high:
+        failures.append(
+            f"性质 7：剔掉了 {excluded} 个跨步配对 > {high} —— 两足步序在退化"
+        )
+    elif rows and excluded < low:
+        failures.append(
+            f"性质 7：一个跨步配对都没剔掉（{excluded} < {low}）—— **变好了**，"
+            f"配对伪影消失了，该来更新这条判据；也可能是剔除逻辑被摘掉了"
+        )
     return failures
 
 

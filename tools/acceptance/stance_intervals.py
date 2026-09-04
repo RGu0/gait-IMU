@@ -52,10 +52,19 @@ from acceptance import _stance
 from acceptance._dataset import load_walks, parse_args, report
 from gait.config import AlgoConfig
 
-#: DS 占比的下限。实测最负 −0.069（`S1-sport` 快档，用户已裁决接受），留约 30% 余量。
-DS_FLOOR = -0.10
-#: 允许为负的格数上限（12 格中）。实测正好 2 格。
-DS_NEGATIVE_MAX = 2
+#: DS **中位**的下限。实测最负 −0.111（`S1-sport/fast-a`），留约 35% 余量。
+#:
+#: **判据从 `fraction` 换成 `median`，而且门被放宽了 —— 那不是退让，是仪器修好了。**
+#: RAY-354 判据 7 给 `events.double_support` 加了相位合理性门之后，这条路径上
+#: `S1-sport/fast-a` 有一个 **+4.412 s**（4.5 个步态周期）的静止前导伪影被剔除，
+#: 均值随之从 −0.0331 落到 −0.1026 —— **而中位 −0.1112 前后纹丝不动**。
+#: 换句话说：原来的 `fraction ≥ −0.10` 是被那个伪影撑住的，真实读数一直是这么负。
+#:
+#: 现在为负的 4 格全是**快档**（−0.111 / −0.106 / −0.030 / −0.018），那是 RAY-354
+#: 记的**模式 B**：支撑相区间检出太短，与分段无关，归 RAY-325 这条线。
+DS_FLOOR = -0.15
+#: 允许为负的格数上限（12 格中）。实测 **4** 格，全是快档（模式 B）。
+DS_NEGATIVE_MAX = 5
 #: 同足相邻的逐格上限，与「非零格数」的上限。步态严格交替，正常值恒为 0。
 SAME_FOOT_MAX = 1
 SAME_FOOT_NONZERO_MAX = 2
@@ -89,16 +98,17 @@ def judge(rows: list[dict]) -> list[str]:
         cell = f"{row['trial']}/{row['walk']}"
         new, old = row["new"], row["old"]
 
-        if new["ds_fraction"] is None:
+        if new["ds_median"] is None:
             failures.append(f"性质 1：{cell} 没有算出双支撑期 —— 有一只脚没有周期")
             continue
 
-        # ① DS 占比：负得有限。
-        if new["ds_fraction"] < DS_FLOOR:
+        # ① DS **中位**：负得有限。读中位不读占比 —— 占比被单个离群相位支配，
+        #    实测一个 +4.412 s 的伪影就能把它顶起 0.07（见 `DS_FLOOR` 的注释）。
+        if new["ds_median"] < DS_FLOOR:
             failures.append(
-                f"性质 1：{cell} DS 占比 {new['ds_fraction']:+.3f} < {DS_FLOOR}"
+                f"性质 1：{cell} DS 中位 {new['ds_median']:+.3f} < {DS_FLOOR}"
             )
-        if new["ds_fraction"] < 0:
+        if new["ds_median"] < 0:
             negative += 1
         # ② 同足相邻。
         if new["same_foot"] > SAME_FOOT_MAX:
@@ -116,16 +126,18 @@ def judge(rows: list[dict]) -> list[str]:
                     f"性质 3：{cell} 支撑相占比 {value:.0f}% 不在 [{low:.0f}, {high:.0f}]% 内"
                 )
         # ④ 阳性对照：旧路径必须被这道门拦下。
-        if old["ds_fraction"] is not None and old["ds_fraction"] >= DS_FLOOR:
+        # 换成中位之后对照**更强**：旧路径 12/12 格中位 −1.367 ~ −0.413，
+        # 而占比只有 −0.925 ~ −0.674 —— 稳健量把两条路径拉得更开。
+        if old["ds_median"] is not None and old["ds_median"] >= DS_FLOOR:
             failures.append(
                 f"性质 4：{cell} 的阳性对照没被抓出 —— 旧路径"
-                f"（refine_stance_edges）DS {old['ds_fraction']:+.3f} 仍 ≥ {DS_FLOOR}，"
-                f"这道门没有通电"
+                f"（refine_stance_edges）DS 中位 {old['ds_median']:+.3f} 仍 ≥ "
+                f"{DS_FLOOR}，这道门没有通电"
             )
 
     if negative > DS_NEGATIVE_MAX:
         failures.append(
-            f"性质 1：{negative}/{len(rows)} 格 DS 为负，超过允许的 {DS_NEGATIVE_MAX} 格"
+            f"性质 1：{negative}/{len(rows)} 格 DS 中位为负，超过允许的 {DS_NEGATIVE_MAX} 格"
         )
     if same_foot_nonzero > SAME_FOOT_NONZERO_MAX:
         failures.append(

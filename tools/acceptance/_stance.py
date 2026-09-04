@@ -79,6 +79,12 @@ def events_double_support(
     result: dict[str, Any] = {
         "path": path,
         "ds_fraction": None,
+        # RAY-354 判据 2：`fraction` 建在均值上，被单个离群相位支配。实测这条路径上
+        # `S1-sport/fast-a` 有一个 **+4.412 s**（4.5 个步态周期）的静止前导伪影，
+        # 把均值从 −0.1026 顶到 −0.0331 —— 而中位 −0.1112 纹丝不动。
+        # 判据读中位，`fraction` 只作记录。
+        "ds_median": None,
+        "ds_excluded": None,
         "same_foot": None,
         "stance_pct": [round(value, 1) for value in stance_pct],
         "intervals": intervals,
@@ -92,6 +98,8 @@ def events_double_support(
         + [(cycle.t_ic, "R") for cycle in cycles["R"]]
     )
     result["ds_fraction"] = round(float(support.fraction), 4)
+    result["ds_median"] = round(float(support.median), 4)
+    result["ds_excluded"] = int(support.excluded)
     result["same_foot"] = sum(1 for a, b in pairwise(order) if a[1] == b[1])
     return result
 

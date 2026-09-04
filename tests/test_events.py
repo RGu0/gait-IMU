@@ -304,6 +304,78 @@ def test_double_support_lands_in_the_physiological_band():
     assert report.fraction == pytest.approx(0.20, abs=0.03)
 
 
+def test_a_phase_spanning_a_whole_stride_is_excluded_and_counted():
+    """**跨过整步的配对不是双支撑期读数**，剔掉它，并把剔了几个记下来。
+
+    构造用的是**真实机制**：两只脚在同一时间窗都缺步（RAY-354 里 `S1-sport/slow-a`
+    左脚 33 个周期只剩 6、右脚剩 14），于是缺口两侧只能跨着配，读出一个秒级的
+    "相位"。真机实测最负 **−5.58 个步态周期**，其余 11 格 −0.96 ~ −0.02。
+
+    **只挖一只脚没用** —— 另一只会把序列填满，缺口两侧仍然配得上。
+    """
+    quality = {"offset_estimate": 0.0, "determinate": True}
+    clean = dual_cycles()
+    good = double_support(clean["L"], clean["R"], sync_quality=quality)
+
+    gap_l = clean["L"][:8] + clean["L"][18:]
+    gap_r = clean["R"][:8] + clean["R"][18:]
+    skewed = double_support(gap_l, gap_r, sync_quality=quality)
+
+    assert good.excluded == 0, "干净输入不该有东西被剔"
+    assert skewed.excluded >= 1, "跨过缺口的那个配对要被剔出来"
+    assert skewed.count > 0
+    stride = float(np.median([cycle.stride_time for cycle in clean["L"]]))
+    assert skewed.worst > -1.5 * stride, "剔完之后不该还留着跨步的配对"
+
+
+def test_the_median_survives_an_outlier_that_wrecks_the_fraction():
+    """**判据 2**：`fraction` 建在均值上，被单个离群相位支配；`median` 不会。
+
+    真机实测 `最小相位 vs fraction` 的相关是 **r = +0.931** —— `S1-flat/slow-b`
+    只有 1 个负相位（−6.296 s），占比就从中位 +0.086 被拉到 −0.038。
+    """
+    quality = {"offset_estimate": 0.0, "determinate": True}
+    clean = dual_cycles()
+    base = double_support(clean["L"], clean["R"], sync_quality=quality)
+
+    # 只动右脚的**第一个**周期，制造一个恰好在剔除门内、但足以拖垮均值的坏配对。
+    stride = float(np.median([cycle.stride_time for cycle in clean["R"]]))
+    nudged = list(clean["R"])
+    first = nudged[0]
+    nudged[0] = replace(
+        first, t_ic=first.t_ic - 1.2 * stride, t_to=first.t_to - 1.2 * stride
+    )
+    spoiled = double_support(clean["L"], nudged, sync_quality=quality)
+
+    assert spoiled.fraction < base.fraction, "均值被那一个坏配对拉走了"
+    # 中位几乎不动 —— 这就是为什么报告要带上它。
+    assert abs(spoiled.median - base.median) < 0.2 * abs(base.median)
+
+
+def test_feet_whose_step_sequences_do_not_interleave_are_uncomputable():
+    """**判据 1**：配对达成率太低时抛错，让上游标为不可计算。
+
+    完全交替能配出 `nL + nR − 1` 个相位。达成率低说明两只脚的步序**配不上** ——
+    真机实测当前 0.88~1.00，但 RAY-354 判据 6 落地**之前**，`S1-sport/slow-a`
+    是 5 个相位 / 20 个中段步 = **0.26**。那种失效真发生过。
+    """
+    quality = {"offset_estimate": 0.0, "determinate": True}
+    clean = dual_cycles()
+    # 把右脚整段挪到左脚**之后**：两条序列不再交错，配对几乎全是同足相邻。
+    span = clean["L"][-1].t_ic_next - clean["L"][0].t_ic
+    apart = [
+        replace(
+            cycle,
+            t_ic=cycle.t_ic + span,
+            t_to=cycle.t_to + span,
+            t_ic_next=cycle.t_ic_next + span,
+        )
+        for cycle in clean["R"]
+    ]
+    with pytest.raises(EventError, match="配不上"):
+        double_support(clean["L"], apart, sync_quality=quality)
+
+
 def test_double_support_needs_the_still_lead_gone_from_its_input():
     """**这条测试把一个只写在测试辅助函数里的前提，变成一条会变红的断言。**
 
@@ -333,8 +405,19 @@ def test_double_support_needs_the_still_lead_gone_from_its_input():
     bad = double_support(contaminated["L"], contaminated["R"], sync_quality=quality)
 
     assert 0.10 <= good.fraction <= 0.25          # 生理带内
-    assert bad.fraction > 0.25                    # 带外 —— 但只高出一点，不显得离谱
-    assert bad.fraction - good.fraction > 0.05    # 实测 7~10 pp
+    assert good.excluded == 0                     # 干净输入不该有东西被剔
+
+    # **RAY-354 判据 7 改变了这条测试的结论，而不是废掉它。**
+    #
+    # 从前这里断言 `bad.fraction > 0.25`：前导混进来的那个秒级"相位"会把占比顶出
+    # 生理带 7~10 个百分点 —— 污染是**静默**的，只能靠读数看着不对来发现。
+    #
+    # 现在跨过 1.5 个步态周期的配对会被剔除并计数，所以同一份被污染的输入**读数
+    # 回到了带内**，而污染本身变成了一个**看得见的数**。这才是想要的行为：
+    # 静默地扰动一个指标比报错还坏。原来的前提（前导会混进一个秒级相位）不变，
+    # 变的是它现在被抓住了。
+    assert bad.excluded >= 1                      # 前导那个伪影被剔出来了
+    assert 0.10 <= bad.fraction <= 0.25           # 剔完之后回到生理带内
 
 
 def test_double_support_tracks_the_stance_ratio():
