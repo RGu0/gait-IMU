@@ -101,9 +101,9 @@
       "summary": "机构操作员账号登录（P-00）没有后端：FR-01 说明它与终端预配置凭据是两件事，而 RAY-225 交付的是后者（终端身份与设备绑定）"
     },
     "upload-transport": {
-      "implemented": false,
-      "issue": null,
-      "summary": "会话已排进待传队列，但真正发送需要一个 IngestionClient 实现；服务端接口约定不在本仓库（同 RAY-225 边界）。尚无 Issue 认领"
+      "implemented": true,
+      "issue": "RAY-355",
+      "summary": "IngestionClient 的 HTTP 实现已交付（gait/cloud/ingest_http.py）：四个动作、失败翻译、显式超时、凭据取自密钥库。线格式按 RAY-353《抄录卷》§1 的共用部分，请求体用本仓库的 PackageManifest（切分口径见《待确认卷》§3，尚待服务方确认）。注意：本仓库尚无人调用 SessionUploader.drain()，队列的排空时机属调度决定"
     }
   }
 }
