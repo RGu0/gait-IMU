@@ -405,6 +405,29 @@ def test_a_tls_failure_is_a_conflict_because_retrying_meets_the_same_certificate
         api.accepted_parts("s1")
 
 
+def test_an_unwrapped_tls_error_is_judged_the_same_as_a_wrapped_one() -> None:
+    """`SSLError` 是 `OSError` 的子类。
+
+    评审时发现的：包在 `URLError` 里的走冲突，直接抛出的会掉进 OSError 分支变成
+    可重试 —— **同一个证书问题两种判定，取决于它被谁包过**。
+    """
+    api = client(RecordingOpener(error=ssl.SSLError("bad cert")))
+    with pytest.raises(UploadConflict):
+        api.accepted_parts("s1")
+
+
+def test_a_non_integer_part_index_is_our_error_not_a_bare_crash() -> None:
+    """裸 `ValueError` 逃出去会绕过整套翻译，让契约违反看起来像来路不明的崩溃。"""
+
+    class Nonsense(FakeServer):
+        def handle(self, method, path, headers, body):  # type: ignore[override]
+            return envelope({"received": [{"index": "第一件", "sha256": "x"}], "missing": []})
+
+    api = client(RecordingOpener(Nonsense()))
+    with pytest.raises(IngestHttpError):
+        api.accepted_parts("s1")
+
+
 def test_a_receipt_digest_that_disagrees_is_a_conflict() -> None:
     class Liar(FakeServer):
         def handle(self, method, path, headers, body):  # type: ignore[override]

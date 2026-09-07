@@ -186,7 +186,12 @@ class HttpIngestionClient:
         for item in received:
             if not isinstance(item, dict) or "index" not in item or "sha256" not in item:
                 raise IngestHttpError(f"列举响应里有不完整的条目：{item!r}")
-            accepted[int(item["index"])] = str(item["sha256"])
+            try:
+                accepted[int(item["index"])] = str(item["sha256"])
+            except (TypeError, ValueError) as exc:
+                # 裸 `ValueError` 逃出去会绕过整套翻译，让一次契约违反看起来像
+                # 一个来路不明的崩溃。
+                raise IngestHttpError(f"列举响应的件号不是整数：{item!r}") from exc
         return accepted
 
     def put_part(self, session_id: str, index: int, sha256: str, payload: bytes) -> str:
@@ -276,6 +281,11 @@ class HttpIngestionClient:
                 # 证书问题不是链路抖动，重试一万次也还是同一张证书。
                 raise UploadConflict(f"TLS 校验失败：{reason}") from exc
             raise UploadUnavailable(f"{method} {path} 连不上：{reason}") from exc
+        except ssl.SSLError as exc:
+            # **必须排在 OSError 前面**：`SSLError` 是 `OSError` 的子类，漏在后面
+            # 就会掉进「链路错误 → 可重试」，而同一个证书问题包在 `URLError` 里时
+            # 走的是冲突 —— 同一件事两种判定，取决于它被谁包过。
+            raise UploadConflict(f"TLS 校验失败：{exc}") from exc
         except OSError as exc:
             # 连接重置一类。socket 层的错误在不同平台上并不都包成 URLError。
             raise UploadUnavailable(f"{method} {path} 链路错误：{exc}") from exc
