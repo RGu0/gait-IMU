@@ -131,6 +131,13 @@ def load_pin(path: Path = PIN_PATH) -> dict:
         for field in ("repo_dir", "markers", "files"):
             if field not in spec:
                 raise PinError(f"upstreams.{key} 缺少 `{field}`")
+        # 类型也要校。`repo_dir` 若不是字符串，`ancestor / repo_dir` 会抛
+        # TypeError —— 一个「声明写坏了」的问题会以一次崩溃的形式出现，
+        # 而崩溃看起来像检查本身坏了，不像声明坏了。
+        for field in ("repo_dir", "inner"):
+            value = spec.get(field, "")
+            if not isinstance(value, str):
+                raise PinError(f"upstreams.{key}.{field} 必须是字符串")
         if not isinstance(spec["markers"], list) or not spec["markers"]:
             raise PinError(f"upstreams.{key}.markers 必须是非空数组")
         files = spec["files"]

@@ -225,6 +225,15 @@ def test_声明结构不全时抛错(tmp_path: Path, payload: object, match: str
         chk.load_pin(_write_pin(tmp_path, payload))
 
 
+def test_上游路径不是字符串时抛错(tmp_path: Path) -> None:
+    """否则 `ancestor / repo_dir` 会抛 TypeError —— 一次崩溃看起来像检查坏了，
+    而不像声明坏了。"""
+    payload = _pin({"a.py": _entry()})
+    payload["upstreams"]["up"]["repo_dir"] = ["d"]
+    with pytest.raises(chk.PinError, match="必须是字符串"):
+        chk.load_pin(_write_pin(tmp_path, payload))
+
+
 def test_摘要格式不对时抛错(tmp_path: Path) -> None:
     payload = _pin({"a.py": {"sha256": "短", "cited_by": ["x"]}})
     with pytest.raises(chk.PinError, match="十六进制"):
