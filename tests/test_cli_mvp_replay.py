@@ -124,27 +124,55 @@ def test_replay_does_not_claim_a_sync_quality_it_never_computed(tmp_path):
     实测（RAY-395）那份占位把双支撑期从 `low` + `missing_sync_quality` 抬成了
     `normal` + 无理由：**连「这项没有同步依据」都看不见了**。
 
-    留空之后它落到 `uncomputable` 并带上原因。这条断言钉的就是「不出数」——
-    把占位填回去，双支撑期立刻带上一个值，本条变红。
+    留空之后它带上 `missing_sync_quality` 这条理由，等级落到 `low`。**这条断言钉的
+    是那条理由与那个等级**，把占位填回去，理由消失、等级变 `normal`，本条变红。
+
+    ## RAY-395 改了这条断言的写法，但没有改它守的东西
+
+    本条原先钉的是「**不出数**」（`assert "value" not in ds`）。那不是本 scope 的决定，
+    是当时的一个**下游后果**：`cloud/chain.py` 在 `sync_quality is None` 时根本不算
+    双支撑期，于是标注拿到 `computable=False`，报告印「本次不适用」。
+
+    `one-report-builder` 把两条报告路径合成一个装配层之后，这个后果变了：采集端那条路
+    （`app/service.py` 的 `reportFor`）从来不传 `sync_quality`，而它一直是**出数**的 ——
+    走站立相恒等式（`2 × 平均站立相 − 100`，足内量，不碰跨足时序）。同一个指标在两条路
+    上一条出数一条不出数，正是 RAY-395 要消掉的那种分岔；用户裁定「冲突以产品路径为准，
+    是否可算按产品路径现在的做法定」，所以留下来的是出数的那条。
+
+    **本 scope 的决定原样保留**：回放路径依旧不填它没算过的同步质量，报告依旧说得出
+    「这一项没有同步依据」。变的是缺同步依据时印什么 —— 从「本次不适用」变成一个
+    带 `low` 与 `missing_sync_quality` 的读数。占位一旦填回来，读数会换成相位重叠口径、
+    等级抬到 `normal`、理由清空，下面三条断言会一起红。
     """
     session_id = _make_session(tmp_path)
     code = main(["--replay", str(tmp_path / session_id), "--out", str(tmp_path / "out")])
     assert code == 0
 
-    ds = _metrics(tmp_path / "out" / "report.json")["ds"]
+    ds = _metrics(tmp_path / "out" / "report.json")["double-support"]
     assert ds["grade"] != "normal", "没算过同步质量的双支撑期不该是「良好」"
-    assert "value" not in ds, f"回放路径不该给出双支撑期的数值，实际 {ds}"
-    # 原因必须**从标注自己的 reasons 翻出来**，不是一句写死的话。
+    # 「这一项没有同步依据」必须**看得见**——那是本 scope 的全部要点。
+    assert "missing_sync_quality" in ds["quality"]["reasons"], (
+        f"回放路径的双支撑期该说出它没有同步依据，实际 {ds['quality']['reasons']}"
+    )
+    assert ds["quality"]["sync_quality"] is None, "回放路径没算过同步质量，不该带一份"
+    # ── 已知缺陷，钉住现状（不在本 scope 修） ────────────────────────────────
     #
-    # 这里的实际 reason 是 `not_computable`：`cloud/chain.py` 在没有 `sync_quality`
-    # 时**根本不算**双支撑期（`if left and right and sync_quality is not None`），
-    # 于是标注拿到 `computable=False`。
+    # 给读者的那句说明**是错的**：`wording.metric_note` 对任何 `low` 都回同一句
+    # 「本次有效步数较少」，而这一项落 `low` 的真实原因是**没有同步依据**，与步数
+    # 无关。读的人会去补步数 —— 那正是 `wording.py` 模块文档自己写的那种「具体而
+    # 错误的解释比不解释更糟」。
     #
-    # 等号右边走 `wording.reason_text` 而不是抄一句中文：写死的译文会在表改了之后
-    # 继续通过。`assemble` 若退回那句硬编码的「本次有效步数不足」，本条当场变红 ——
-    # 那句话对这个案子是**具体而错误**的解释，读的人会去补步数。
-    assert ds["reason"] == reason_text(["not_computable"]), (
-        f"不可算的原因该由 reasons 翻出来，实际 {ds['reason']!r}"
+    # 这不是 `one-report-builder` 引进来的：拉齐前这条路上印的是「本次协议不产出
+    # 该项」，同样具体而错误（协议当然产出双支撑期）。拉齐只是把机器可读的那一条
+    # 从 `not_computable` 换成了更准的 `missing_sync_quality`，人读的那句没跟上。
+    #
+    # 属 RAY-398（一个 reason 盖两种来路）的范围。这里钉住现状，等它动翻译时本条
+    # 变红，好让有人回来看一眼这句话该怎么写。
+    assert ds["note"] == "本次有效步数较少，此项仅供参考。", (
+        f"已知缺陷的现状变了，请回看 RAY-398：实际 {ds.get('note')!r}"
+    )
+    assert reason_text(["missing_sync_quality"]) == "本次没有两侧同步质量的依据。", (
+        "翻译表里那句对的话仍在，只是 `metric_note` 在 `low` 时没有用它"
     )
 
 
@@ -158,5 +186,9 @@ def test_synthetic_keeps_its_sync_quality_because_there_it_is_true(tmp_path):
     code = main(["--synthetic", "--seconds", "20", "--out", str(tmp_path / "out")])
     assert code == 0
 
-    ds = _metrics(tmp_path / "out" / "report.json")["ds"]
+    ds = _metrics(tmp_path / "out" / "report.json")["double-support"]
     assert "value" in ds, f"合成数据的同步质量是确定的，双支撑期该出数，实际 {ds}"
+    # 两条路径的「不同」现在锚在**这里**：合成路径带着那份真实的同步质量，于是
+    # 双支撑期没有 `missing_sync_quality`；回放路径有。两条断言合起来才是那个锚。
+    assert ds["quality"]["sync_quality"] == {"determinate": True, "flagged": False}
+    assert "missing_sync_quality" not in ds["quality"]["reasons"]

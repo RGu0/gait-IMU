@@ -33,7 +33,8 @@ import statistics
 from collections.abc import Sequence
 from typing import Any
 
-from gait.contracts import GaitCycle
+from gait.analysis import events
+from gait.contracts import FootLabel, GaitCycle
 from gait.quality.annotate import (
     CHAIN_BASIC,
     GRADE_UNCOMPUTABLE,
@@ -41,7 +42,7 @@ from gait.quality.annotate import (
     annotate,
     summarize,
 )
-from gait.report.wording import NOT_APPLICABLE, metric_note, quality_label
+from gait.report.wording import NOT_APPLICABLE, metric_note, quality_label, reason_text
 
 
 class ReportError(ValueError):
@@ -58,6 +59,15 @@ _CORE_METRICS: tuple[tuple[str, str, str, bool], ...] = (
 )
 
 
+#: 每个单位印几位小数。**「次」必须是 0 位** —— 一份写着「转身 14.00 次」的报告
+#: 在暗示它测到了百分之一次转身，而转身次数是数出来的整数。
+_DIGITS: dict[str, int] = {"%": 1, "步/分": 1, "次": 0}
+
+
+def _by_foot(cycles: Sequence[GaitCycle], foot: FootLabel) -> list[GaitCycle]:
+    return [cycle for cycle in cycles if cycle.foot == foot]
+
+
 def _valid(cycles: Sequence[GaitCycle]) -> list[GaitCycle]:
     """只有 `valid` 的周期进指标。
 
@@ -71,12 +81,13 @@ def _mean(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
-def _metric_values(cycles: Sequence[GaitCycle]) -> dict[str, float | None]:
+def _metric_values(
+    cycles: Sequence[GaitCycle], sync_quality: dict[str, Any] | None = None
+) -> dict[str, float | None]:
     """四项核心指标的原始数值。算不出来的是 `None`，不是 0。"""
     speeds = [cycle.gait_speed for cycle in cycles]
     strides = [cycle.stride_length for cycle in cycles]
     stride_times = [cycle.stride_time for cycle in cycles]
-    stance_ratios = [cycle.stance_ratio for cycle in cycles]
 
     cadence = None
     mean_stride_time = _mean(stride_times)
@@ -84,28 +95,64 @@ def _metric_values(cycles: Sequence[GaitCycle]) -> dict[str, float | None]:
         # 一个步周期含两步，所以 60 / (周期/2)。
         cadence = 120.0 / mean_stride_time
 
-    # 双支撑期占比 = 站立相占比之和 − 100%。它是跨足量：两侧站立相重叠的那部分。
-    mean_stance = _mean(stance_ratios)
-    double_support = None
-    if mean_stance is not None:
-        candidate = 2 * mean_stance - 100.0
-        # 负值不是一个小误差，是同步或事件检测出了问题（RAY-211 的自检判据之一）。
-        # 印一个负的双支撑期比印「本次不适用」更糟：它看起来是个数。
-        double_support = candidate if candidate >= 0 else None
-
     return {
         "speed": _mean(speeds),
         "cadence": cadence,
         "stride": _mean(strides),
-        "double-support": double_support,
+        "double-support": _double_support(cycles, sync_quality),
     }
+
+
+def _double_support(
+    cycles: Sequence[GaitCycle], sync_quality: dict[str, Any] | None
+) -> float | None:
+    """双支撑期占比，%。**估计量由证据决定，不由调用方决定。**
+
+    这一项有两个不同的估计量，它们要的证据不一样，所以哪个能用不是一个偏好问题：
+
+    1. **相位重叠口径**（`events.double_support`）—— 真正把两足的支撑相配对、量重叠。
+       它是 PRD §13 点名的那个（「ZUPT 边界口径」，系统性偏低约 100 ms，RAY-288），
+       也是唯一能与另一次采集比较的那个。但它**跨足**：`events.double_support` 在
+       `sync_quality is None` 时直接拒绝，理由写在那个函数里 —— 80 ms 的跨足偏差
+       会让占比整体挪 8 个百分点，而读数本身看不出任何异常。
+    2. **站立相恒等式**（`2 × 平均站立相 − 100`）—— 每只脚的站立相占比是**足内量**，
+       算这个数完全不碰跨足时序，所以它在没有同步依据时依然成立。代价是它给的是
+       全程平均的一个推论，而不是量出来的相位。
+
+    于是分支落在**手里有没有同步依据**上，而不是落在「谁在调我」上：拿得到同步质量
+    的走 ①，拿不到的走 ②。两条报告路径喂同样的证据就走同一条分支、得同样的数 ——
+    这正是「装配层只有一个」要保证的事。反过来，为了让两条路径的数字长得一样而
+    强行统一成其中一个，会**要么**让采集端那份没有同步依据的报告失去一个 PRD §12
+    的核心指标，**要么**让云端那份把量出来的相位换成一个推论。两个都是拿真实性换
+    整齐，而 RAY-395 的第二条指控（`honest-sync-quality`）说的就是不许这么换。
+
+    配对失败时（RAY-354 判据 1）返回 `None` 而不是退回 ②：同步依据在手却配不上步序，
+    说明这次的跨足时序本身有问题，那时给一个推论出来是在替它圆场。
+    """
+    if sync_quality is not None:
+        left, right = _by_foot(cycles, "L"), _by_foot(cycles, "R")
+        if left and right:
+            try:
+                return events.double_support(
+                    left, right, sync_quality=sync_quality
+                ).fraction * 100.0
+            except events.EventError:
+                return None
+        return None
+
+    mean_stance = _mean([cycle.stance_ratio for cycle in cycles])
+    if mean_stance is None:
+        return None
+    candidate = 2 * mean_stance - 100.0
+    # 负值不是一个小误差，是同步或事件检测出了问题（RAY-211 的自检判据之一）。
+    # 印一个负的双支撑期比印「本次不适用」更糟：它看起来是个数。
+    return candidate if candidate >= 0 else None
 
 
 def _format(value: float | None, unit: str) -> str:
     if value is None:
         return NOT_APPLICABLE
-    digits = 1 if unit in ("%", "步/分") else 2
-    return f"{value:.{digits}f}"
+    return f"{value:.{_DIGITS.get(unit, 2)}f}"
 
 
 def build_metrics(
@@ -122,7 +169,7 @@ def build_metrics(
     """
     usable = _valid(cycles)
     n_steps = len(usable)
-    values = _metric_values(usable)
+    values = _metric_values(usable, sync_quality)
 
     metrics: list[dict[str, Any]] = []
     annotations: list[QualityAnnotation] = []
@@ -139,19 +186,42 @@ def build_metrics(
         )
         annotations.append(annotation)
         metrics.append(
-            {
-                "key": key,
-                "title": title,
-                "value": _format(value, unit),
-                "unit": "" if annotation.grade == GRADE_UNCOMPUTABLE else unit,
-                "grade": annotation.grade,
-                "qualityLabel": quality_label(annotation.grade),
-                "note": metric_note(annotation.grade, annotation.reasons),
-                # 契约要的「完整质量标注字段」。它不进版面，进的是可追溯性。
-                "quality": annotation.snapshot(),
-            }
+            _metric_row(key, title, unit, value, annotation)
         )
     return metrics, annotations
+
+
+def _metric_row(
+    key: str, title: str, unit: str, value: float | None, annotation: QualityAnnotation
+) -> dict[str, Any]:
+    """一个核心指标块。
+
+    `note` 与 `reason` **都要有，且各有各的位置** —— 这不是重复。模板
+    （`ReportDocument.jsx` 的 `MetricValue`）读的是两个不同的键：不可算时印
+    `metric.reason`，`low` 时印 `metric.note`。本层从前只给 `note`，于是一个不可算的
+    核心指标在版面上是「本次不适用」后面跟一个**空的原因**；`assemble` 那条路从前
+    只给 `reason`，于是 `low` 的指标落到模板里那句写死的通用话。两边各缺一个，而
+    模板只有一份（R-4）—— 拉齐之后两个键一起给，缺口才真正合上。
+
+    `note` 为 `None` 时**整个键不出现**，而不是出现一个 `null`：payload 要跨 IPC
+    （RAY-248），一个 `null` 在 JSON 里读起来是「这里有个说明，但它是空的」。
+    """
+    row: dict[str, Any] = {
+        "key": key,
+        "title": title,
+        "value": _format(value, unit),
+        "unit": "" if annotation.grade == GRADE_UNCOMPUTABLE else unit,
+        "grade": annotation.grade,
+        "qualityLabel": quality_label(annotation.grade),
+        # 契约要的「完整质量标注字段」。它不进版面，进的是可追溯性。
+        "quality": annotation.snapshot(),
+    }
+    note = metric_note(annotation.grade, annotation.reasons)
+    if note is not None:
+        row["note"] = note
+    if annotation.grade == GRADE_UNCOMPUTABLE:
+        row["reason"] = reason_text(list(annotation.reasons))
+    return row
 
 
 def build_comparison(cycles: Sequence[GaitCycle]) -> list[dict[str, Any]]:
@@ -170,19 +240,49 @@ def build_comparison(cycles: Sequence[GaitCycle]) -> list[dict[str, Any]]:
     return rows
 
 
+#: 模板 SVG 的可用横向范围。`ReportDocument.jsx` 的时序条 `viewBox` 是 `0 0 480 90`，
+#: 基线从 x=10 画到 x=470，落步刻度直接当 `x1`/`x2` 用。
+_TIMELINE_X0: float = 10.0
+_TIMELINE_X1: float = 470.0
+
+
 def build_timeline(cycles: Sequence[GaitCycle]) -> dict[str, list[float]]:
-    """步态周期时序条：每只脚的初始触地时刻。"""
+    """步态周期时序条：每只脚的初始触地时刻，**映射到模板 SVG 的 x 坐标**。
+
+    这里出的不是秒。模板与 `report/html.py` 都把这两串数直接写进 `<line x1=...>`，
+    所以一份以秒为单位的时序（一次 60 秒测试 → x ∈ [0, 60]）会把整条时序条挤在
+    左边框那一小段里 —— 图照样画得出来，只是它不再表示任何东西。本层从前给的正是
+    秒，`assemble` 那条路给的是坐标；拉齐取坐标，因为模板（R-4，唯一一份）读的是坐标。
+
+    钳回 `[10, 470]`：浮点除法会让末点落在 470.00000000000006 之类，越出 viewBox。
+    """
     usable = _valid(cycles)
+    times = [cycle.t_ic for cycle in usable]
+    if not times:
+        return {"left": [], "right": []}
+    t_min, t_max = min(times), max(times)
+    span = (t_max - t_min) or 1.0
+    width = _TIMELINE_X1 - _TIMELINE_X0
+
+    def scale(value: float) -> float:
+        x = _TIMELINE_X0 + width * (value - t_min) / span
+        return min(_TIMELINE_X1, max(_TIMELINE_X0, x))
+
     return {
-        "left": [round(c.t_ic, 3) for c in usable if c.foot == "L"],
-        "right": [round(c.t_ic, 3) for c in usable if c.foot == "R"],
+        "left": [scale(c.t_ic) for c in usable if c.foot == "L"],
+        "right": [scale(c.t_ic) for c in usable if c.foot == "R"],
     }
 
 
 def build_parameters(
-    cycles: Sequence[GaitCycle], *, chain: str = CHAIN_BASIC, duration_s: int
+    cycles: Sequence[GaitCycle],
+    *,
+    chain: str = CHAIN_BASIC,
+    duration_s: int,
+    turns: int | None = None,
+    zupt_quality: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[QualityAnnotation]]:
-    """专业参数：变异性与疲劳衰减，各带质量标注。
+    """专业参数：变异性、疲劳衰减、支撑/摆动相与转身次数，各带质量标注.
 
     疲劳衰减**只在 180 秒配置下产出**。这不是算法能力问题 —— 短协议里根本没有
     「前三分之一 vs 后三分之一」可比，所以它是 `uncomputable` 而不是 `low`。
@@ -234,21 +334,74 @@ def build_parameters(
         # 会让操作员去改一件改不了的事。
         row["note"] = f"本次为 {duration_s} 秒配置，该项需要 180 秒配置才产出。"
     rows.append(row)
+
+    # ── 从 `assemble` 那条路并进来的几行（RAY-395 拉齐） ──────────────────────
+    #
+    # 它们不是新指标：PRD §13 的 v1 输出清单里就有「支撑相/摆动相占比（左/右）」与
+    # 「转身次数」，只是从前只有走 `assemble_report` 的那条路把它们印出来。两条路
+    # 合成一个装配层时，**并进来而不是删掉** —— 删掉等于让一份 PRD 认可的指标因为
+    # 换了个装配函数而消失。
+    for label, title in (("L", "左站立相占比"), ("R", "右站立相占比")):
+        foot_cycles = _by_foot(usable, label)
+        value = _mean([cycle.stance_ratio for cycle in foot_cycles])
+        annotation = annotate(
+            f"stance-ratio.{label}",
+            n_steps=len(foot_cycles),
+            chain=chain,
+            zupt_quality=zupt_quality,
+            computable=value is not None,
+        )
+        annotations.append(annotation)
+        rows.append(_parameter_row(title, value, "%", annotation))
+
+    mean_stance = _mean([cycle.stance_ratio for cycle in usable])
+    # 摆动相占比是站立相的补 —— 一个步周期非站即摆。这不是一条质量规则，是定义，
+    # 所以它待在这里而不是 `quality/`（FR-08 管的是定级，不是定义）。
+    swing = None if mean_stance is None else 100.0 - mean_stance
+    swing_annotation = annotate(
+        "swing-ratio", n_steps=n_steps, chain=chain,
+        zupt_quality=zupt_quality, computable=swing is not None,
+    )
+    annotations.append(swing_annotation)
+    rows.append(_parameter_row("摆动相占比", swing, "%", swing_annotation))
+
+    stride_time = _mean([cycle.stride_time for cycle in usable])
+    stride_time_annotation = annotate(
+        "stride-time", n_steps=n_steps, chain=chain,
+        zupt_quality=zupt_quality, computable=stride_time is not None,
+    )
+    annotations.append(stride_time_annotation)
+    rows.append(_parameter_row("步周期时长", stride_time, "s", stride_time_annotation))
+
+    # 转身次数：**拿不到时是不可算，不是 0。**`assemble` 那条路从前写死
+    # `grade=normal` 并在没有变异性报告时给 0 —— 那让报告断言「这次一次都没转身」，
+    # 而实际情况是「这次没人数过」。0 是一个断言（与 `conditions` 里那句「未记录」
+    # 同一个道理），所以这里把可算性绑在 `turns is not None` 上。
+    turns_annotation = annotate(
+        "turns", n_steps=n_steps, chain=chain, computable=turns is not None
+    )
+    annotations.append(turns_annotation)
+    rows.append(
+        _parameter_row("转身次数", None if turns is None else float(turns), "次", turns_annotation)
+    )
     return rows, annotations
 
 
 def _parameter_row(
     title: str, value: float | None, unit: str, annotation: QualityAnnotation
 ) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "label": title,
         "value": _format(value, unit),
         "unit": "" if annotation.grade == GRADE_UNCOMPUTABLE else unit,
         "grade": annotation.grade,
         "qualityLabel": quality_label(annotation.grade),
-        "note": metric_note(annotation.grade, annotation.reasons),
         "quality": annotation.snapshot(),
     }
+    note = metric_note(annotation.grade, annotation.reasons)
+    if note is not None:
+        row["note"] = note
+    return row
 
 
 #: 摘要与建议。**规则驱动，且刻意贫瘠。**
@@ -282,8 +435,9 @@ def build_report(
     duration_s: int,
     algo_version: str,
     protocol_version: str,
-    valid_seconds: float,
+    valid_seconds: float | None = None,
     turns: int | None = None,
+    protocol_name: str = "定时步行测试",
     annotations_text: Sequence[str] = (),
     chain: str = CHAIN_BASIC,
     sync_quality: dict[str, Any] | None = None,
@@ -304,7 +458,7 @@ def build_report(
         cycles, chain=chain, sync_quality=sync_quality, zupt_quality=zupt_quality
     )
     parameters, parameter_annotations = build_parameters(
-        cycles, chain=chain, duration_s=duration_s
+        cycles, chain=chain, duration_s=duration_s, turns=turns, zupt_quality=zupt_quality
     )
     # 页脚统计**全部**指标 —— 它回答的是「这份报告是怎么算出来的」。
     footer = summarize(metric_annotations + parameter_annotations)
@@ -322,20 +476,32 @@ def build_report(
 
     conditions = [
         {"label": "时长配置", "value": f"{duration_s} 秒"},
+        # 有效时长同理：没人量过就说「未记录」。走 `assemble_report` 那条路的调用方
+        # 手里只有一个 `ChainResult`，它不含有效时长 —— 编一个 0 秒出来会把一场
+        # 正常的检测写成一场没采到东西的检测。
         {
             "label": "有效时长",
-            "value": f"{valid_seconds:.0f} 秒（{valid_seconds / duration_s:.0%}）",
+            "value": (
+                f"{valid_seconds:.0f} 秒（{valid_seconds / duration_s:.0%}）"
+                if valid_seconds is not None
+                else "未记录"
+            ),
         },
         {"label": "有效步数", "value": str(len(usable))},
         # 转身次数拿不到时说「未记录」，不写 0 —— 0 是一个断言，未记录不是。
+        # PRD §12 ⑦ 把它列在「测试条件」里，PRD §13 又把它列进 v1 输出指标 ——
+        # 两处都要，所以它同时出现在这里和专业参数表，而不是二选一。
         {"label": "转身次数", "value": str(turns) if turns is not None else "未记录"},
+        # 「计算链」从 `assemble` 那条路并进来：基础版与完整版的同一个报告编号必须
+        # 看得出差别（`_EDITIONS` 的理由），而封面那个角标印的是版本名，不是链名。
+        {"label": "计算链", "value": "基础版" if chain == CHAIN_BASIC else "完整版"},
     ]
 
     return {
         "organization": organization,
         "subjectLabel": subject_label,
         "assessedAt": assessed_at,
-        "protocolName": "定时步行测试",
+        "protocolName": protocol_name,
         "protocolSeconds": duration_s,
         "edition": "基础版" if chain == CHAIN_BASIC else "完整版",
         "reportId": report_id,

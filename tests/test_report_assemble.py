@@ -40,6 +40,9 @@ _REPORT_KEYS = {
     "reportId",
     "algoVersion",
     "protocolVersion",
+    # RAY-395：拉齐后这条路也带页脚。它从前只在 `build_report` 那边有 ——
+    # 同一个报告编号，走哪条路就决定看不看得到「这份报告是怎么算出来的」。
+    "qualityFooter",
 }
 
 
@@ -82,11 +85,32 @@ def test_footer_identifies_the_report(report):
     assert report["protocolVersion"]
 
 
+def _display_slots(node):
+    """遍历 payload 里**要印出来的**那些格子，跳过 `quality` 证据块。
+
+    `quality` 是 RAY-248 契约要的完整标注（`sync_quality` / `zupt_quality` 等），
+    它的 `null` 是**有意义的**：「这一项没有同步依据」正是要如实记下来的东西。
+    版面上的格子不一样 —— 那里的 `null` 会渲染成空白，而 PRD §12 不许空白。
+    所以这条断言只扫版面，不扫证据。
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("quality", "qualityFooter"):
+                continue
+            yield from _display_slots(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _display_slots(item)
+    else:
+        yield node
+
+
 def test_json_serializable_with_no_non_finite_numbers(report):
     text = json.dumps(report, ensure_ascii=False)
     assert "NaN" not in text
     assert "Infinity" not in text
-    assert "null" not in text  # 没有空槽：可算给数值，不可算给 grade=uncomputable
+    # 没有空槽：可算给数值，不可算给 grade=uncomputable。
+    assert not [slot for slot in _display_slots(report) if slot is None]
 
 
 def test_metrics_are_finite_or_uncomputable(report):
