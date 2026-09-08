@@ -86,13 +86,18 @@ class _DoubleSupport:
     caliber: str | None
 
 
+#: 双支撑期在 payload 里的键。**只在这里写一次** —— `build_metrics` 要靠它认出
+#: 该给哪一项挂口径，`_CORE_METRICS` 要靠它定行；两处各写一遍，改名时会有一处
+#: 悄悄不再匹配，而那一处的后果是口径标注**不再出现**，版面上看不出任何异常。
+DOUBLE_SUPPORT_KEY: str = "double-support"
+
 #: 核心指标（P-09 与报告 §3）。`cross_foot` 决定它要不要同步证据。
 _CORE_METRICS: tuple[tuple[str, str, str, bool], ...] = (
     # (key, 标题, 单位, 是否跨足)
     ("speed", "步速", "m/s", False),
     ("cadence", "步频", "步/分", False),
     ("stride", "步长", "m", False),
-    ("double-support", "双支撑期占比", "%", True),
+    (DOUBLE_SUPPORT_KEY, "双支撑期占比", "%", True),
 )
 
 
@@ -163,7 +168,7 @@ def _metric_values(
         "speed": _mean(speeds),
         "cadence": cadence,
         "stride": _mean(strides),
-        "double-support": estimate.value,
+        DOUBLE_SUPPORT_KEY: estimate.value,
     }
     return values, estimate, mean_stride_time
 
@@ -264,8 +269,8 @@ def build_metrics(
                 unit,
                 value,
                 annotation,
-                caliber=estimate.caliber if key == "double-support" else None,
-                reference=reference if key == "double-support" else None,
+                caliber=estimate.caliber if key == DOUBLE_SUPPORT_KEY else None,
+                reference=reference if key == DOUBLE_SUPPORT_KEY else None,
             )
         )
     return metrics, annotations
