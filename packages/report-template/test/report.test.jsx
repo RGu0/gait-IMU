@@ -61,6 +61,39 @@ describe("the report never leaves a metric blank", () => {
     expect(markup).not.toMatch(/>\s*(N\/A|—|--|n\/a)\s*</);
   });
 
+  it("prints a note on a normal metric too, not only on low ones", () => {
+    // RAY-437：双支撑期的口径标注要在**两支上都出现**，而走相位重叠那一支时
+    // 等级可能是 normal。把 note 绑死在 low 上，标注就恰好在最需要它的那一支上
+    // 不显示 —— 那正是这条守卫要挡住的回归。
+    const withNote = {
+      ...report,
+      metrics: [
+        {
+          key: "double-support",
+          title: "双支撑期占比",
+          value: "12.4",
+          unit: "%",
+          grade: "normal",
+          note: "ZUPT 边界口径；参考值 23.4%（未标定，偏移来自合成模型）",
+        },
+      ],
+    };
+    const markup = renderToStaticMarkup(<ReportDocument report={withNote} />);
+    expect(markup).toContain("ZUPT 边界口径");
+    expect(markup).toContain("未标定，偏移来自合成模型");
+  });
+
+  it("still falls back to the generic note for a low metric that has none", () => {
+    const bare = {
+      ...report,
+      metrics: [
+        { key: "speed", title: "步速", value: "1.04", unit: "m/s", grade: "low" },
+      ],
+    };
+    const markup = renderToStaticMarkup(<ReportDocument report={bare} />);
+    expect(markup).toContain("rp-metric__note");
+  });
+
   it("marks a low-quality metric as 参考 rather than hiding it", () => {
     const markup = html();
     expect(markup).toContain("rp-metric--low");
