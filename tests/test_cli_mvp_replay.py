@@ -168,9 +168,19 @@ def test_replay_does_not_claim_a_sync_quality_it_never_computed(tmp_path):
     #
     # 属 RAY-398（一个 reason 盖两种来路）的范围。这里钉住现状，等它动翻译时本条
     # 变红，好让有人回来看一眼这句话该怎么写。
-    assert ds["note"] == "本次有效步数较少，此项仅供参考。", (
+    #
+    # RAY-437 起 `note` 前面多了一段口径标注（这条路走站立相恒等式），所以这里改钉
+    # **等级说明那一半**。缺陷本身一个字没动：那句话依旧在说步数，而真实原因是缺
+    # 同步依据。口径标注是另一件事，它由下面一条单独钉住。
+    assert ds["note"].endswith("本次有效步数较少，此项仅供参考。"), (
         f"已知缺陷的现状变了，请回看 RAY-398：实际 {ds.get('note')!r}"
     )
+    # 回放路径走的是恒等式那一支，**不能**被标成「ZUPT 边界口径」（RAY-437）。
+    assert ds["caliber"] == "stance-identity", (
+        f"回放路径没有同步依据，只可能走恒等式，实际 {ds.get('caliber')!r}"
+    )
+    assert "非 ZUPT 边界口径" in ds["note"]
+    assert "reference" not in ds, "恒等式那一支不给参考值（RAY-288 R2）"
     assert reason_text(["missing_sync_quality"]) == "本次没有两侧同步质量的依据。", (
         "翻译表里那句对的话仍在，只是 `metric_note` 在 `low` 时没有用它"
     )

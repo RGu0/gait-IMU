@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import statistics
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from gait.analysis import events
@@ -42,12 +43,53 @@ from gait.quality.annotate import (
     annotate,
     summarize,
 )
-from gait.report.wording import NOT_APPLICABLE, metric_note, quality_label, reason_text
+from gait.report.wording import (
+    NOT_APPLICABLE,
+    caliber_note,
+    metric_note,
+    quality_label,
+    reason_text,
+)
 
 
 class ReportError(ValueError):
     """报告无从生成。"""
 
+
+#: ZUPT 边界相对生理边界的**单侧**削减，ms。
+#:
+#: ⚠️ **这个数出自合成探针，不是实测**：
+#: `evidence/ray-211/sync-selfcheck/acceptance/probe_trim.txt` 八格的均值（区间
+#: 47.5~56.1 ms）。那张表里的「真支撑」是 `stride × stance_r` 算出来的，`stance_r`
+#: 是**假设的输入参数** —— 真值由生成器定义，不是量出来的。
+#:
+#: 真机标定要用测力台或压力垫作金标准（RAY-288 §范围 3 → RAY-230 待标定项），
+#: 而那件器材本项目不具备（RAY-434 A1）。**标定完成后这里换成实测值**，届时
+#: `UNCALIBRATED_NOTE` 那句标注才可以撤。
+_TRIM_PER_SIDE_MS: float = 52.9
+
+#: 两个估计量的标识。值进 payload，供下游与测试指名，不要改字面量。
+CALIBER_PHASE_OVERLAP: str = "phase-overlap"
+CALIBER_STANCE_IDENTITY: str = "stance-identity"
+
+
+@dataclass(frozen=True)
+class _DoubleSupport:
+    """双支撑期占比，连同**它是哪个估计量算出来的**。
+
+    口径必须跟着值一起走。只返回一个百分数，调用方就只能靠「我传没传
+    `sync_quality`」去猜走了哪一支 —— 那正是 RAY-437 要消掉的那个猜测：分支条件在
+    `_double_support` 里，调用方复述一遍就会有第二份真相。
+    """
+
+    value: float | None
+    caliber: str | None
+
+
+#: 双支撑期在 payload 里的键。**只在这里写一次** —— `build_metrics` 要靠它认出
+#: 该给哪一项挂口径，`_CORE_METRICS` 要靠它定行；两处各写一遍，改名时会有一处
+#: 悄悄不再匹配，而那一处的后果是口径标注**不再出现**，版面上看不出任何异常。
+DOUBLE_SUPPORT_KEY: str = "double-support"
 
 #: 核心指标（P-09 与报告 §3）。`cross_foot` 决定它要不要同步证据。
 _CORE_METRICS: tuple[tuple[str, str, str, bool], ...] = (
@@ -55,7 +97,7 @@ _CORE_METRICS: tuple[tuple[str, str, str, bool], ...] = (
     ("speed", "步速", "m/s", False),
     ("cadence", "步频", "步/分", False),
     ("stride", "步长", "m", False),
-    ("double-support", "双支撑期占比", "%", True),
+    (DOUBLE_SUPPORT_KEY, "双支撑期占比", "%", True),
 )
 
 
@@ -81,10 +123,36 @@ def _mean(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def _reference_percent(
+    estimate: _DoubleSupport, mean_stride_time: float | None
+) -> float | None:
+    """未标定参考值，%（RAY-288 R2）。**只对相位重叠那一支给出。**
+
+    走站立相恒等式的那一支**不给**：那 ~100 ms 是 ZUPT 边界削掉的两个过渡段，
+    是**相位重叠**才受到的偏差。恒等式算的是 `2 × 平均站立相 − 100`，一个足内量，
+    它本来就没受这个偏差 —— 给它加回去等于凭空抬高一个数。
+
+    换算必须落在**百分点**上，不能把 ms 直接加到百分数上：占比的分母是步周期，
+    所以同样的 100 ms 在不同步频下是不同的百分点。125 步/分（周期 0.96 s）下
+    约 11.6 个百分点，而该指标正常值才 ~20% —— **修正量是被修正量的一半数量级**，
+    这正是它必须带未标定标注的原因。
+    """
+    if estimate.caliber != CALIBER_PHASE_OVERLAP or estimate.value is None:
+        return None
+    if not mean_stride_time:
+        return None
+    offset_pp = (2 * _TRIM_PER_SIDE_MS / 1000.0) / mean_stride_time * 100.0
+    return estimate.value + offset_pp
+
+
 def _metric_values(
     cycles: Sequence[GaitCycle], sync_quality: dict[str, Any] | None = None
-) -> dict[str, float | None]:
-    """四项核心指标的原始数值。算不出来的是 `None`，不是 0。"""
+) -> tuple[dict[str, float | None], _DoubleSupport, float | None]:
+    """四项核心指标的原始数值。算不出来的是 `None`，不是 0。
+
+    连同双支撑期的口径与平均步周期一起返回：口径要跟着值走（见 `_DoubleSupport`），
+    步周期是参考值换算的分母，两者都在这里已经算过，重算一遍就会有第二份真相。
+    """
     speeds = [cycle.gait_speed for cycle in cycles]
     strides = [cycle.stride_length for cycle in cycles]
     stride_times = [cycle.stride_time for cycle in cycles]
@@ -95,17 +163,19 @@ def _metric_values(
         # 一个步周期含两步，所以 60 / (周期/2)。
         cadence = 120.0 / mean_stride_time
 
-    return {
+    estimate = _double_support(cycles, sync_quality)
+    values = {
         "speed": _mean(speeds),
         "cadence": cadence,
         "stride": _mean(strides),
-        "double-support": _double_support(cycles, sync_quality),
+        DOUBLE_SUPPORT_KEY: estimate.value,
     }
+    return values, estimate, mean_stride_time
 
 
 def _double_support(
     cycles: Sequence[GaitCycle], sync_quality: dict[str, Any] | None
-) -> float | None:
+) -> _DoubleSupport:
     """双支撑期占比，%。**估计量由证据决定，不由调用方决定。**
 
     这一项有两个不同的估计量，它们要的证据不一样，所以哪个能用不是一个偏好问题：
@@ -128,25 +198,31 @@ def _double_support(
 
     配对失败时（RAY-354 判据 1）返回 `None` 而不是退回 ②：同步依据在手却配不上步序，
     说明这次的跨足时序本身有问题，那时给一个推论出来是在替它圆场。
+
+    **算不出来时 `caliber` 也是 `None`** —— 没有数就没有口径可标。给一个不可算的
+    指标标上口径，等于声称我们知道那个不存在的数会是哪一支算的。
     """
     if sync_quality is not None:
         left, right = _by_foot(cycles, "L"), _by_foot(cycles, "R")
         if left and right:
             try:
-                return events.double_support(
+                fraction = events.double_support(
                     left, right, sync_quality=sync_quality
-                ).fraction * 100.0
+                ).fraction
             except events.EventError:
-                return None
-        return None
+                return _DoubleSupport(None, None)
+            return _DoubleSupport(fraction * 100.0, CALIBER_PHASE_OVERLAP)
+        return _DoubleSupport(None, None)
 
     mean_stance = _mean([cycle.stance_ratio for cycle in cycles])
     if mean_stance is None:
-        return None
+        return _DoubleSupport(None, None)
     candidate = 2 * mean_stance - 100.0
     # 负值不是一个小误差，是同步或事件检测出了问题（RAY-211 的自检判据之一）。
     # 印一个负的双支撑期比印「本次不适用」更糟：它看起来是个数。
-    return candidate if candidate >= 0 else None
+    if candidate < 0:
+        return _DoubleSupport(None, None)
+    return _DoubleSupport(candidate, CALIBER_STANCE_IDENTITY)
 
 
 def _format(value: float | None, unit: str) -> str:
@@ -169,7 +245,8 @@ def build_metrics(
     """
     usable = _valid(cycles)
     n_steps = len(usable)
-    values = _metric_values(usable, sync_quality)
+    values, estimate, mean_stride_time = _metric_values(usable, sync_quality)
+    reference = _reference_percent(estimate, mean_stride_time)
 
     metrics: list[dict[str, Any]] = []
     annotations: list[QualityAnnotation] = []
@@ -186,13 +263,28 @@ def build_metrics(
         )
         annotations.append(annotation)
         metrics.append(
-            _metric_row(key, title, unit, value, annotation)
+            _metric_row(
+                key,
+                title,
+                unit,
+                value,
+                annotation,
+                caliber=estimate.caliber if key == DOUBLE_SUPPORT_KEY else None,
+                reference=reference if key == DOUBLE_SUPPORT_KEY else None,
+            )
         )
     return metrics, annotations
 
 
 def _metric_row(
-    key: str, title: str, unit: str, value: float | None, annotation: QualityAnnotation
+    key: str,
+    title: str,
+    unit: str,
+    value: float | None,
+    annotation: QualityAnnotation,
+    *,
+    caliber: str | None = None,
+    reference: float | None = None,
 ) -> dict[str, Any]:
     """一个核心指标块。
 
@@ -216,11 +308,29 @@ def _metric_row(
         # 契约要的「完整质量标注字段」。它不进版面，进的是可追溯性。
         "quality": annotation.snapshot(),
     }
-    note = metric_note(annotation.grade, annotation.reasons)
-    if note is not None:
+    # 口径标注与等级说明是**两件事**，都要出现：口径说这个数是怎么算的，等级说它
+    # 有多可信。合成一句而不是各占一处，是本 scope 对 R-4 的裁定 —— 模板只有一份，
+    # 为参考值新加一处渲染要动那一份，而 `note` 本就是「关于这个数的一句话」。
+    caliber_text = caliber_note(
+        caliber, _format(reference, unit) + unit if reference is not None else None
+    )
+    grade_text = metric_note(annotation.grade, annotation.reasons)
+    note = "；".join(part for part in (caliber_text, grade_text) if part)
+    if note:
         row["note"] = note
     if annotation.grade == GRADE_UNCOMPUTABLE:
         row["reason"] = reason_text(list(annotation.reasons))
+    if caliber is not None:
+        row["caliber"] = caliber
+    if reference is not None:
+        # 结构化的参考值只进 payload、不进版面（版面那份在 `note` 里）。它在这里是
+        # 为了让「强制携带未标定标注」这条判据可以被机器查，而不是靠读那句中文。
+        row["reference"] = {
+            "value": round(reference, 1),
+            "unit": unit,
+            "calibrated": False,
+            "offsetSource": "synthetic-probe:probe_trim.txt",
+        }
     return row
 
 

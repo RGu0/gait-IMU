@@ -119,8 +119,16 @@ export function ReportDocument({ report }) {
             >
               <p className="rp-metric__title">{metric.title}</p>
               <MetricValue metric={metric} />
-              {metric.grade === "low" ? (
-                <p className="rp-metric__note">{metric.note || GRADE_NOTE.low}</p>
+              {/*
+                `note` 只要有就印，不再只在 `low` 时印（RAY-437）。双支撑期占比的
+                口径标注要在**两支上都出现**，而走相位重叠那一支时等级可能是
+                `normal` —— 绑死在 `low` 上，标注就恰好在最需要它的那一支上不显示。
+                `low` 仍保留兜底句：没有 `note` 的 `low` 指标还是要有一句说明。
+              */}
+              {metric.note ? (
+                <p className="rp-metric__note">{metric.note}</p>
+              ) : metric.grade === "low" ? (
+                <p className="rp-metric__note">{GRADE_NOTE.low}</p>
               ) : null}
             </div>
           ))}

@@ -32,6 +32,40 @@ NOT_APPLICABLE: Final[str] = "本次不适用"
 #: `low` 的通用说明。PRD §12 给了原话。
 LOW_NOTE: Final[str] = "本次有效步数较少，此项仅供参考。"
 
+#: 双支撑期占比的两个估计量各自的口径标注（RAY-437）。
+#:
+#: **这两句必须跟着实际走的那一支变，不能写死其中一句。** 版面上两个数长得一模一样
+#: 都是百分数，读者分不出手上这个是量出来的相位重叠还是一个全程平均的推论 —— 而
+#: 这两者能不能与另一次采集比较是不同的。采集端 `reportFor` 从不传同步质量，所以
+#: 操作员日常看到的一直是恒等式那一支，对它标「ZUPT 边界口径」是错的。
+CALIBER_NOTE: Final[dict[str, str]] = {
+    "phase-overlap": "ZUPT 边界口径",
+    "stance-identity": "由站立相恒等式推算，非 ZUPT 边界口径",
+}
+
+#: 参考值的未标定标注。**RAY-288 R2 把它定为强制项** —— 去掉即不达标，因为参考值
+#: 的修正量与被修正量同一数量级（125 步/分下约 10~12 个百分点，而该指标正常值才
+#: ~20%），一个不带这句话的参考值会被当成测量结果读。
+UNCALIBRATED_NOTE: Final[str] = "未标定，偏移来自合成模型"
+
+
+def caliber_note(caliber: str | None, reference: str | None = None) -> str | None:
+    """口径标注；有参考值时把它接在同一句里。
+
+    参考值走 `note` 而不是自己占一处渲染，是本 scope 对 R-4 的裁定：模板只有一份，
+    为它新加一个渲染块要动那一份，而 `note` 本就是「关于这个数的一句话」。
+    结构化的 `reference` 仍进 payload 供追溯，只是不参与渲染。
+    """
+    if caliber is None:
+        return None
+    note = CALIBER_NOTE.get(caliber)
+    if note is None:
+        return None
+    if reference is not None:
+        note = f"{note}；参考值 {reference}（{UNCALIBRATED_NOTE}）"
+    return note
+
+
 #: 诊断措辞黑名单。测试逐条扫整份报告 —— 这不是提醒，是拦截。
 FORBIDDEN_WORDS: Final[tuple[str, ...]] = (
     "确诊",

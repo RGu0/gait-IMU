@@ -17,6 +17,13 @@ import pytest
 from gait.contracts import GaitCycle
 from gait.quality.annotate import GRADE_NORMAL, GRADE_UNCOMPUTABLE
 from gait.report import FORBIDDEN_WORDS, NOT_APPLICABLE, ReportError, build_report
+from gait.report.basic import (
+    _TRIM_PER_SIDE_MS,
+    CALIBER_PHASE_OVERLAP,
+    CALIBER_STANCE_IDENTITY,
+    build_metrics,
+)
+from gait.report.wording import UNCALIBRATED_NOTE
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "packages/report-template/ReportDocument.jsx"
 
@@ -230,3 +237,104 @@ def test_turns_not_recorded_says_so_instead_of_zero() -> None:
     assert conditions["转身次数"] == "未记录"
     recorded = {row["label"]: row["value"] for row in report(turns=14)["conditions"]}
     assert recorded["转身次数"] == "14"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-437 `double-support-caliber`：口径标注跟着实际那一支变；
+# 参考值只在相位重叠那一支给出（RAY-288 R2）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SYNC_OK = {"determinate": True, "flagged": False}
+
+
+def _double_support_row(**kwargs) -> dict:
+    metrics, _ = build_metrics(cycles(24), **kwargs)
+    return next(m for m in metrics if m["key"] == "double-support")
+
+
+def test_caliber_follows_the_branch_that_actually_ran() -> None:
+    """标注不能写死其中一句。
+
+    两个估计量在版面上都是一个百分数，读者只能靠这句话分辨手上这个是量出来的
+    相位重叠还是全程平均的推论。写死任意一句，另一支就会被标错 —— 而采集端
+    `reportFor` 从不传同步质量，被标错的恰恰是操作员天天看的那一份。
+    """
+    with_sync = _double_support_row(sync_quality=_SYNC_OK)
+    without = _double_support_row()
+
+    assert with_sync["caliber"] == CALIBER_PHASE_OVERLAP
+    assert without["caliber"] == CALIBER_STANCE_IDENTITY
+    assert "ZUPT 边界口径" in with_sync["note"]
+    assert "非 ZUPT 边界口径" in without["note"]
+
+
+def test_the_stance_identity_branch_gets_no_reference_value() -> None:
+    """那 ~100 ms 是相位重叠才受到的偏差。
+
+    恒等式算的是 `2 × 平均站立相 − 100`，一个足内量，本来就没被 ZUPT 边界削过。
+    给它加回去等于凭空抬高一个数 —— 这是 RAY-288 R2 修正 R1 的第二条。
+    """
+    row = _double_support_row()
+    assert "reference" not in row
+    assert "参考值" not in row["note"]
+
+
+def test_the_reference_offset_is_percentage_points_not_milliseconds() -> None:
+    """占比的分母是步周期，所以同样的 100 ms 在不同步频下是不同的百分点。
+
+    这一条钉的是 RAY-288 R1 最初写错的那处单位：把 ms 直接加到百分数上。
+    """
+    row = _double_support_row(sync_quality=_SYNC_OK)
+    raw = float(row["value"])
+    reference = row["reference"]["value"]
+
+    # 夹具的 stride_time 是 1.1 s。
+    expected_offset = (2 * _TRIM_PER_SIDE_MS / 1000.0) / 1.1 * 100.0
+    assert reference == pytest.approx(raw + expected_offset, abs=0.05)
+    # 若误把 ms 当百分点直接相加，偏移会是 105.8 而不是约 9.6。
+    assert expected_offset < 20.0
+
+
+def test_a_reference_value_always_carries_the_uncalibrated_marker() -> None:
+    """R2 把这句标注定为强制项。
+
+    参考值的修正量与被修正量同一数量级（125 步/分下约 11 个百分点，而该指标正常值
+    才 ~20%）。一个不带这句话的参考值会被当成测量结果读，而它的偏移来自合成探针。
+    """
+    row = _double_support_row(sync_quality=_SYNC_OK)
+    assert row["reference"]["calibrated"] is False
+    assert "probe_trim" in row["reference"]["offsetSource"]
+    assert UNCALIBRATED_NOTE in row["note"]
+
+
+def test_the_reference_value_does_not_change_the_grade() -> None:
+    """参考值不参与任何判定（R2 验收）。等级只由 `quality.annotate` 定（FR-08）。"""
+    row = _double_support_row(sync_quality=_SYNC_OK)
+    assert row["grade"] == row["quality"]["grade"]
+    assert "reference" not in row["quality"]
+
+
+@pytest.mark.parametrize(
+    ("cycles_in", "kwargs"),
+    [
+        # 没有周期：恒等式那一支拿不到平均站立相。
+        ([], {}),
+        # 有同步依据但只有一只脚：相位重叠配不成对。
+        ([cycle(i, "L") for i in range(12)], {"sync_quality": _SYNC_OK}),
+    ],
+    ids=["no-cycles", "one-foot-only"],
+)
+def test_an_uncomputable_double_support_carries_no_caliber(cycles_in, kwargs) -> None:
+    """没有数就没有口径可标 —— **三条不可算的出口都要守住**。
+
+    给一个不可算的指标标上口径，等于声称我们知道那个不存在的数会是哪一支算的。
+
+    这条最初只测了「没有周期」那一条出口，于是把口径写进另一条出口的变异**没有变红**。
+    不可算有三条路（无周期 / 配不成对 / `EventError`），一条测试只走一条，
+    另外两条就等于没有守卫。
+    """
+    metrics, _ = build_metrics(cycles_in, **kwargs)
+    row = next(m for m in metrics if m["key"] == "double-support")
+    assert row["grade"] == GRADE_UNCOMPUTABLE
+    assert "caliber" not in row
+    assert "reference" not in row
