@@ -110,13 +110,75 @@ __all__ = [
     "StraightLineVerdict",
     "TrialGeometry",
     "TrialMeasurement",
+    "course_length_from_pitch",
     "evaluate_trial",
+    "stride_length_from_placements",
     "summarize",
 ]
 
 
 class ProtocolError(ValueError):
     """协议验证的输入不满足前提。"""
+
+
+# ── 定长走廊的几何：落脚数 ↔ 距离 ────────────────────────────────────────────
+#
+# 这两个换算此前**只存在于证据文档里**，于是它被抄错时没有任何东西会变红：
+# `evidence/ray-360/field-replay` 由 `45.148 ÷ 38` 得出「步长恒为 1.188 m」，
+# 而同一批证据里 `ray-337/protocol-truth` 的几何推导给的是 1.2 m。两处互相矛盾，
+# 而它们都只是文字。落成函数是为了让下一次抄错变成一次测试失败。
+
+
+def _validated_placements(placements_per_foot: int) -> int:
+    if isinstance(placements_per_foot, bool) or not isinstance(
+        placements_per_foot, int
+    ):
+        raise ProtocolError(f"落脚数须为整数，得到 {placements_per_foot!r}")
+    if placements_per_foot < 1:
+        raise ProtocolError(f"每足落脚数须为正，得到 {placements_per_foot}")
+    return placements_per_foot
+
+
+def course_length_from_pitch(pitch_m: float, placements_per_foot: int) -> float:
+    """由**单步进距**与每足落脚数算走廊长度：`L = (2N − 1) × pitch`。
+
+    ## 前提：**并脚起步、并脚收尾**
+
+    双脚并立起步时，第一步的摆动脚只需前出**半个步幅**；收尾并立时最后一步同样只有
+    半步。两个半步凑成一整步，于是 N 次落脚只推进 `2N − 1` 个单步，而不是 `2N`。
+
+    T-230-03 的走廊就是这样量出来的：砖距实测 600.90 mm，每足 38 次落脚，
+    `(2×38 − 1) × 600.90 mm` = **45.0675 m**。
+
+    **不适用于滚动起步**（走进测量段时已在行进中）。那种协议两端没有半步，
+    关系是 `L = 2N × pitch`，本函数会低报一个单步。协议形态属于场地记录，
+    本模块不猜 —— 调用方用它就等于声明了「并脚起步、并脚收尾」。
+    """
+    n = _validated_placements(placements_per_foot)
+    if not math.isfinite(pitch_m) or pitch_m <= 0.0:
+        raise ProtocolError(f"单步进距须为正的有限值，得到 {pitch_m!r}")
+    return (2 * n - 1) * pitch_m
+
+
+def stride_length_from_placements(distance_m: float, placements_per_foot: int) -> float:
+    """由走廊长度与每足落脚数算**步幅**：除数是 `N − 0.5`，**不是 N**。
+
+    同一条几何反过来用。这是最容易抄错的一步 —— 「每足 38 个步态周期」很自然被读成
+    「38 个步幅」，于是有人写下 `45.148 ÷ 38 = 1.188 m`。**38 是落脚次数**，
+    而两端各有半步，所以 38 次落脚只跨 **37.5** 个步幅：
+
+    * 正确：`45.0675 / 37.5` = **1.2018 m**（= 两个砖距，与场地自洽）
+    * 错误：`45.0675 / 38` = 1.1860 m —— **低 1.3%**
+
+    1.3% 在 3% 的距离判据下吃掉近一半预算，而且是**系统性偏置**：它不会随样本增多
+    而消失，也不会让任何读数看起来异常。
+
+    前提与 `course_length_from_pitch` 相同（并脚起步、并脚收尾），两者互为逆运算。
+    """
+    n = _validated_placements(placements_per_foot)
+    if not math.isfinite(distance_m) or distance_m <= 0.0:
+        raise ProtocolError(f"走廊长度须为正的有限值，得到 {distance_m!r}")
+    return distance_m / (n - 0.5)
 
 
 def _finite(value: float | None) -> float | None:
@@ -136,7 +198,7 @@ class TrialGeometry:
     protocol: str
     #: 真值距离，m。**三种协议的口径不同**，因为三者能被测到的量本来就不同：
     #:
-    #: * `straight`：整趟直线长度（如 45.148 m）。读数是首末位移模长。距离**由本
+    #: * `straight`：整趟直线长度（如 T-230-03 走廊实测的 45.0675 m）。读数是首末位移模长。距离**由本
     #:   字段声明**，但须 ≥ `STRAIGHT_LINE_MIN_DISTANCE_M` —— 下限是判据的一部分，
     #:   见该常量的文档。
     #: * `shuttle`：**单程**长度（如 4 m），不是往返累计。往返走完回到原点，首末
