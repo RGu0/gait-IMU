@@ -363,9 +363,17 @@ def _translate_status(exc: urllib.error.HTTPError) -> Exception:
     """把一个 HTTP 错误状态翻成队列认得的两类之一。
 
     翻译表见模块文档。服务端错误信封里的 `code` / `action` 会被读出来放进消息，
-    但**不参与判定** —— 判定只看状态码。理由：`action` 的取值集合尚未被服务端承诺
-    稳定（《待确认卷》§2.4，已作为公共能力需求提到 Foundation 侧 RAY-410），
-    在它稳定之前把重试与否建在它上面，等于把队列的正确性押在一个会变的东西上。
+    但**不参与判定** —— 判定只看状态码。
+
+    理由在 2026-09-08 变过一次，这里记下现在的版本：**不是「没人承诺过 `action`
+    稳定」**（techflex-cloud-foundation 的 RAY-410 已经承诺了，它的 `ErrorEnvelope`
+    带 `retryable` + `action`，取值由产品经 `ErrorActionCatalog` 注册，还写明了未知
+    action 退回按 `retryable` 判定的兜底契约），**而是「不知道对面是谁」** ——
+    gait 的服务端建不建在 Foundation 上尚未拍板（《待确认卷》§1.4、§3.4）。
+
+    在那之前依赖 `action`，等于假设了一个还没定的服务端。**服务端一旦确定基于
+    Foundation，这里可以收窄成先看 `action`、未知则退回 `retryable`** —— 那是
+    Foundation 已经给好的契约，不需要本仓库再发明。
     """
     status = exc.code
     detail = _error_detail(exc)
