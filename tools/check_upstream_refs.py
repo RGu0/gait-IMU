@@ -184,7 +184,16 @@ def upstream_root(key: str, spec: dict, repo_root: Path = REPO_ROOT) -> Path | N
 
 
 def sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """摘要取 **LF 归一化后**的字节，不取磁盘原样。
+
+    这份声明要在多台机器之间比对，而 Windows 上带 `core.autocrlf=true` 的检出会把上游
+    每一行的结尾都变成 CRLF —— 原样摘要下**全部 14 个文件都会报漂移**，而上游一个字符
+    都没改。那种红是最坏的一种：它按平台而非按事实触发，且唯一的消解办法是重钉摘要，
+    于是把这道闸训练成一个「看到红就 --update」的仪式。
+
+    代价是纯换行符变更不再被察觉。那不是语义变更，本来也不该惊动引用它的文档。
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 # ----------------------------------------------------------------- 第一层：完整性

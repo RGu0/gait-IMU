@@ -59,7 +59,9 @@ def _upstream(tmp_path: Path, rel: str, text: str = UPSTREAM_TEXT) -> Path:
     """在本仓库的兄弟位置造一个上游仓库，模拟本机同级目录的布局。"""
     path = tmp_path / "container" / "some-upstream" / "main" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # 显式 newline="\n"：默认文本模式在 Windows 上把 \n 翻成 \r\n，夹具的内容
+    # 就会随平台变，用例便测不准自己想测的东西。
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 
@@ -154,6 +156,19 @@ def test_上游内容未变就通过(tmp_path: Path) -> None:
     digest = hashlib.sha256(UPSTREAM_TEXT.encode("utf-8")).hexdigest()
     drift, unverified = chk.compare_upstream(_pin({"pkg/thing.py": _entry(digest)}), _repo(tmp_path))
     assert (drift, unverified) == ([], [])
+
+
+def test_上游是crlf检出时不算漂移(tmp_path: Path) -> None:
+    """Windows 上带 core.autocrlf 的检出会把每一行都变成 CRLF。若按原样取摘要，
+    14 个文件会全部报红而上游一个字符没改 —— 那种红按平台触发而非按事实触发，
+    且唯一的消解办法是重钉，等于把这道闸训练成「看到红就 --update」。"""
+    import hashlib
+
+    path = _upstream(tmp_path, "pkg/thing.py")
+    path.write_bytes(UPSTREAM_TEXT.replace("\n", "\r\n").encode("utf-8"))
+    digest = hashlib.sha256(UPSTREAM_TEXT.encode("utf-8")).hexdigest()
+    drift, _ = chk.compare_upstream(_pin({"pkg/thing.py": _entry(digest)}), _repo(tmp_path))
+    assert drift == []
 
 
 def test_上游文件消失是最强的漂移(tmp_path: Path) -> None:
