@@ -76,6 +76,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -128,7 +129,11 @@ def load_pin(path: Path = PIN_PATH) -> dict:
     for key, spec in upstreams.items():
         if not isinstance(spec, dict):
             raise PinError(f"upstreams.{key} 不是对象")
-        for field in ("repo_dir", "markers", "files"):
+        pinned = spec.get("pinned_by")
+        if pinned is not None:
+            _check_pinned_by(key, pinned)
+        required = ("markers", "files") if pinned else ("repo_dir", "markers", "files")
+        for field in required:
             if field not in spec:
                 raise PinError(f"upstreams.{key} 缺少 `{field}`")
         # 类型也要校。`repo_dir` 若不是字符串，`ancestor / repo_dir` 会抛
@@ -146,10 +151,18 @@ def load_pin(path: Path = PIN_PATH) -> dict:
         for rel, entry in files.items():
             if not isinstance(entry, dict):
                 raise PinError(f"upstreams.{key}.files['{rel}'] 不是对象")
-            digest = entry.get("sha256")
-            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            if spec.get("pinned_by") is None:
+                digest = entry.get("sha256")
+                if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise PinError(
+                        f"upstreams.{key}.files['{rel}'].sha256 不是 64 位小写十六进制"
+                    )
+            elif "sha256" in entry:
+                # 一个既按锁文件钉、又逐文件记摘要的条目有两个真相源，而两份真相
+                # 迟早对不上。锁文件那个哈希覆盖整个 wheel，比三个逐文件摘要更宽。
                 raise PinError(
-                    f"upstreams.{key}.files['{rel}'].sha256 不是 64 位小写十六进制"
+                    f"upstreams.{key}.files['{rel}'] 同时有 `sha256` 与上游的 "
+                    "`pinned_by`；按锁文件钉时不要再逐文件记摘要"
                 )
             cited = entry.get("cited_by")
             if not isinstance(cited, list) or not cited:
@@ -159,6 +172,60 @@ def load_pin(path: Path = PIN_PATH) -> dict:
                     "没人引用的上游文件不该被钉住，删掉它"
                 )
     return pin
+
+
+def _check_pinned_by(key: str, pinned: object) -> None:
+    if not isinstance(pinned, dict) or set(pinned) != {"lock", "package", "version"}:
+        raise PinError(
+            f"upstreams.{key}.pinned_by 必须是 {{lock, package, version}} 三个键的对象"
+        )
+    if not all(isinstance(value, str) and value for value in pinned.values()):
+        raise PinError(f"upstreams.{key}.pinned_by 的两个值都必须是非空字符串")
+
+
+def locked_version(pinned: dict, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
+    """(是否与声明一致, 说明)。核对锁文件里该包的版本是否还是声明记的那一个。
+
+    ## 这条守的是升版，不是内容漂移
+
+    内容漂移在这里**已经不可能**了：`uv.lock` 对 url / path / registry 来源都记
+    `hash = "sha256:…"`，`--locked` 每次安装都校验；git 来源不记哈希，但 rev 是 commit，
+    本身就不可变。**换句话说，钉子没法被静默弄丢** —— 第一版的这条检查是照着一个
+    不存在的失效模式写的，实测（把 `url =` 换成 `path =`，哈希照样在）之后改成了本条。
+
+    真正会静默出错的是**升版**：改一行 URL 把 Foundation 从 0.3.0 换到 0.4.0，
+    `uv lock` 会照做、测试照样绿 —— 而《抄录卷》《待确认卷》里逐行转录 `iam.py` /
+    `device_trust.py` 的那些内容**可能已经不成立**，没有任何一步会提醒。
+
+    所以声明里记住版本，升版时这条会红，报错里带上 `cited_by`：升版因此变成
+    **一次必须回头重读那几份文档的显式动作**，而不是一行 diff。这正是 RAY-420
+    方案 B 说的「漂移变成一次显式的升级事件」。
+    """
+    lock_path = repo_root / pinned["lock"]
+    try:
+        data = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"锁文件不存在：{pinned['lock']}"
+    except tomllib.TOMLDecodeError as exc:
+        return None, f"锁文件不是合法 TOML：{pinned['lock']}（{exc}）"
+
+    packages = [
+        entry
+        for entry in data.get("package", [])
+        if isinstance(entry, dict) and entry.get("name") == pinned["package"]
+    ]
+    if not packages:
+        return None, f"{pinned['lock']} 里没有 `{pinned['package']}` 这个包"
+    if len(packages) > 1:
+        return None, f"{pinned['lock']} 里有 {len(packages)} 个 `{pinned['package']}`，无法判定"
+
+    actual = packages[0].get("version")
+    if actual != pinned["version"]:
+        return False, (
+            f"{pinned['package']} 的版本变了：声明 {pinned['version']}，"
+            f"{pinned['lock']} 里是 {actual}"
+        )
+    return True, f"{pinned['package']} {actual} 按 {pinned['lock']} 钉住（声明一致）"
 
 
 def upstream_root(key: str, spec: dict, repo_root: Path = REPO_ROOT) -> Path | None:
@@ -290,6 +357,22 @@ def compare_upstream(pin: dict, repo_root: Path = REPO_ROOT) -> tuple[list[str],
     drift: list[str] = []
     unverified: list[str] = []
     for key, spec in pin["upstreams"].items():
+        pinned = spec.get("pinned_by")
+        if pinned is not None:
+            # 按锁文件钉的上游：**没有「未能核对」这一档**。锁文件在库里，任何机器、
+            # 任何 CI 上都读得到，所以这一条要么通过要么红 —— 这正是把外部上游变成
+            # 带版本依赖的收益（RAY-420 的方案 B）。
+            ok, note = locked_version(pinned, repo_root)
+            if not ok:
+                cited = sorted(
+                    {doc for entry in spec["files"].values() for doc in entry["cited_by"]}
+                )
+                drift.append(
+                    f"{key} 升版了：{note}\n"
+                    f"      逐行转录它的是：{'、'.join(cited)}\n"
+                    f"      重读那几份，确认转录的内容在新版里还成立，再改声明里的 version"
+                )
+            continue
         root = upstream_root(key, spec, repo_root)
         if root is None:
             unverified.append(
@@ -333,6 +416,16 @@ def recent_commits(root: Path, rel: str, count: int = 3) -> list[str]:
 def update(pin: dict, repo_root: Path = REPO_ROOT) -> int:
     changed = 0
     for key, spec in pin["upstreams"].items():
+        if spec.get("pinned_by") is not None:
+            # 按锁文件钉的上游没有逐文件摘要可重钉。它的版本由 pyproject 的
+            # [tool.uv.sources] 决定，声明里的 version 要**手改**，因为改它的前提是
+            # 已经重读过 cited_by 里那几份文档 —— 那件事脚本做不了。
+            print(
+                f"{key}：按 {spec['pinned_by']['lock']} 钉住，无逐文件摘要可重钉。"
+                f"升版后手改声明里的 pinned_by.version（先重读 cited_by 的文档）",
+                file=sys.stderr,
+            )
+            continue
         root = upstream_root(key, spec, repo_root)
         if root is None:
             print(f"{key}：不在本机，跳过（{spec['repo_dir']}）", file=sys.stderr)
@@ -369,23 +462,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        pin = load_pin()
+        pin = load_pin(PIN_PATH)
     except PinError as exc:
         print(f"上游引用声明不可用：{exc}", file=sys.stderr)
         return 1
 
     if args.update:
-        return update(pin)
+        return update(pin, REPO_ROOT)
 
     try:
-        tracked = tracked_files()
+        tracked = tracked_files(REPO_ROOT)
     except (OSError, subprocess.CalledProcessError) as exc:
         # 拿不到文件清单就没法做第一层。这时候返回 0 等于假装检查过了。
         print(f"无法列出 git 跟踪的文件，第一层检查无法进行：{exc}", file=sys.stderr)
         return 1
 
     problems = undeclared_citations(REPO_ROOT, tracked, pin)
-    drift, unverified = compare_upstream(pin)
+    # 两类上游要分开算：按锁文件钉的没有「未能核对」这一档，也没有上游 git 仓库
+    # 可查提交。**必须在下面任何报告之前定义** —— 第一版把它放在漂移报告之后，
+    # 于是那条路径一旦真的走到就抛 UnboundLocalError，而那是唯一要紧的路径。
+    by_lock = {k: s for k, s in pin["upstreams"].items() if s.get("pinned_by")}
+    by_sibling = {k: s for k, s in pin["upstreams"].items() if not s.get("pinned_by")}
+    drift, unverified = compare_upstream(pin, REPO_ROOT)
 
     if problems:
         print("上游引用未声明：", file=sys.stderr)
@@ -401,8 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         print("上游已漂移：", file=sys.stderr)
         for line in drift:
             print(f"  {line}", file=sys.stderr)
-        for key, spec in pin["upstreams"].items():
-            root = upstream_root(key, spec)
+        for key, spec in by_sibling.items():
+            root = upstream_root(key, spec, REPO_ROOT)
             if root is None:
                 continue
             for rel in spec["files"]:
@@ -410,16 +508,16 @@ def main(argv: list[str] | None = None) -> int:
                     for commit in recent_commits(root, rel):
                         print(f"      上游提交 {commit}", file=sys.stderr)
         print(
-            "\n先读引用它的那几份文档，确认结论是否还成立；改完再用 "
-            "`--update` 重钉。直接重钉等于把一次没做过的核对记成做过了。",
+            "\n先读引用它的那几份文档，确认结论是否还成立。改完之后：\n"
+            "  · 同级目录型上游（ffp）——`--update` 重钉逐文件摘要；\n"
+            "  · 按锁文件钉的上游（Foundation）——**手改**声明里的 `pinned_by.version`。\n"
+            "两种都不要在没重读文档之前做：那等于把一次没做过的核对记成做过了。",
             file=sys.stderr,
         )
 
-    total = sum(len(s["files"]) for s in pin["upstreams"].values())
+    total = sum(len(s["files"]) for s in by_sibling.values())
     checked = total - sum(
-        len(s["files"])
-        for k, s in pin["upstreams"].items()
-        if upstream_root(k, s) is None
+        len(s["files"]) for k, s in by_sibling.items() if upstream_root(k, s, REPO_ROOT) is None
     )
     if unverified:
         print("未能核对（上游不在本机，属实情，非跳过）：", file=sys.stderr)
@@ -429,9 +527,11 @@ def main(argv: list[str] | None = None) -> int:
     if problems or drift:
         return 1
 
+    locked = "；".join(locked_version(s["pinned_by"], REPO_ROOT)[1] for s in by_lock.values())
     print(
         f"上游引用检查通过：声明完整（扫了 {len(tracked)} 个跟踪文件），"
         f"内容比对 {checked}/{total} 个上游文件"
+        + (f"；{locked}" if locked else "")
     )
     return 0
 

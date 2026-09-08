@@ -262,6 +262,144 @@ def test_没人引用的声明是死条目(tmp_path: Path) -> None:
         chk.load_pin(_write_pin(tmp_path, payload))
 
 
+# --------------------------------------------------- 按锁文件钉的上游（RAY-443）
+
+
+def _lock_pin(version: str = "0.3.0") -> dict:
+    return {"lock": "uv.lock", "package": "some-package", "version": version}
+
+
+def _pin_locked(version: str = "0.3.0", cited: list[str] | None = None) -> dict:
+    return {
+        "upstreams": {
+            "up": {
+                "name": "上游",
+                "pinned_by": _lock_pin(version),
+                "markers": ["up:", "SomeUpstream"],
+                "files": {"pkg/thing.py": {"cited_by": cited or ["docs/x.md", "docs/y.md"]}},
+            }
+        }
+    }
+
+
+def _write_lock(repo: Path, version: str = "0.3.0", name: str = "some-package") -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "uv.lock").write_text(
+        f'[[package]]\nname = "{name}"\nversion = "{version}"\n'
+        f'source = {{ url = "https://example.invalid/x.whl" }}\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def test_版本一致时通过(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_lock(repo, "0.3.0")
+    drift, unverified = chk.compare_upstream(_pin_locked("0.3.0"), repo)
+    assert (drift, unverified) == ([], [])
+
+
+def test_升版就红并点名逐行转录它的文档(tmp_path: Path) -> None:
+    """升版本身不出错、测试照样绿 —— 会静默作废的是转录它的那几份文档。"""
+    repo = _repo(tmp_path)
+    _write_lock(repo, "0.4.0")
+    drift, unverified = chk.compare_upstream(_pin_locked("0.3.0"), repo)
+    assert unverified == []
+    assert len(drift) == 1
+    assert "0.3.0" in drift[0] and "0.4.0" in drift[0]
+    assert "docs/x.md" in drift[0] and "docs/y.md" in drift[0]
+
+
+def test_按锁文件钉的上游没有未能核对这一档(tmp_path: Path) -> None:
+    """锁文件在库里，任何机器任何 CI 都读得到 —— 要么通过要么红。
+    这正是把外部上游变成带版本依赖的收益。"""
+    repo = _repo(tmp_path)  # 不写 uv.lock
+    drift, unverified = chk.compare_upstream(_pin_locked(), repo)
+    assert unverified == []
+    assert len(drift) == 1
+    assert "锁文件不存在" in drift[0]
+
+
+def test_锁文件里没有那个包也是红(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_lock(repo, name="别的包")
+    drift, _ = chk.compare_upstream(_pin_locked(), repo)
+    assert len(drift) == 1
+    assert "没有 `some-package`" in drift[0]
+
+
+def test_锁文件不是合法toml也是红(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "uv.lock").write_text("[[package\n坏的", encoding="utf-8")
+    drift, _ = chk.compare_upstream(_pin_locked(), repo)
+    assert len(drift) == 1
+    assert "合法 TOML" in drift[0]
+
+
+def test_按锁文件钉时不需要repo_dir(tmp_path: Path) -> None:
+    chk.load_pin(_write_pin(tmp_path, _pin_locked()))  # 不抛即通过
+
+
+@pytest.mark.parametrize(
+    "pinned",
+    [
+        {"lock": "uv.lock", "package": "p"},  # 少 version
+        {"lock": "uv.lock", "package": "p", "version": "1", "extra": "x"},  # 多一个
+        {"lock": "uv.lock", "package": "p", "version": ""},  # 空串
+        "uv.lock",  # 不是对象
+    ],
+)
+def test_pinned_by结构不对时抛错(tmp_path: Path, pinned: object) -> None:
+    payload = _pin_locked()
+    payload["upstreams"]["up"]["pinned_by"] = pinned
+    with pytest.raises(chk.PinError, match="pinned_by"):
+        chk.load_pin(_write_pin(tmp_path, payload))
+
+
+def test_按锁文件钉时不许再逐文件记摘要(tmp_path: Path) -> None:
+    """两个真相源迟早对不上，而锁文件那个哈希覆盖整个 wheel，比逐文件摘要更宽。"""
+    payload = _pin_locked()
+    payload["upstreams"]["up"]["files"]["pkg/thing.py"]["sha256"] = DIGEST_A
+    with pytest.raises(chk.PinError, match="不要再逐文件记摘要"):
+        chk.load_pin(_write_pin(tmp_path, payload))
+
+
+def test_混合两类上游时两条漂移都报(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_lock(repo, "0.4.0")
+    _upstream(tmp_path, "pkg/thing.py", "改过的内容\n")
+    pin = _pin_locked("0.3.0")
+    pin["upstreams"]["sib"] = {
+        "name": "同级",
+        "repo_dir": "some-upstream",
+        "inner": "main",
+        "markers": ["SomeUpstream"],
+        "files": {"pkg/thing.py": _entry()},
+    }
+    drift, _ = chk.compare_upstream(pin, repo)
+    assert len(drift) == 2  # 升版 + 内容已变，两类各一条
+
+
+def test_main在漂移路径上不崩(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**回归，且必须走 `main()`。**
+
+    第一版把 `by_lock` / `by_sibling` 的分组放在漂移报告**之后**，于是 `main()` 一旦
+    真的走到漂移路径就抛 `UnboundLocalError` —— 而那是唯一要紧的路径：检查通过时谁都
+    不看它，只有报错时才有人读。第一版的回归测试测的是 `compare_upstream()`，
+    那一层从来没有这个 bug，所以它绿着而 `main()` 是崩的。
+    """
+    repo = _repo(tmp_path)
+    _write_lock(repo, "0.4.0")  # 与声明的 0.3.0 不符 -> 必走漂移路径
+    pin_path = tmp_path / "pin.json"
+    pin_path.write_text(json.dumps(_pin_locked("0.3.0"), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(chk, "REPO_ROOT", repo)
+    monkeypatch.setattr(chk, "PIN_PATH", pin_path)
+    monkeypatch.setattr(chk, "tracked_files", lambda repo_root=repo: [])
+
+    assert chk.main([]) == 1  # 崩的话这里是异常，不是 1
+
+
 # ----------------------------------------------------------------- 真实仓库
 
 
