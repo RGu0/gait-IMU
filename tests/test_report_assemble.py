@@ -35,6 +35,8 @@ _REPORT_KEYS = {
     "metrics",
     "comparison",
     "parameters",
+    # RAY-288 范围 1：专业参数表下那句系统性差异说明。模板读 `report.parametersNote`。
+    "parametersNote",
     "timeline",
     "conditions",
     "reportId",

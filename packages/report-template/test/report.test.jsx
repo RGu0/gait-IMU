@@ -179,6 +179,20 @@ describe("the page is built for A4, not for a screen", () => {
     expect(CSS).toMatch(/font-family:[^;]*Noto Sans SC/);
   });
 
+  it("prints the professional-parameters footnote when the payload carries one", () => {
+    // RAY-288 范围 1：双支撑期读数与生理双支撑期差约 100 ms，那是口径差不是异常。
+    // 不印出来，读者会拿它跟文献直接比。
+    const withNote = { ...report, parametersNote: "双支撑期占比由零速（ZUPT）边界算出……低约 100 ms。" };
+    const markup = renderToStaticMarkup(<ReportDocument report={withNote} />);
+    expect(markup).toContain("rp-table__note");
+    expect(markup).toContain("低约 100 ms");
+  });
+
+  it("omits the footnote element when there is no note", () => {
+    const markup = renderToStaticMarkup(<ReportDocument report={report} />);
+    expect(markup).not.toContain("rp-table__note");
+  });
+
   it("allows small type only in the footer", () => {
     // The footer is the single place the spec permits type this small.
     const small = [...CSS.matchAll(/font-size:\s*(8(?:\.\d)?)pt/g)];

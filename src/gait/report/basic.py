@@ -44,6 +44,7 @@ from gait.quality.annotate import (
     summarize,
 )
 from gait.report.wording import (
+    DOUBLE_SUPPORT_EXPLAINER,
     NOT_APPLICABLE,
     caliber_note,
     metric_note,
@@ -623,6 +624,15 @@ def build_report(
         "metrics": metrics,
         "comparison": build_comparison(cycles),
         "parameters": parameters,
+        # 专业参数表底下的那一句（RAY-288 范围 1）。它**不是**某一行的说明，是整块
+        # 的脚注：核心指标卡上的口径标注只说得出「这是哪个口径」，说不下「差多少、
+        # 为什么差」。放在专业参数区是 RAY-288 指定的位置 —— 那里的读者才会去跟
+        # 文献里的生理双支撑期比。
+        #
+        # 恒定一句，不随分支变：无论走相位重叠还是站立相恒等式，两者都建在 ZUPT
+        # 边界的支撑相上，那 ~100 ms 的差异对两支都成立。**变的是口径标注（哪一支
+        # 算的），不变的是这条差异**——这两件事不要混在一起。
+        "parametersNote": DOUBLE_SUPPORT_EXPLAINER,
         "timeline": build_timeline(cycles),
         "conditions": conditions,
         # PRD §13：grade 汇总规则版本化，进报告页脚。

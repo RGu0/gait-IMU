@@ -338,3 +338,52 @@ def test_an_uncomputable_double_support_carries_no_caliber(cycles_in, kwargs) ->
     assert row["grade"] == GRADE_UNCOMPUTABLE
     assert "caliber" not in row
     assert "reference" not in row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAY-288 R2 `caliber-explainer`：专业参数区的那一句系统性差异说明。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_parameters_section_explains_the_systematic_difference() -> None:
+    """RAY-288 范围 1 的后半。
+
+    核心指标卡上的口径标注只说得出「这是哪个口径」，说不下「差多少、为什么差」。
+    没有这一句，读者会拿这个读数直接跟文献里的生理双支撑期比 —— 而两者差约 100 ms。
+    """
+    payload = report()
+    note = payload["parametersNote"]
+    assert "生理" in note, "必须点明与之比较的是生理双支撑期"
+    assert "100 ms" in note, "必须给出差异量级，否则读者无从判断能不能比"
+    assert "不是异常" in note, "负读数是口径差，不是异常 —— PRD §8 据此把它定为观测量"
+
+
+def test_the_explainer_says_the_offset_is_not_yet_calibrated() -> None:
+    """削减量出自合成探针，真机标定所需的测力台/压力垫本项目不具备（RAY-434 A1）。
+
+    不写出来，这句解释本身会被当成一个已标定的结论读。
+    """
+    note = report()["parametersNote"]
+    assert "合成" in note and "标定" in note
+
+
+def test_the_explainer_is_constant_across_both_estimators() -> None:
+    """**变的是口径标注，不变的是这条差异。**
+
+    两个估计量都建在 ZUPT 边界的支撑相上，那 ~100 ms 对两支都成立。把这一句
+    也做成随分支变，等于暗示只有一支有这个差异 —— 那是错的。
+    """
+    with_sync = report(sync_quality={"determinate": True, "flagged": False})
+    without = report()
+    assert with_sync["parametersNote"] == without["parametersNote"]
+    # 而口径标注**确实**不同 —— 两件事分得开。
+    def ds(p):
+        return next(m for m in p["metrics"] if m["key"] == "double-support")
+    assert ds(with_sync)["caliber"] != ds(without)["caliber"]
+
+
+def test_the_explainer_carries_no_diagnostic_wording() -> None:
+    """PRD §12：报告全文不得出现诊断措辞。新增一句话同样受这条约束。"""
+    note = report()["parametersNote"]
+    for word in FORBIDDEN_WORDS:
+        assert word not in note
