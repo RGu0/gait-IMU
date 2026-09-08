@@ -49,7 +49,7 @@ import json
 import math
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -66,7 +66,9 @@ from gait.analysis.events import (
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel
 from gait.core.zupt import detect_stance
+from gait.device.binding import DeviceIdentity
 from gait.device.ble import StreamConfig, configure_streaming, start_streaming
+from gait.device.identity import platform_identity, resolve_recording_identity
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.anchor import FootSignal, measure_offsets
 from gait.sync.integrity import assess
@@ -101,9 +103,20 @@ class FootCapture:
 
     foot: str
     device_id: str
-    arrival: list[float]
-    accel: list[tuple[float, float, float]]
-    gyro: list[tuple[float, float, float]]
+    """平台句柄（macOS 上是 CoreBluetooth UUID）。**诊断用，不是设备身份** ——
+    身份见 `identity`（RAY-441）。"""
+    identity: DeviceIdentity
+    """可移植的设备身份。读得到 MAC 就是 `kind="mac"`，读不到则如实降级。
+
+    **没有默认值是刻意的**：给它一个默认就等于允许调用方悄悄不填身份，而那正是
+    RAY-441 要消掉的状态。构造 `FootCapture` 的人必须说清这一趟是哪台设备采的。
+    """
+    identity_degraded: str | None = None
+    """降级原因；`None` 表示拿到了可移植身份。这个可以有默认 —— 「没有降级」是
+    正常情形，而 `identity` 的「没填」不是。"""
+    arrival: list[float] = field(default_factory=list)
+    accel: list[tuple[float, float, float]] = field(default_factory=list)
+    gyro: list[tuple[float, float, float]] = field(default_factory=list)
 
     def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return (
@@ -373,8 +386,16 @@ def analyze_trial(
         "label": label,
         "nominal_fs": nominal_fs,
         "anchor": anchor.snapshot(),
+        # 平台句柄保留为诊断字段；**身份**在 `left_identity` / `right_identity`。
+        # RAY-441 之前这两个字段是唯一的设备标识，而它们换台主机就认不出。
         "left_device": left.device_id,
         "right_device": right.device_id,
+        "left_identity": left.identity.snapshot(),
+        "right_identity": right.identity.snapshot(),
+        "identity_degraded": {
+            "L": left.identity_degraded,
+            "R": right.identity_degraded,
+        },
         "timebase_trustworthy": trustworthy,
         "timebase_scope": timebase_scope,
         "delta_region_integrity": {
@@ -554,10 +575,28 @@ async def _run_live(
                 raise
             writers.append(writer)
             devices.append(device)
-            captures.append(
-                FootCapture(foot=foot, device_id=device.device_id, arrival=[], accel=[], gyro=[])
+            # 连上之后才读得到设备自报 MAC（寄存器 0x66）。读不到就如实降级成
+            # 平台地址，而不是让整趟采集失败 —— 数据本身仍有全部价值。
+            identity, degraded = await resolve_recording_identity(
+                device, platform_address=discovered.address
             )
-            echo(f"{foot} 足已连接：{discovered.name} {discovered.address}")
+            if degraded:
+                echo(f"⚠️ {foot} 足：{degraded}")
+            captures.append(
+                FootCapture(
+                    foot=foot,
+                    device_id=device.device_id,
+                    identity=identity,
+                    identity_degraded=degraded,
+                    arrival=[],
+                    accel=[],
+                    gyro=[],
+                )
+            )
+            echo(
+                f"{foot} 足已连接：{discovered.name} {discovered.address}"
+                f"（身份 {identity.kind}:{identity.value}）"
+            )
 
         stream_config = _stream_config(nominal_fs)
         # 先把两台的**非速率**配置全部下完，最后再一起开流。
@@ -645,6 +684,10 @@ async def _run_live(
         nominal_fs=np.asarray(nominal_fs),
         left_device=np.asarray(left.device_id),
         right_device=np.asarray(right.device_id),
+        # 身份以 JSON 串入 npz（npz 只存数组）。旧档没有这两个键 —— `load_trial_dir`
+        # 会如实降级成 platform-address，而不是猜一个 MAC。
+        left_identity=np.asarray(json.dumps(left.identity.snapshot())),
+        right_identity=np.asarray(json.dumps(right.identity.snapshot())),
         foot_assignment=np.asarray("explicit_mac" if mac_filters else "scan_order"),
         captured_utc=np.asarray(datetime.now(UTC).isoformat()),
         tap_window=np.asarray([tap_start, tap_stop]),
@@ -696,6 +739,23 @@ async def _close_quietly(device: WT901Device, echo) -> None:
         echo(f"关闭 {device.device_id} 时出错（忽略）：{error!r}")
 
 
+def identity_from_archive(data: Any, prefix: str, device_key: str) -> DeviceIdentity:
+    """从 `arrivals.npz` 里取这只脚的设备身份。
+
+    **旧档（RAY-441 之前）没有身份键**，此时如实降级成 `platform-address` ——
+    而不是拿 `device_key` 里的平台句柄假装成 MAC。那个句柄在 macOS 上是
+    CoreBluetooth 的会话内标识，把它写成 `kind="mac"` 就是伪造一个跨主机稳定的
+    身份，而伪造出来的身份与真的在数据里长得一模一样。
+
+    单独拆成纯函数是为了能直接测：`load_trial_dir` 会跑整条时基管线（需要几百个
+    样本与锚点），把「旧档怎么读」的判据绑在那上面，测的就不再只是这条判据了。
+    """
+    identity_key = f"{prefix}_identity"
+    if identity_key in data.files:
+        return DeviceIdentity.from_snapshot(json.loads(str(data[identity_key])))
+    return platform_identity(str(data[device_key]))
+
+
 def load_trial_dir(path: Path, cfg: AlgoConfig | None = None) -> dict[str, Any]:
     """从一趟的 `arrivals.npz` 复算。不需要硬件。
 
@@ -705,10 +765,12 @@ def load_trial_dir(path: Path, cfg: AlgoConfig | None = None) -> dict[str, Any]:
     data = np.load(path / ARRIVALS_FILENAME, allow_pickle=False)
     captures = []
     for prefix, foot, device_key in (("left", "L", "left_device"), ("right", "R", "right_device")):
+        identity = identity_from_archive(data, prefix, device_key)
         captures.append(
             FootCapture(
                 foot=foot,
                 device_id=str(data[device_key]),
+                identity=identity,
                 arrival=data[f"{prefix}_arrival"].tolist(),
                 accel=[tuple(row) for row in data[f"{prefix}_accel"]],
                 gyro=[tuple(row) for row in data[f"{prefix}_gyro"]],

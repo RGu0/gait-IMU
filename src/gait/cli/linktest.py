@@ -79,6 +79,7 @@ from wt901.recording import read_recording
 from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
+from gait.device.binding import DeviceIdentity
 from gait.device.ble import (
     AppliedConfig,
     StreamConfig,
@@ -86,6 +87,7 @@ from gait.device.ble import (
     read_battery_at_low_rate,
     start_streaming,
 )
+from gait.device.identity import resolve_recording_identity
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.sync.integrity import IntegrityReport, assess, estimate_period
 
@@ -181,6 +183,9 @@ class DeviceRun:
     """一台设备在一轮里的全部产出。"""
 
     device_id: str
+    """平台句柄。**诊断用，不是设备身份** —— 身份见 `identity`（RAY-441）。"""
+    identity: DeviceIdentity | None = None
+    identity_degraded: str | None = None
     arrivals: list[float] = field(default_factory=list)
     battery_before: Battery | None = None
     battery_after: Battery | None = None
@@ -229,6 +234,8 @@ class DeviceRun:
             integrity.pop("per_second_loss")
         return {
             "device_id": self.device_id,
+            "identity": None if self.identity is None else self.identity.snapshot(),
+            "identity_degraded": self.identity_degraded,
             "samples": len(self.arrivals),
             "battery_before": _battery_snapshot(self.battery_before),
             "battery_after": _battery_snapshot(self.battery_after),
@@ -500,6 +507,12 @@ async def _connect_live(
                 await _close_quietly(opened, echo)
             raise
         run = DeviceRun(device_id=device.device_id)
+        # 连上之后才读得到 MAC；读不到就如实降级（见 `resolve_recording_identity`）。
+        run.identity, run.identity_degraded = await resolve_recording_identity(
+            device, platform_address=discovered.address
+        )
+        if run.identity_degraded:
+            echo(f"⚠️ {run.identity_degraded}")
         run.recording_path = str(recording_path)
         run.rssi_at_scan = discovered.rssi
         connected.append((device, run, writer))

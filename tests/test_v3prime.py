@@ -413,6 +413,7 @@ def test_consume_reads_through_the_real_sampling_api():
     执行一遍：写错方法名就是 `AttributeError`，当场红。
     """
     from gait.cli.v3prime import FootCapture, _consume
+    from gait.device.identity import platform_identity
 
     class _FakeDevice:
         """只实现 `samples()`。**故意不实现 `stream()`** —— 写错就 AttributeError。"""
@@ -431,7 +432,8 @@ def test_consume_reads_through_the_real_sampling_api():
             euler=Vec3(0.0, 0.0, 0.0), raw=b"",
         )
 
-    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+
+    capture = FootCapture(foot="L", device_id="fake", identity=platform_identity("fake"))
     # 与 `tests/test_device_ble.py` 同一个写法：本仓库不引 pytest-asyncio。
     # `started=0.0`：采集起点划在第一个样本上，两个样本都不早于它，都该被收下。
     # 丢弃早于起点的积压样本另有 `test_consume_discards_pre_capture_backlog` 把关。
@@ -679,7 +681,9 @@ def test_consume_discards_pre_capture_backlog():
             for t in (97.5, 98.0, 99.9, 100.1, 100.2):
                 yield FakeSample(t)
 
-    capture = FootCapture(foot="L", device_id="x", arrival=[], accel=[], gyro=[])
+    from gait.device.identity import platform_identity
+
+    capture = FootCapture(foot="L", device_id="x", identity=platform_identity("x"))
     asyncio.run(_consume(FakeDevice(), capture, 100.0))
     assert capture.arrival == [100.1, 100.2]
     assert len(capture.accel) == 2 and len(capture.gyro) == 2
@@ -724,7 +728,9 @@ def test_settle_discards_the_startup_degradation():
     degraded = [_sample(started + t) for t in (0.0, 2.5, 6.0, 9.99)]
     good = [_sample(capture_from), _sample(capture_from + 0.005)]
 
-    capture = FootCapture(foot="L", device_id="fake", arrival=[], accel=[], gyro=[])
+    from gait.device.identity import platform_identity
+
+    capture = FootCapture(foot="L", device_id="fake", identity=platform_identity("fake"))
     asyncio.run(_consume(_FakeDevice(degraded + good), capture, capture_from))
 
     assert capture.arrival == [capture_from, capture_from + 0.005], (
@@ -793,10 +799,12 @@ def test_settle_defaults_to_the_measured_value_not_a_guess():
 def _uniform_capture(foot, n=4000, fs=200.0, t0=1000.0):
     """一段规整的捕获。加计静置在 g 上，陀螺为零 —— 只用于走通判定路径。"""
     from gait.cli.v3prime import FootCapture
+    from gait.device.identity import platform_identity
 
     return FootCapture(
         foot=foot,
         device_id=f"fake-{foot}",
+        identity=platform_identity(f"fake-{foot}"),
         arrival=[t0 + i / fs for i in range(n)],
         accel=[(0.0, 0.0, 9.80665)] * n,
         gyro=[(0.0, 0.0, 0.0)] * n,

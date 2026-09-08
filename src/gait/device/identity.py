@@ -61,11 +61,14 @@ from gait.device.binding import DeviceIdentity
 __all__ = [
     "CONFIRMED_DERIVATIONS",
     "MAC_PROVENANCE",
+    "PLATFORM_PROVENANCE",
     "IdentitySource",
     "is_layout_confirmed",
     "mac_identity",
+    "platform_identity",
     "provenance_note",
     "read_device_identity",
+    "resolve_recording_identity",
 ]
 
 #: 当前 MAC 值的**推导**标识。排布一改，这里就要改 —— 那正是让旧绑定被认出来
@@ -74,6 +77,10 @@ __all__ = [
 #: `le-reversed` 指的是：`0x66`–`0x68` 按小端取出 6 字节（空口顺序），整体倒过来
 #: 得到显示顺序。日期是上游做出该推断的日子，用来把「哪一次推断」钉死。
 MAC_PROVENANCE: Final[str] = "wt901-read-mac/le-reversed/2026-08-27"
+
+#: 平台地址身份的推导标识。**它本身就说明了这条身份不可移植** —— 值取自
+#: `DiscoveredDevice.address`，而上游文档写着「不要跨主机持久化」。
+PLATFORM_PROVENANCE: Final[str] = "wt901-discovered-address/platform-scoped"
 
 #: 已被**外部**证实过的推导，按推导标识索引。
 #:
@@ -133,6 +140,50 @@ async def read_device_identity(device: IdentitySource) -> DeviceIdentity:
     调用方该让它冒出来，而不是拿一个占位符继续。
     """
     return mac_identity(await device.telemetry.read_mac())
+
+
+def platform_identity(address: str) -> DeviceIdentity:
+    """把一个平台地址（macOS 的 CoreBluetooth UUID 等）包成**如实标注**的身份。
+
+    `kind="platform-address"` 不在 `binding._PORTABLE_KINDS` 里，因此它会被下游
+    正确地当成「换台主机就认不出」的身份 —— 那正是事实。
+
+    存在的意义是**让弱身份成为写出来的事实**，而不是让读者从一串 UUID 自己去猜。
+    """
+    return DeviceIdentity(
+        kind="platform-address", value=address, provenance=PLATFORM_PROVENANCE
+    )
+
+
+async def resolve_recording_identity(
+    device: IdentitySource, *, platform_address: str
+) -> tuple[DeviceIdentity, str | None]:
+    """给**录制**用的身份：能读到 MAC 就用 MAC，读不到就如实降级。
+
+    返回 `(identity, degraded_reason)`；`degraded_reason` 非空表示这次没拿到可移植
+    身份，调用方应当把它一并落盘。
+
+    ## 为什么它与 `read_device_identity` 的策略相反
+
+    那个函数**不吞异常**，理由写在它自己的文档里：拿不到身份就跳过绑定，正是
+    RAY-196 要排除的事。这条对**绑定**成立 —— 一份用占位键建的绑定比没有绑定更糟，
+    因为它看起来是好的。
+
+    **录制不一样。** 这里的取舍是「记一份身份较弱的数据」对「整场采集失败、数据全
+    丢」。后者明显更糟：数据本身仍然有全部价值，只是事后要靠旁边的元数据说清它来自
+    哪台模块。所以这里降级而不是抛。
+
+    两条策略并存不是自相矛盾，是**两个不同的问题**给出了各自正确的答案；把它们并成
+    一个函数才会出错 —— 那时必然有一方被迫接受不适合自己的策略。
+    """
+    try:
+        return await read_device_identity(device), None
+    except Exception as error:  # noqa: BLE001 - 任何读取失败都降级，理由见文档
+        reason = (
+            f"读不到设备自报 MAC（{type(error).__name__}: {error}），"
+            "本次记的是平台地址，换台主机认不出这台设备。"
+        )
+        return platform_identity(platform_address), reason
 
 
 def is_layout_confirmed(provenance: str) -> bool:
