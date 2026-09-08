@@ -171,6 +171,15 @@ export function ReportDocument({ report }) {
             ))}
           </tbody>
         </table>
+        {/*
+          专业参数表的脚注（RAY-288 范围 1）。双支撑期读数与生理双支撑期差约
+          100 ms，那是口径差不是异常 —— 不写出来，读者会拿它跟文献直接比。
+          放在表下而不是某一行里：它说明的是一个**核心指标**的口径，不是这张表里
+          任何一行的质量。
+        */}
+        {report.parametersNote ? (
+          <p className="rp-table__note">{report.parametersNote}</p>
+        ) : null}
       </section>
 
       {/* ⑥ 图表 —— 不画常模带、正常区间或健康人对照线（C-8） */}
