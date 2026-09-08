@@ -445,22 +445,39 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
     ("method", "capability", "issue"),
     [
         ("runCalibration", "calibration", "RAY-208"),
-        ("lookupSubject", "subject-directory", "RAY-322"),
         ("login", "operator-auth", "RAY-323"),
     ],
 )
 def test_gaps_are_visible_not_faked(
     method: str, capability: str, issue: str | None
 ) -> None:
-    """本 scope 剩下的缺口都必须以第三种结局出境（report 已在 RAY-345 接通）。
+    """**仍然**是缺口的那些必须以第三种结局出境（既不是成功也不是错误）。
 
     返回一个看起来正常的假值会让「流程已端到端验证」变成一句空话 —— 那正是这条
     测试要挡住的事。
+
+    这份名单是**会缩短的**：`report` 在 RAY-345 接通后移出，`lookupSubject` 在
+    RAY-322 接通后移出（见下一条测试）。名单空掉那天这条测试就该删，而不是留着
+    一个空 parametrize 假装还在守什么。
     """
     response = TerminalService().handle({"id": "1", "method": method})
     assert response["status"] == protocol.STATUS_UNIMPLEMENTED
     assert response["unimplemented"]["capability"] == capability
     assert response["unimplemented"]["issue"] == issue
+
+
+def test_lookup_subject_is_no_longer_a_gap() -> None:
+    """RAY-322 接通后，它必须**停止**报缺口 —— 否则界面会一直显示一个已经好了的坑。
+
+    未预配置的终端此时给的是一个带码的错误（`E-NET-6024`），不是缺口：缺口说的是
+    「这个能力还没做」，而这里的实情是「做了，但这台机器还没配」。两者对操作员
+    要做的事完全不同。
+    """
+    response = TerminalService().handle(
+        {"id": "1", "method": "lookupSubject", "params": {"enteredId": "2781"}}
+    )
+    assert response["status"] == protocol.STATUS_ERROR
+    assert response["error"]["code"] == "E-NET-6024"
 
 
 # ── stdio 往返 ────────────────────────────────────────────────────────────

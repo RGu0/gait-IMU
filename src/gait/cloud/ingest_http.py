@@ -74,11 +74,10 @@ RAY-355 列的翻译表里没有它们，两条路都说得通，所以这里记
 `base_url` 来自 `TerminalIdentity`，它自己已经拒绝非 https 并且明说「不给降级到 http
 的口子」，所以这里不再加一个自己的开关 —— 加了就等于把那个口子又开回来。
 
-证书校验用 `ssl.create_default_context()`，`ca_bundle` 非空时载入它。
-**没有关掉校验的参数**：一个能关的开关迟早会在排障时被打开、然后跟着安装包出门。
-
-代理走 `build_opener` 的默认 `ProxyHandler`，即遵循系统代理设置 —— PRD §18 把
-「打印机/代理/Windows 兼容性」列为已知约束，机构网络里常有强制代理。
+证书校验、代理与统一信封的拆包都在 `cloud/httpwire.py` —— 那是本客户端与
+`cloud/subjects.py`（RAY-322）共用的一份，各写一份的话两边迟早会在「证书还校不校验」
+这种看不出来的地方分头漂移。**失败翻译不在那里**：上传要的是可重试/不可重试，
+查找要的是现象+动作+码，统一成一套等于逼其中一个把语义翻译两次。
 """
 
 from __future__ import annotations
@@ -87,10 +86,13 @@ import json
 import ssl
 import urllib.error
 import urllib.request
-import uuid
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
+from gait.cloud.httpwire import WireError, build_opener
+from gait.cloud.httpwire import envelope_data as _envelope_data
+from gait.cloud.httpwire import error_detail as _wire_error_detail
+from gait.cloud.httpwire import new_correlation_id as _require_uuid_correlation
 from gait.cloud.tenancy import AccessStore, TerminalIdentity
 from gait.cloud.upload import INGESTED, UploadConflict, UploadUnavailable
 
@@ -115,10 +117,6 @@ class IngestHttpError(RuntimeError):
     而「客户端配置错了」两者都不是。让它逃到 `SessionUploader` 的未知异常兜底
     （RAY-233）去，那里会退避重试并记下类型名，不会伪装成一次数据冲突。
     """
-
-
-def _require_uuid_correlation() -> str:
-    return str(uuid.uuid4())
 
 
 class HttpIngestionClient:
@@ -290,22 +288,10 @@ class HttpIngestionClient:
             # 连接重置一类。socket 层的错误在不同平台上并不都包成 URLError。
             raise UploadUnavailable(f"{method} {path} 链路错误：{exc}") from exc
 
-        return _envelope_data(raw, method=method, path=path)
-
-
-def build_opener(identity: TerminalIdentity) -> urllib.request.OpenerDirector:
-    """按终端身份造一个 opener：强制校验证书，遵循系统代理。
-
-    **没有关掉校验的参数。** 见模块文档最后一节。
-    """
-    context = ssl.create_default_context(
-        cafile=identity.ca_bundle if identity.ca_bundle else None
-    )
-    # create_default_context 已经是这两个值，这里显式写出来是为了让「校验没被关掉」
-    # 成为一件可以被测试断言的事，而不是一个需要读文档才知道的默认。
-    context.check_hostname = True
-    context.verify_mode = ssl.CERT_REQUIRED
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+        try:
+            return _envelope_data(raw, method=method, path=path)
+        except WireError as exc:
+            raise IngestHttpError(str(exc)) from exc
 
 
 def _positive(value: float, *, name: str) -> float:
@@ -341,24 +327,6 @@ def _segment_metadata(index: int, sha256: str, size_bytes: int) -> str:
     )
 
 
-def _envelope_data(raw: bytes, *, method: str, path: str) -> dict[str, Any]:
-    """拆统一信封，回 `data` 段。"""
-    if not raw:
-        return {}
-    try:
-        document = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise IngestHttpError(f"{method} {path} 的响应不是 JSON：{exc}") from exc
-    if not isinstance(document, dict):
-        raise IngestHttpError(f"{method} {path} 的响应顶层不是对象")
-    data = document.get("data")
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise IngestHttpError(f"{method} {path} 的 data 段不是对象")
-    return data
-
-
 def _translate_status(exc: urllib.error.HTTPError) -> Exception:
     """把一个 HTTP 错误状态翻成队列认得的两类之一。
 
@@ -376,7 +344,7 @@ def _translate_status(exc: urllib.error.HTTPError) -> Exception:
     Foundation 已经给好的契约，不需要本仓库再发明。
     """
     status = exc.code
-    detail = _error_detail(exc)
+    detail = _wire_error_detail(exc.read())
 
     if status in (401, 403):
         # 见模块文档「401 / 403 为什么归可重试」。
@@ -391,23 +359,6 @@ def _translate_status(exc: urllib.error.HTTPError) -> Exception:
         # 400 / 404 / 422 等：请求本身不合契约，重试不会让它变合法。
         return UploadConflict(f"请求不被接受（HTTP {status}）{detail}")
     return IngestHttpError(f"无法翻译的 HTTP 状态 {status}{detail}")
-
-
-def _error_detail(exc: urllib.error.HTTPError) -> str:
-    """从错误信封里取出 `code` 与 `message`，取不到就算了。
-
-    诊断信息不该让翻译本身失败 —— 一个读不出的错误体不能把「服务端 500」变成
-    「客户端异常」。
-    """
-    try:
-        document = json.loads(exc.read().decode("utf-8"))
-        error = document["error"]
-        code = error.get("code", "")
-        message = error.get("message", "")
-    except Exception:  # noqa: BLE001 - 诊断路径，任何失败都退回空字符串
-        return ""
-    parts = [str(item) for item in (code, message) if item]
-    return "：" + " ".join(parts) if parts else ""
 
 
 __all__ = [
