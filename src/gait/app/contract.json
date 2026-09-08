@@ -107,7 +107,7 @@
     "upload-transport": {
       "implemented": true,
       "issue": "RAY-355",
-      "summary": "IngestionClient 的 HTTP 实现已交付（gait/cloud/ingest_http.py）：四个动作、失败翻译、显式超时、凭据取自密钥库。线格式按 RAY-353《抄录卷》§1 的共用部分，请求体用本仓库的 PackageManifest（切分口径见《待确认卷》§3，尚待服务方确认）。注意：本仓库尚无人调用 SessionUploader.drain()，队列的排空时机属调度决定"
+      "summary": "IngestionClient 的 HTTP 实现已交付（gait/cloud/ingest_http.py）：四个动作、失败翻译、显式超时、凭据取自密钥库。排空由 app 层的常驻线程驱动（gait/app/uploadloop.py，RAY-416）：采集中停传、退出不等、不阻塞 IPC；未设 GAIT_ACCESS_ROOT 时不建线程，snapshot 的 uploadSummary.drain 为 null。线格式按 RAY-353《抄录卷》§1，请求体用本仓库的 PackageManifest（切分口径见《待确认卷》§3，尚待服务方确认）"
     }
   }
 }

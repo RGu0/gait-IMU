@@ -39,6 +39,7 @@ from gait.app import protocol
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
+from gait.app.uploadloop import Uploader, UploadLoop
 from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
 from gait.cloud.chain import ChainResult, run_basic_chain
 from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
@@ -104,6 +105,7 @@ class TerminalService:
         config: ProtocolConfig | None = None,
         session_root: Path | None = None,
         subjects: SubjectDirectory | None = None,
+        uploader: Uploader | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
         self.config = config or ProtocolConfig()
@@ -113,6 +115,18 @@ class TerminalService:
         #: 能力不存在：契约里 `subject-directory` 已经翻成 implemented，再报缺口
         #: 就是在骗界面。
         self.subjects = subjects
+        #: 排空线程（RAY-416）。**建了但不自动起** —— 起它是 `serve()` 的事，
+        #: 因为「什么时候开始传」是进程入口的调度决定，而不是构造一个 service
+        #: 的副作用。单元测试构造 service 时不会凭空多出一个后台线程。
+        #:
+        #: 暂停判据取 `self.capture is not None`：采集中停传（RAY-416 待确认 2
+        #: 拍板）。判据放在这里而不是 `UploadLoop` 里 —— 那个模块不该知道什么
+        #: 叫「采集」。
+        self.drain = (
+            UploadLoop(uploader, paused=lambda: self.capture is not None)
+            if uploader is not None
+            else None
+        )
         self.operator: dict[str, Any] | None = None
         self.capture: SessionCapture | None = None
         self.session_id: str | None = None
@@ -892,11 +906,33 @@ class TerminalService:
         }
 
     def _upload_summary(self) -> dict[str, Any]:
-        """待传积压。没有队列时说「没在记账」，而不是报 0。"""
+        """待传积压。没有队列时说「没在记账」，而不是报 0。
+
+        另带 `drain` 一段（RAY-416）：**排空线程还活着吗**。没有它的话，一次
+        sqlite 故障杀掉线程之后，界面上的表现与「队列本来就是空的」一模一样。
+        没有配置上传通路时它是 `None` —— 那是一种正常状态（未预配置的终端传不了），
+        与「配了但死了」必须分得开。
+        """
+        # **两条分支都带 `drain`**：藏起来就等于让「线程死了」在界面上长得和
+        # 「本来就没在传」一样，而那正是这一段要防的事。
+        drain = self.drain.status() if self.drain is not None else None
         if self.uploads is None:
-            return {"tracked": False}
-        report = self.uploads.backlog()
-        return {"tracked": True, **report.snapshot()}
+            return {"tracked": False, "drain": drain}
+        return {"tracked": True, **self.uploads.backlog().snapshot(), "drain": drain}
+
+    def start_background_work(self) -> None:
+        """起排空线程。由**进程入口**调用（`__main__.serve`），不在构造时自动发生。"""
+        if self.drain is not None:
+            self.drain.start()
+
+    def close(self) -> None:
+        """收尾。**不等正在传的那一件**（RAY-416 待确认 3 拍板）。
+
+        没传完的那条会在租约到期后重新可取（RAY-226 已保证），而诊室下班时人已经
+        要走了 —— 一件最长 300 s。
+        """
+        if self.drain is not None:
+            self.drain.stop()
 
     @staticmethod
     def _item(
