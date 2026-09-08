@@ -47,6 +47,40 @@ dependencies = [
 # device/orchestration.py 早已显式处理 None。
 wt901 = { git = "https://github.com/RGu0/WT901.git", rev = "80b03c9ede1b54cd9d8582ba867cd00c465d1c44" }
 
+# techflex-cloud-foundation：给 release 资产的 URL，让 uv 自己下载并把 **wheel 的
+# SHA-256 记进 uv.lock**（`hash = "sha256:6790d4f7…"`）。`--locked` 每次安装都校验它。
+# PRD §19 要求「锁定 wheel 版本/SHA」，这一行加上锁文件里那个哈希就是全部。
+#
+# **为什么不照 feet-force-plate 那套做**（`foundation-artifact.lock.json` + 下载脚本 +
+# `.foundation-artifacts/` 缓存 + CI token）：那套是为**私有仓库**建的 —— 当时资产必须带
+# 凭据经 `gh` 取。Foundation 现在是公开仓库，它自己的文档有一整节
+# 「Consumer CI credential: none required today」。公开之后再维护那三件，等于给同一个
+# 哈希造第二个真相源，而两份真相迟早对不上。**换版本 = 改这一行 URL + `uv lock`**，
+# 哈希随之更新，两处都进同一个 diff。
+#
+# 判定只看哈希，理由与上面 wt901 那段同源：**引用可以被上游移动，内容不能**。
+# 一个 release 的名字理论上能删了重发，摘要不能。
+#
+# ⚠️ 换版本时注意：改这一行 URL、`uv lock` 会照做、测试照样绿 —— 而《抄录卷》
+# 《待确认卷》里逐行转录 `iam.py` / `device_trust.py` 的内容**可能已经不成立**。
+# `tools/check_upstream_refs.py` 为此守了一条：声明里记着 0.3.0，锁文件里不是这个数就红，
+# 报错里带上逐行转录它的那几份文档。**升版是一次必须回头重读文档的动作，不是一行 diff。**
+techflex-cloud-foundation = { url = "https://github.com/RGu0/techflex-cloud-foundation/releases/download/v0.3.0/techflex_cloud_foundation-0.3.0-py3-none-any.whl" }
+
+[project.optional-dependencies]
+# **有意做成可选，而不是运行时依赖。**
+#
+# 用户 2026-09-08 拍板 gait 的服务端建在 Foundation 上（RAY-443），但**服务端不在本仓库**
+# （RAY-225 的边界），所以此刻本仓库没有一行会 import 它。把它写进 `dependencies` 只会让
+# 每一次干净检出与每一条 CI 都必须先下载一个没人用的 wheel。
+#
+# 这不是新判断：`packages/design-system/SYNC.md` 里「为什么 package.json 里没有 react
+# 依赖」记的是同一件事 —— 一个还没有任何人 import 的包，不该替整个工作区定死版本。
+#
+# **第一个真实 import 出现时，把它从这里移进 `dependencies`。** 在那之前，本 extra 的作用
+# 是让「钉住 + 校验 + 装得上」这三件在 CI 上被真的证明过，而不是等到迁移那天才发现装不上。
+foundation = ["techflex-cloud-foundation"]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
