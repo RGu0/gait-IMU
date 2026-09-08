@@ -53,6 +53,9 @@ case "$cmd" in
     uv run --locked python tools/check_layering.py
     uv run --locked python tools/check_quality_single_source.py
     uv run --locked python tools/check_calibration_channel.py
+    # 上游引用红线。守的是对**别的仓库**的引用：那些仓库不在 CI 上，也不在本仓库
+    # 任何测试的视野里，它们改了这边的文档会开始说错话而不会有任何东西变红。
+    uv run --locked python tools/check_upstream_refs.py
     run_node pnpm run lint
     ;;
   build)
