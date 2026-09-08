@@ -62,18 +62,31 @@ def nav(positions: np.ndarray) -> NavResult:
     )
 
 
-#: T-230-03 的走廊，**实测**：砖距 600.90 mm × 75 = 45.0675 m。
+#: 走廊前段（砖 1–40）的跨量读数，m（2026-09-05，同侧边缘到同侧边缘）。
+COURSE_SPAN_A_M = 24.036
+#: 走廊后段（砖 41–75）的跨量读数，m。**从段 A 结束处起量**，两段连续不重叠。
+COURSE_SPAN_B_M = 21.067
+#: 两段各自的砖距数。40 ＋ 35 ＝ 75，正好覆盖全程。
+COURSE_SPAN_A_PITCHES = 40
+COURSE_SPAN_B_PITCHES = 35
+
+#: T-230-03 的走廊，**全程实测**：两段跨量之和，**没有外推成分**。
 #: R3 之后它是合法的直线协议距离（≥ `STRAIGHT_LINE_MIN_DISTANCE_M`），用在测试里是
 #: 为了让"已知距离由数据声明"这件事在用例上就看得见，而不是所有用例都填同一个 50。
 #:
-#: 此前这里写 45.148，注释还自称"实测"。**那时并没有量过** —— 45.148 是按
-#: 「600 mm 砖 + 2 mm 缝」推的标称值，而砖距实测是 600.90 mm 不是 602.0，
-#: 全程因此差 80.5 mm（−0.178%）。2026-09-05 用卷尺跨量 40 个砖距 = 24.036 m 定的。
-#: 见 `evidence/ray-337/protocol-truth/README.md`。
+#: 这个数改过三次，每次都比上一次少一层假设：
 #:
-#: 换成实测值不改变本文件任何断言 —— 它在这里只作"一个合法距离"用。改的是那句
-#: **自称实测的注释**：它会让下一个读者把标称值当成量出来的。
-FIELD_45 = 45.0675
+#: | 版本 | 值 | 它是什么 |
+#: | --- | --- | --- |
+#: | 45.000 | 标称 | 「一块砖 600 mm」 |
+#: | 45.148 | 标称 | 75×600 ＋ 74×2，**注释却自称实测** |
+#: | 45.0675 | 半实测 | 量 40 块，**外推**到 75 |
+#: | **45.103** | **实测** | 两段跨量相加，75 块全量 |
+#:
+#: 最后一步纠掉 **35.5 mm** —— 因为走廊**不均匀**：前 40 块砖距 600.90 mm，
+#: 后 35 块 601.914 mm，差 1.014 mm/块。外推的代价是读数误差（±9 mm）的四倍。
+#: 见 `evidence/ray-337/protocol-truth/README.md`。
+FIELD_45 = COURSE_SPAN_A_M + COURSE_SPAN_B_M
 
 
 def straight_walk(distance: float, n: int = 500) -> NavResult:
@@ -389,25 +402,61 @@ class TestTheSnapshotIsValidJson:
 # 而同一批证据里 `ray-337/protocol-truth` 的几何推导给的是 1.2 m。两处互相矛盾了
 # 好几天而无人发现 —— 因为两边都只是文字，没有任何东西会因此变红。
 
-#: T-230-03 走廊的实测砖距，m（2026-09-05：40 个砖距跨量 24.036 m）。
-COURSE_PITCH_M = 0.60090
 #: 每足落脚数。**受控量**：两种鞋型 × 六个速度档，12 趟全部一致（现场逐步计数）。
 COURSE_PLACEMENTS = 38
+#: 走廊的砖块总数。**逐块数的，三次起终点相同、三次都是 75。**
+COURSE_BRICKS = 75
 
 
 class TestTheCourseGeometryIsPinnedNotRetyped:
     """走廊几何有唯一执行点，且它与场地实测自洽。"""
 
-    def test_the_measured_pitch_and_placements_reproduce_the_measured_course(self):
-        """`(2N − 1) × 砖距` 必须还原出实测走廊长 —— 三个实测量互相扣死。
+    def test_the_placement_count_and_the_brick_count_lock_each_other(self):
+        """`2N − 1 = 砖块数` —— **这是仅剩的独立自洽检验，也是最要紧的那条。**
 
-        砖距、落脚数、走廊长是三个**独立测得**的量（卷尺跨量 / 现场逐步计数 /
-        由前两者推算）。它们能扣上，说明「并脚起步、并脚收尾」这个协议假设成立；
-        扣不上就说明协议形态被记错了，而那会让所有距离判据的真值一起错。
+        38 是现场**逐步数**出来的，75 是**逐块数**出来的（三次起终点相同、三次都是
+        75）。两个计数来源完全无关，却被「并脚起步、并脚收尾」的几何扣死：
+        N 次落脚推进 `2N − 1` 个单步。
+
+        扣不上就说明协议形态被记错了 —— 而那会让**所有**距离判据的真值一起错，
+        因为走廊长与步幅都是按这条几何从两个计数推出来的。
+
+        它不含任何长度测量，所以走廊均不均匀都不影响它。**这一点现在很关键**：
+        原先还有一条「砖距 × 落脚数 ⇒ 走廊长」的断言，在全程量完之后变成了循环
+        （平均砖距就是 `L / 75` 算出来的），已经删掉 —— 恒真的断言守不住任何东西。
         """
-        assert course_length_from_pitch(
-            COURSE_PITCH_M, COURSE_PLACEMENTS
-        ) == pytest.approx(FIELD_45, abs=1e-4)
+        assert 2 * COURSE_PLACEMENTS - 1 == COURSE_BRICKS
+
+    def test_the_two_spans_are_contiguous_and_cover_the_whole_course(self):
+        """两段跨量首尾相接、正好覆盖 75 个砖距，其和即走廊长。
+
+        `FIELD_45` 由两段读数**相加**得到而不是写死一个数，是为了让「它是量出来的、
+        量了哪两段」在常量定义处就看得见。段 B 从段 A 结束处起量（同一块砖的同侧
+        边缘），所以相加既不重叠也不留空隙。
+        """
+        assert COURSE_SPAN_A_PITCHES + COURSE_SPAN_B_PITCHES == COURSE_BRICKS
+        assert FIELD_45 == pytest.approx(45.103, abs=5e-4)
+
+    def test_the_corridor_is_not_uniform_so_a_partial_span_must_not_be_extrapolated(
+        self,
+    ):
+        """**走廊不均匀 —— 这条守的是「不许再外推」。**
+
+        前 40 块与后 35 块的砖距差 **1.014 mm/块（0.169%）**。单次读数 ±5 mm 下这是
+        5.3σ，±10 mm 下仍有 2.7σ —— 不是噪声。
+
+        代价是实打实的：只量 40 块再外推到 75，得 45.0675 m，比全程实测**短 35.5 mm**，
+        那是读数误差（±9 mm）的**四倍** —— 非均匀性一直是主项，只是之前没量。
+
+        这条断言存在，是为了让下一个想「量一段推全程」省事的人先看见这个数。
+        """
+        pitch_a = COURSE_SPAN_A_M / COURSE_SPAN_A_PITCHES
+        pitch_b = COURSE_SPAN_B_M / COURSE_SPAN_B_PITCHES
+
+        assert pitch_b - pitch_a == pytest.approx(0.001014, abs=2e-5)
+
+        extrapolated = course_length_from_pitch(pitch_a, COURSE_PLACEMENTS)
+        assert FIELD_45 - extrapolated == pytest.approx(0.0355, abs=5e-4)
 
     def test_the_stride_divisor_is_placements_minus_a_half_not_placements(self):
         """**这条测试守的正是那个被抄错的除法。**
@@ -418,7 +467,9 @@ class TestTheCourseGeometryIsPinnedNotRetyped:
         stride = stride_length_from_placements(FIELD_45, COURSE_PLACEMENTS)
 
         assert stride == pytest.approx(FIELD_45 / 37.5)
-        assert stride == pytest.approx(2 * COURSE_PITCH_M, abs=1e-4), "步幅 = 两个砖距"
+        # 步幅 = 两个**平均**砖距。走廊不均匀，逐步进距在 600.90~601.91 mm 之间，
+        # 但「每步进一块砖」这条几何不变，所以均值口径下这个等式仍然精确。
+        assert stride == pytest.approx(2 * FIELD_45 / COURSE_BRICKS, abs=1e-9)
 
         naive = FIELD_45 / COURSE_PLACEMENTS
         assert stride > naive
@@ -427,10 +478,11 @@ class TestTheCourseGeometryIsPinnedNotRetyped:
 
     def test_the_two_conversions_are_inverses(self):
         """两个函数互为逆运算：同一条几何不该有两套算法。"""
+        pitch = FIELD_45 / COURSE_BRICKS
         for placements in (2, 7, 38, 101):
-            length = course_length_from_pitch(COURSE_PITCH_M, placements)
+            length = course_length_from_pitch(pitch, placements)
             stride = stride_length_from_placements(length, placements)
-            assert stride == pytest.approx(2 * COURSE_PITCH_M)
+            assert stride == pytest.approx(2 * pitch)
 
     @pytest.mark.parametrize("placements", [0, -1, 2.5, True])
     def test_a_placement_count_that_is_not_a_positive_integer_is_refused(
@@ -438,7 +490,7 @@ class TestTheCourseGeometryIsPinnedNotRetyped:
     ):
         """落脚数是数出来的整数。`True` 也要挡 —— `bool` 是 `int` 的子类。"""
         with pytest.raises(ProtocolError):
-            course_length_from_pitch(COURSE_PITCH_M, placements)
+            course_length_from_pitch(FIELD_45 / COURSE_BRICKS, placements)
         with pytest.raises(ProtocolError):
             stride_length_from_placements(FIELD_45, placements)
 
@@ -457,4 +509,4 @@ class TestTheCourseGeometryIsPinnedNotRetyped:
         """
         nominal = 75 * 0.600 + 74 * 0.002
         assert FIELD_45 != pytest.approx(nominal, abs=1e-4)
-        assert nominal - FIELD_45 == pytest.approx(0.0805, abs=1e-4)
+        assert nominal - FIELD_45 == pytest.approx(0.0450, abs=5e-4)
