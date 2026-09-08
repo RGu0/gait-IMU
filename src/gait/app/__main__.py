@@ -25,6 +25,7 @@ from typing import Any, TextIO
 from gait.app.protocol import ProtocolError
 from gait.app.service import TerminalService
 from gait.app.sources import StubDeviceSource
+from gait.app.uploadloop import build_uploader
 
 
 def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalService:
@@ -33,6 +34,10 @@ def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalSe
     `GAIT_SESSION_ROOT` 决定这次运行往哪里落盘。**不设就不落盘** —— 那是一个显式
     的「这次不写」，而不是悄悄什么都没写：`_open_capture` 在没有 root 时直接返回，
     `stopSession` 的 `capture` 字段随之为 `null`，调用方看得见。
+
+    `GAIT_ACCESS_ROOT` 指向服务方安装时写入的预配置目录。**不设就不传** —— 排空
+    线程根本不会建，`snapshot` 的 `uploadSummary.drain` 为 `null`，而不是建一个永远
+    连不上的线程在那里空转报错。未预配置是 v1 的正常状态，不是故障。
 
     `GAIT_STUB_FEED_HZ` 只在没有真设备时有意义，它让 stub 产生结构合法的合成字节。
     产生的会话的元数据里会带 `provenance.source = "stub"`，确保它永远不会被当成
@@ -44,14 +49,26 @@ def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalSe
         feed_hz = float(values.get("GAIT_STUB_FEED_HZ", "0") or "0")
     except ValueError:
         feed_hz = 0.0
+    session_root = Path(root) if root else None
     return TerminalService(
         source=StubDeviceSource(autofeed_hz=feed_hz),
-        session_root=Path(root) if root else None,
+        session_root=session_root,
+        uploader=build_uploader(session_root, values.get("GAIT_ACCESS_ROOT")),
     )
 
 
 def serve(stdin: TextIO, stdout: TextIO, service: TerminalService | None = None) -> int:
     service = service or service_from_environment()
+    # 排空线程从这里起 —— 「什么时候开始传」是进程入口的调度决定。
+    service.start_background_work()
+    try:
+        return _pump(stdin, stdout, service)
+    finally:
+        # 不等正在传的那一件（RAY-416 待确认 3）。
+        service.close()
+
+
+def _pump(stdin: TextIO, stdout: TextIO, service: TerminalService) -> int:
     for line in stdin:
         line = line.strip()
         if not line:
