@@ -143,15 +143,21 @@ describe("事件流", () => {
 
 describe("能力缺口", () => {
   it("已实现的能力不再是缺口", () => {
-    // `report` 于 2026-09-03 翻面（RAY-224 `basic-report`）。上一版这里把「它是
-    // 缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，红了就改。
-    expect(capabilityGap("report")).toBeNull();
-    expect(CAPABILITIES.report.implemented).toBe(true);
+    // `report` 于 2026-09-03 翻面（RAY-224 `basic-report`），
+    // `upload-transport` 于 2026-09-07 翻面（RAY-355），
+    // `subject-directory` 于 2026-09-08 翻面（RAY-322 `subject-lookup-client`）。
+    //
+    // 上一版这里把「它是缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，
+    // 红了就改。这一条**每次翻面都会红一次**，那正是它的用处：契约与实现必须
+    // 同时翻面，不能一边好了另一边还在报坑。
+    for (const name of ["report", "upload-transport", "subject-directory"]) {
+      expect(capabilityGap(name), name).toBeNull();
+      expect(CAPABILITIES[name].implemented, name).toBe(true);
+    }
   });
 
   it("仍是缺口的各自指向认领它的 Issue", () => {
     expect(capabilityGap("calibration").issue).toBe("RAY-208");
-    expect(capabilityGap("subject-directory").issue).toBe("RAY-322");
     expect(capabilityGap("operator-auth").issue).toBe("RAY-323");
   });
 

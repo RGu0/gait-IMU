@@ -41,6 +41,7 @@ from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
 from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
 from gait.cloud.chain import ChainResult, run_basic_chain
+from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, FootLabel, FootSeries, SessionMeta
@@ -102,10 +103,16 @@ class TerminalService:
         source: DeviceSource | None = None,
         config: ProtocolConfig | None = None,
         session_root: Path | None = None,
+        subjects: SubjectDirectory | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
         self.config = config or ProtocolConfig()
         self.session_root = session_root
+        #: 云端加密身份库（RAY-322）。**没有配置就是 None** —— 未预配置的终端本来
+        #: 就查不了，那时 `_do_lookupSubject` 给一个说得出原因的错误，而不是假装
+        #: 能力不存在：契约里 `subject-directory` 已经翻成 implemented，再报缺口
+        #: 就是在骗界面。
+        self.subjects = subjects
         self.operator: dict[str, Any] | None = None
         self.capture: SessionCapture | None = None
         self.session_id: str | None = None
@@ -731,8 +738,34 @@ class TerminalService:
         # 与「文件读不回来」是两个结局，不能在这里被抹平成同一个。
         return run_basic_chain(series_by_foot, protocol_seconds=self.config.duration_s)
 
-    def _do_lookupSubject(self, _: dict[str, Any]) -> Any:
-        return _Unimplemented("subject-directory")
+    def _do_lookupSubject(self, params: dict[str, Any]) -> Any:
+        """P-02 按机构档案号查找。RAY-322。
+
+        三种结局各自不同：命中与冲突是**返回值**，查无此人是**带码的错误** ——
+        因为后者对操作员是一个需要处置的状况（核对编号，或改走快速建档），而
+        RAY-248 要求那句处置话与错误码同源于此处，不能让界面自己想。
+
+        断网时给的动作是「改用无编号快速建档」而不是「稍后重试」，且
+        `blocking=False` —— 待确认 1 已拍板为**降级**：查不了不该让这次检测停下。
+        """
+        entered = str(params.get("enteredId") or "").strip()
+        if not entered:
+            # 表单校验留在渲染进程：它没有错误码，因此不受「文案与错误码同源」
+            # 约束 —— 那条约束管的是错误，不是表单（同 `_do_login` 的理由）。
+            raise protocol.ProtocolError("lookupSubject 需要 enteredId")
+        if self.subjects is None:
+            return TerminalError(
+                code="E-NET-6024",
+                message="本终端还没有配置云端档案库的访问方式。",
+                action="改用「无编号，快速建档」继续本次检测，并联系服务方完成预配置。",
+                blocking=False,
+            )
+        try:
+            return self.subjects.lookup(entered).snapshot()
+        except SubjectLookupFailed as failed:
+            # 客户端已经把它翻成了「现象 + 动作 + 码」，这里原样带出去。再包一层
+            # 会让文案多一个出处，而多一个出处就是两份会分头漂移的开始。
+            return failed.failure
 
     # ── 事件流 ────────────────────────────────────────────────────────────
 

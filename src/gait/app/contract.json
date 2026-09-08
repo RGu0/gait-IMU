@@ -56,7 +56,11 @@
     "E-CAL-3001": "出厂标定参数缺失",
     "E-QLT-5002": "有效步行时长低于配置的 70%",
     "E-QLT-5003": "会话完整性不足，双足指标不可算",
-    "E-BLE-1021": "会话原始数据读不回来"
+    "E-BLE-1021": "会话原始数据读不回来",
+    "E-NET-6020": "本机构档案库中没有这个编号",
+    "E-NET-6022": "云端档案库连不上",
+    "E-NET-6023": "云端档案库返回了无法解析的响应",
+    "E-NET-6024": "云端档案库访问被拒，或本终端尚未预配置"
   },
   "methods": [
     "createSubject",
@@ -91,9 +95,9 @@
       "summary": "本地基础报告已实现（gait/report/）；PDF 导出与实际打印（V-U3）仍需 Electron，属 RAY-224 的 pdf-export scope"
     },
     "subject-directory": {
-      "implemented": false,
+      "implemented": true,
       "issue": "RAY-322",
-      "summary": "按机构档案号查找受试者需要云端加密身份库（FR-02：身份字段仅存云端）；本地无此后端"
+      "summary": "按机构档案号查找已接通（gait/cloud/subjects.py）：命中/冲突/查无此人三条路，失败一律 blocking=False —— RAY-322 待确认 1 拍板为「断网降级、改走无编号快速建档」。不做本地缓存（FR-02），不写终端审计（待确认 3 拍板为服务端审计）。响应体是本仓库对抄录卷 §3 的扩展，尚待服务方确认"
     },
     "operator-auth": {
       "implemented": false,

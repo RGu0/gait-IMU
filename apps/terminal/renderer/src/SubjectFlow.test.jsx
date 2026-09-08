@@ -276,6 +276,57 @@ describe("P-02 — input paths", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("本机构没有这个档案号。");
   });
 
+  /**
+   * RAY-248 验收第二条：错误文案与错误码**同源于 sidecar**，渲染进程不得自造。
+   *
+   * 此前这里有一句写死的「查找失败，请重试。」—— 它既是自造文案，其中的「请重试」
+   * 还与 RAY-322 待确认 1 的拍板相反：断网时该走的是「无编号，快速建档」。
+   */
+  it("shows all three parts a sidecar failure carries, and invents none of them", async () => {
+    const failure = Object.assign(new Error("连不上云端档案库。"), {
+      code: "E-NET-6022",
+      action: "改用「无编号，快速建档」继续本次检测；网络恢复后再补录档案号。",
+      blocking: false,
+    });
+    await signIn(adapterWith({ lookupSubject: async () => { throw failure; } }));
+    fireEvent.change(screen.getByLabelText("档案号"), { target: { value: "2781" } });
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+
+    // 现象 +（码）
+    expect(await screen.findByRole("alert")).toHaveTextContent("连不上云端档案库。（E-NET-6022）");
+    // 动作 —— 逐字来自 sidecar
+    expect(screen.getByText(failure.action)).toBeVisible();
+  });
+
+  it("does not put a retry instruction on a failure that says to degrade", async () => {
+    const failure = Object.assign(new Error("连不上云端档案库。"), {
+      code: "E-NET-6022",
+      action: "改用「无编号，快速建档」继续本次检测；网络恢复后再补录档案号。",
+    });
+    await signIn(adapterWith({ lookupSubject: async () => { throw failure; } }));
+    fireEvent.change(screen.getByLabelText("档案号"), { target: { value: "2781" } });
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    await screen.findByRole("alert");
+
+    // 断网降级是拍过板的产品决定；界面不该反过来劝人重试。
+    expect(screen.queryByText(/请重试/)).toBeNull();
+  });
+
+  it("degrading still leaves the quick-create escape reachable", async () => {
+    const failure = Object.assign(new Error("连不上云端档案库。"), {
+      code: "E-NET-6022",
+      action: "改用「无编号，快速建档」继续本次检测。",
+    });
+    await signIn(adapterWith({ lookupSubject: async () => { throw failure; } }));
+    fireEvent.change(screen.getByLabelText("档案号"), { target: { value: "2781" } });
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    await screen.findByRole("alert");
+
+    // 「降级」这条决定只有在出口还在时才成立 —— 屏幕没有被接管。
+    fireEvent.click(screen.getByRole("button", { name: "无编号，快速建档" }));
+    expect(await screen.findByRole("heading", { name: "选填档案" })).toBeVisible();
+  });
+
   it("reaches the profile page with no id typed at all", async () => {
     await signIn(adapterWith());
     fireEvent.click(screen.getByRole("button", { name: "无编号，快速建档" }));

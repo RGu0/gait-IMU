@@ -43,24 +43,55 @@ function CandidateCard({ candidate, onChoose }) {
   );
 }
 
+/**
+ * 把抛出来的任何东西变成可排版的三段，**一个字都不新造**。
+ *
+ * RAY-248 验收第二条：错误文案与错误码同源于 sidecar，渲染进程不得自造。此前这里
+ * 有一句写死的「查找失败，请重试。」—— 它既是自造文案，其中的「请重试」还与
+ * RAY-322 待确认 1 的拍板相反（断网时该走的是「无编号，快速建档」，不是重试）。
+ *
+ * 四类来源，全都不是本文件写的：
+ * - `TerminalFailure`：sidecar 给的现象/动作/码；
+ * - `SidecarDown`：**主进程**给的文案（sidecar 死了写不了自己的讣告）；
+ * - 其它 `Error`：把它自己的 message 原样显示，不替它编一句；
+ * - 非 Error：显示它字符串化的样子，同样不编。
+ */
+export function asFailure(thrown) {
+  if (thrown && typeof thrown === "object" && thrown.code) {
+    return { message: thrown.message, action: thrown.action, code: thrown.code };
+  }
+  if (thrown?.notice) {
+    return { message: thrown.notice.message, action: thrown.notice.action };
+  }
+  if (thrown instanceof Error) return { message: thrown.message };
+  return { message: String(thrown) };
+}
+
+/** 现象 +（码）。与 `TestRunScreen` 的中止提示同一种排法。 */
+export function headline(failure) {
+  return failure.code ? `${failure.message}（${failure.code}）` : failure.message;
+}
+
 export function SubjectScreen({ lookup, protocolSeconds, onConfirm, onQuickCreate }) {
   const [enteredId, setEnteredId] = useState("");
   const [result, setResult] = useState(null);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
+  const [failure, setFailure] = useState(null);
 
   async function submitLookup(event) {
     event.preventDefault();
     if (!enteredId.trim()) {
-      setError("请输入档案号，或选择「无编号，快速建档」。");
+      // 字段非空是**表单校验**，不是错误：它没有错误码，因此不受「文案与错误码
+      // 同源于 sidecar」约束 —— 那条约束管的是错误。
+      setFailure({ message: "请输入档案号，或选择「无编号，快速建档」。" });
       return;
     }
     setPending(true);
-    setError("");
+    setFailure(null);
     try {
       setResult(await lookup(enteredId.trim()));
     } catch (lookupError) {
-      setError(lookupError instanceof Error ? lookupError.message : "查找失败，请重试。");
+      setFailure(asFailure(lookupError));
     } finally {
       setPending(false);
     }
@@ -69,7 +100,7 @@ export function SubjectScreen({ lookup, protocolSeconds, onConfirm, onQuickCreat
   function restart() {
     setResult(null);
     setEnteredId("");
-    setError("");
+    setFailure(null);
   }
 
   if (result?.kind === "conflict") {
@@ -154,10 +185,15 @@ export function SubjectScreen({ lookup, protocolSeconds, onConfirm, onQuickCreat
           value={enteredId}
           onChange={(event) => setEnteredId(event.target.value)}
           placeholder="扫描条码或手动输入"
-          error={error}
+          error={failure ? headline(failure) : ""}
           hint="仅在本机构范围内查找。"
         />
       </form>
+      {failure?.action ? (
+        <Banner tone="warning" title="接下来这样做">
+          {failure.action}
+        </Banner>
+      ) : null}
     </WizardShell>
   );
 }
