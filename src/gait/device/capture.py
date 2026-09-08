@@ -69,6 +69,8 @@ from wt901.transport.replay import ReplayTransport
 
 from gait.contracts import FootLabel, RawFrame
 from gait.device.adapter import to_raw_frame
+from gait.device.binding import DeviceIdentity
+from gait.device.identity import platform_identity
 from gait.device.recorder import ThreadedRecordingWriter
 from gait.io.session import RAW_FILENAMES, raw_path
 
@@ -140,6 +142,7 @@ class SessionCapture:
                 )
         self._note = note
         self._writers: dict[str, ThreadedRecordingWriter] = {}
+        self._identities: dict[str, DeviceIdentity] = {}
         self._closed = False
         self._status: CaptureStatus | None = None
 
@@ -150,8 +153,28 @@ class SessionCapture:
             raise CaptureError("采集尚未结束；先退出 with 或调用 close()")
         return self._status
 
-    def wrap(self, foot: str, inner: Transport) -> RecordingTransport:
-        """给一只脚的传输套上录制层。同一只脚只能套一次。"""
+    @property
+    def identities(self) -> dict[str, DeviceIdentity]:
+        """每只脚的设备身份。进 `SessionMeta.devices` —— 那个契约注释写的就是
+        `{'L': {mac, ...}}`，而在 RAY-441 之前那里放的是平台 UUID。"""
+        return dict(self._identities)
+
+    def wrap(
+        self,
+        foot: str,
+        inner: Transport,
+        *,
+        identity: DeviceIdentity | None = None,
+    ) -> RecordingTransport:
+        """给一只脚的传输套上录制层。同一只脚只能套一次。
+
+        `identity` 由调用方**注入**，本模块不去读 —— 这里只有一个 `Transport`，
+        而 `read_mac()` 需要已连接的 `WT901Device`。与 `device/binding.py` 同一条
+        分工：「本模块不读取设备身份，只消费一个已经拿到的 `DeviceIdentity`」。
+
+        不传时**如实降级**成 `platform-address`（`inner.device_id` 就是那个平台句柄），
+        而不是假装没有身份这回事。降级的身份 `portable` 为假，下游看得出来。
+        """
         label = _check_foot(foot)
         if self._closed:
             raise CaptureError("采集已结束，不能再登记设备")
@@ -160,9 +183,14 @@ class SessionCapture:
                 f"{label} 已经登记过传输了。一只脚对应一台设备、一个文件 —— "
                 "两次登记会让两条流写进同一个文件而互相交错。"
             )
+        # recording header 的 `device_id` 仍是**平台句柄**，这是刻意的：头在连接
+        # 之前就写了，那时 MAC 还读不到（RAY-441 R2 记了这个时序约束）。它是诊断
+        # 事实「这次连的是哪个 handle」，**不是设备身份** —— 身份在 `identities`
+        # 里，由会话元数据带走。
         writer = ThreadedRecordingWriter(
             self._paths[label], device_id=inner.device_id, note=self._note
         )
+        self._identities[label] = identity or platform_identity(inner.device_id)
         self._writers[label] = writer
         return RecordingTransport(inner, writer)
 

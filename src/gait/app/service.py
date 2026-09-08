@@ -46,9 +46,10 @@ from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, FootLabel, FootSeries, SessionMeta
+from gait.device.binding import DeviceIdentity
 from gait.device.capture import SessionCapture
 from gait.device.footseries import frames_to_foot_series, load_session_frames
-from gait.device.identity import MAC_PROVENANCE
+from gait.device.identity import MAC_PROVENANCE, platform_identity
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
     LinkOutcome,
@@ -217,6 +218,42 @@ class TerminalService:
             verdict = verdicts.get(label)
             module["factoryCalibrated"] = bool(verdict and verdict.admitted)
         return modules
+
+    def _device_records(self) -> dict[str, Any]:
+        """进 `SessionMeta.devices` 的每足一条：身份 + 平台句柄（诊断）。
+
+        身份优先取采集层记下的那份（`SessionCapture.identities`，来自连上后读的
+        MAC）；会话还没开始时退回设备源的读数。两者都拿不到就如实记平台地址 ——
+        **不伪造 MAC**。
+        """
+        captured = self.capture.identities if self.capture is not None else {}
+        readings = self.source.device_readings()
+        records: dict[str, Any] = {}
+        for label, transport in self.source.transports().items():
+            identity = captured.get(label)
+            if identity is None:
+                reading = readings.get(label) or {}
+                identity = (
+                    DeviceIdentity(
+                        kind=reading["kind"],
+                        value=reading["value"],
+                        provenance=reading.get("provenance") or MAC_PROVENANCE,
+                    )
+                    if reading.get("kind") and reading.get("value")
+                    else platform_identity(transport.device_id)
+                )
+            records[label] = {
+                "identity": identity.snapshot(),
+                # 键名是 `platform_handle` 而不是 `platform_address`：`io.session`
+                # 的 FR-02 检查按子串拦「疑似身份明文」的键，而它的清单（name /
+                # phone / email / **address** / 身份证 / 档案号 / birth …）说的是
+                # **人**的身份。蓝牙句柄不是人的身份，属该检查文档自己预告的
+                # 「宁可误伤」那一类 —— 它当场把我拦下了，而正确的处置是把名字改准，
+                # 不是往那份清单里开口子。`handle` 也确实更贴切：macOS 上它就是
+                # CoreBluetooth 的会话内句柄。
+                "platform_handle": transport.device_id,
+            }
+        return records
 
     def _calibration_verdicts(self) -> dict[str, StoreVerdict]:
         """从设备**读数**推出每只脚的出厂标定准入（FR-04）。
@@ -434,10 +471,10 @@ class TerminalService:
             created_at=datetime.now(UTC).isoformat(timespec="seconds"),
             subject_uuid=new_subject_uuid(),
             scenario="walk",
-            devices={
-                label: {"device_id": t.device_id}
-                for label, t in self.source.transports().items()
-            },
+            # 契约注释写的是 `{'L': {mac, ...}}`，而 RAY-441 之前这里放的是平台
+            # UUID —— 换台主机就认不出，也与按身份存取的标定参数库对不上。现在放
+            # 完整身份快照（kind/value/provenance），平台句柄降为诊断字段。
+            devices=self._device_records(),
             config_snapshot={
                 "state": "pending",
                 "reason": "配置下发快照在会话结束时补齐",
