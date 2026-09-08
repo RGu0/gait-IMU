@@ -282,7 +282,7 @@ def build_parameters(
     turns: int | None = None,
     zupt_quality: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[QualityAnnotation]]:
-    """专业参数：变异性、疲劳衰减、支撑/摆动相与转身次数，各带质量标注.
+    """专业参数：变异性、疲劳衰减、支撑/摆动相与转身次数，各带质量标注。
 
     疲劳衰减**只在 180 秒配置下产出**。这不是算法能力问题 —— 短协议里根本没有
     「前三分之一 vs 后三分之一」可比，所以它是 `uncomputable` 而不是 `low`。
@@ -435,7 +435,7 @@ def build_report(
     duration_s: int,
     algo_version: str,
     protocol_version: str,
-    valid_seconds: float | None = None,
+    valid_seconds: float | None,
     turns: int | None = None,
     protocol_name: str = "定时步行测试",
     annotations_text: Sequence[str] = (),
