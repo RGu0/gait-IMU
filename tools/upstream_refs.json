@@ -1,0 +1,149 @@
+{
+  "$comment": [
+    "本仓库对外部仓库的引用声明。校验见 tools/check_upstream_refs.py（接在 ./dev lint 里）。",
+    "为什么要有它：那些仓库不在 CI 上，也不在本仓库的任何测试视野里。它们改了，这边的",
+    "文档会开始说错话，而不会有任何东西变红 —— RAY-417 就是这么被漏掉的，靠一次偶然核查",
+    "才发现，从写下到失效不足一天。",
+    "重新钉住：uv run python tools/check_upstream_refs.py --update。摘要变了意味着 cited_by",
+    "里那几份文档需要人重读一遍，脚本判断不了结论是否还成立。"
+  ],
+  "upstreams": {
+    "ffp": {
+      "name": "feet-force-plate",
+      "repo_dir": "feet-force-plate",
+      "inner": "main",
+      "why": "《抄录卷》转录它已跑通的上传/租户/错误契约实现；本仓库 cloud/ 的队列与凭据保管参考它。只读，不改。",
+      "markers": [
+        "ffp:",
+        "FeetForcePlate",
+        "feet-force-plate",
+        "足压平台"
+      ],
+      "files": {
+        "shared/contracts/cloud.py": {
+          "sha256": "37071a3272f866eb9e93a76fedd48c37cb92c15ff748a8fd7866364556f4d45c",
+          "bytes": 11578,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            ".project-context/documents/云端服务接口约定_待确认卷.md",
+            "docs/云端接口约定.md"
+          ]
+        },
+        "shared/contracts/access_control.py": {
+          "sha256": "a1150830da1c0b218b27b9017f2efc1044d2766bd8c3318872c28339f54a62e0",
+          "bytes": 11085,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md"
+          ]
+        },
+        "cloud/api/errors.py": {
+          "sha256": "3d1cfb7942b2be914c6f1a0e6494c2d987f437edf340530ae8d28cde15a22bcd",
+          "bytes": 1915,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            ".project-context/documents/云端服务接口约定_待确认卷.md",
+            "docs/云端接口约定.md"
+          ]
+        },
+        "cloud/api/app.py": {
+          "sha256": "a0bd60e519b7b052231da05a163ea10b966fb683957271d7514725e94e7a9a51",
+          "bytes": 30254,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            ".project-context/documents/云端服务接口约定_待确认卷.md"
+          ]
+        },
+        "cloud/api/access_auth.py": {
+          "sha256": "bc6836b2b07694282b3cd4be1585f98999dd447e085ce43da781732e856464b7",
+          "bytes": 11796,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            ".project-context/documents/云端服务接口约定_待确认卷.md"
+          ]
+        },
+        "cloud/api/auth.py": {
+          "sha256": "4a971bfd4b5abf69a8de8ebf0363b36f4b03083f87032d479b0a5ef57699530a",
+          "bytes": 4084,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_待确认卷.md"
+          ]
+        },
+        "cloud/ingestion/service.py": {
+          "sha256": "390ab00cc3d9c02a67e39637e23002f9f39d76e35424f92eacd4d555d2070acb",
+          "bytes": 8557,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md"
+          ]
+        },
+        "cloud/ingestion/principal.py": {
+          "sha256": "b1250cff3a012605b2542b69b9a0818440fcd57e11b4a00d81831c3b423731db",
+          "bytes": 2527,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md"
+          ]
+        },
+        "client/sync/persistent_upload.py": {
+          "sha256": "4509556a11ca2b60ec996f769981a754b3639d19ccf38c2a16a58041e9268460",
+          "bytes": 30089,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            "src/gait/cloud/upload.py",
+            "src/gait/cloud/package.py"
+          ]
+        },
+        "client/cloud/access_store.py": {
+          "sha256": "973224157c2a89aa00c4dbaf9ee11b7c90b94a9edf8469759f0c2c694c971473",
+          "bytes": 10273,
+          "cited_by": [
+            "src/gait/cloud/tenancy.py"
+          ]
+        },
+        "docs/modules/06-cloud-ingestion.md": {
+          "sha256": "db7af1de6b361f07f0fac979f306c99cc9eee7cba2ff29d8b2defdf2e7701817",
+          "bytes": 4486,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md",
+            ".project-context/documents/云端服务接口约定_待确认卷.md"
+          ]
+        }
+      }
+    },
+    "foundation": {
+      "name": "techflex-cloud-foundation",
+      "repo_dir": "techflex-cloud-foundation",
+      "inner": "main",
+      "why": "《待确认卷》§1 的操作员认证方案建立在它的 InstallationPrincipal / TenantPrincipal 类型分离上；本仓库尚未引入该依赖（PRD §19 要求正式迁移另立 scope 并锁 wheel 版本/SHA）。",
+      "markers": [
+        "foundation:",
+        "techflex-cloud-foundation",
+        "Foundation"
+      ],
+      "files": {
+        "src/techflex_cloud_foundation/iam.py": {
+          "sha256": "65e46070a4e17a1d9a0a7d3667cedf775165ffed38bdbab2c3b7f4e603b75f92",
+          "bytes": 41324,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_待确认卷.md",
+            "docs/云端接口约定.md"
+          ]
+        },
+        "src/techflex_cloud_foundation/device_trust.py": {
+          "sha256": "7354dcf1805e1573f37947d42f58379f78d747eb51873f0f4641f3f9ffbc165c",
+          "bytes": 32058,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_待确认卷.md",
+            "docs/云端接口约定.md"
+          ]
+        },
+        "src/techflex_cloud_foundation/gateway.py": {
+          "sha256": "7eb6a3197527bcd2f581074756490762a788994159965b83cb94c9526a22d24b",
+          "bytes": 15693,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_待确认卷.md",
+            "docs/云端接口约定.md"
+          ]
+        }
+      }
+    }
+  }
+}
