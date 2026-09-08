@@ -35,7 +35,9 @@ from gait.validate.protocols import (
     ProtocolError,
     StraightLineVerdict,
     TrialGeometry,
+    course_length_from_pitch,
     evaluate_trial,
+    stride_length_from_placements,
     summarize,
 )
 
@@ -60,10 +62,18 @@ def nav(positions: np.ndarray) -> NavResult:
     )
 
 
-#: T-230-03 的实测场地：75 砖 × 600 mm ＋ 74 接缝 × 2 mm。R3 之后它是合法的直线
-#: 协议距离（≥ `STRAIGHT_LINE_MIN_DISTANCE_M`），用在测试里是为了让"已知距离由
-#: 数据声明"这件事在用例上就看得见，而不是所有用例都填同一个 50。
-FIELD_45 = 45.148
+#: T-230-03 的走廊，**实测**：砖距 600.90 mm × 75 = 45.0675 m。
+#: R3 之后它是合法的直线协议距离（≥ `STRAIGHT_LINE_MIN_DISTANCE_M`），用在测试里是
+#: 为了让"已知距离由数据声明"这件事在用例上就看得见，而不是所有用例都填同一个 50。
+#:
+#: 此前这里写 45.148，注释还自称"实测"。**那时并没有量过** —— 45.148 是按
+#: 「600 mm 砖 + 2 mm 缝」推的标称值，而砖距实测是 600.90 mm 不是 602.0，
+#: 全程因此差 80.5 mm（−0.178%）。2026-09-05 用卷尺跨量 40 个砖距 = 24.036 m 定的。
+#: 见 `evidence/ray-337/protocol-truth/README.md`。
+#:
+#: 换成实测值不改变本文件任何断言 —— 它在这里只作"一个合法距离"用。改的是那句
+#: **自称实测的注释**：它会让下一个读者把标称值当成量出来的。
+FIELD_45 = 45.0675
 
 
 def straight_walk(distance: float, n: int = 500) -> NavResult:
@@ -210,7 +220,9 @@ class TestTheCriteriaAreTheOnlySourceOfThresholds:
         assert ok.distance_m == STRAIGHT_LINE_MIN_DISTANCE_M
 
         with pytest.raises(ProtocolError, match="已知距离"):
-            TrialGeometry("under", PROTOCOL_STRAIGHT, STRAIGHT_LINE_MIN_DISTANCE_M - 0.001)
+            TrialGeometry(
+                "under", PROTOCOL_STRAIGHT, STRAIGHT_LINE_MIN_DISTANCE_M - 0.001
+            )
 
     def test_the_floor_binds_only_the_straight_protocol(self):
         """4 米往返与闭环各有各的尺，下限是**直线判据**的一部分，不是全局最短距离。
@@ -245,7 +257,9 @@ class TestTheCriteriaAreTheOnlySourceOfThresholds:
 
     def test_the_report_carries_the_floor_it_ran_under(self):
         """报告要说清按哪版判据算的 —— R3 加了一条约束，快照里就得看得见。"""
-        trial = measure("s", PROTOCOL_STRAIGHT, FIELD_45, {"L": straight_walk(FIELD_45)})
+        trial = measure(
+            "s", PROTOCOL_STRAIGHT, FIELD_45, {"L": straight_walk(FIELD_45)}
+        )
         criterion = StraightLineVerdict((trial,)).snapshot()["criterion"]
         assert criterion["max_abs_error"] == STRAIGHT_LINE_MAX_ERROR
         assert criterion["min_distance_m"] == STRAIGHT_LINE_MIN_DISTANCE_M
@@ -366,3 +380,81 @@ class TestTheSnapshotIsValidJson:
         )
         assert report["closed_loop"]["criterion"]["max_error"] == CLOSED_LOOP_MAX_ERROR
         assert report["protocol_consistency"]["criterion"]["reporting_only"] is True
+
+
+# ── 定长走廊的几何：落脚数 ↔ 距离 ────────────────────────────────────────────
+#
+# 这一组守的是一个**曾经只写在文档里、并且已经被抄错过一次**的换算。
+# `evidence/ray-360/field-replay` 由 `45.148 ÷ 38` 得出「步长恒为 1.188 m」，
+# 而同一批证据里 `ray-337/protocol-truth` 的几何推导给的是 1.2 m。两处互相矛盾了
+# 好几天而无人发现 —— 因为两边都只是文字，没有任何东西会因此变红。
+
+#: T-230-03 走廊的实测砖距，m（2026-09-05：40 个砖距跨量 24.036 m）。
+COURSE_PITCH_M = 0.60090
+#: 每足落脚数。**受控量**：两种鞋型 × 六个速度档，12 趟全部一致（现场逐步计数）。
+COURSE_PLACEMENTS = 38
+
+
+class TestTheCourseGeometryIsPinnedNotRetyped:
+    """走廊几何有唯一执行点，且它与场地实测自洽。"""
+
+    def test_the_measured_pitch_and_placements_reproduce_the_measured_course(self):
+        """`(2N − 1) × 砖距` 必须还原出实测走廊长 —— 三个实测量互相扣死。
+
+        砖距、落脚数、走廊长是三个**独立测得**的量（卷尺跨量 / 现场逐步计数 /
+        由前两者推算）。它们能扣上，说明「并脚起步、并脚收尾」这个协议假设成立；
+        扣不上就说明协议形态被记错了，而那会让所有距离判据的真值一起错。
+        """
+        assert course_length_from_pitch(
+            COURSE_PITCH_M, COURSE_PLACEMENTS
+        ) == pytest.approx(FIELD_45, abs=1e-4)
+
+    def test_the_stride_divisor_is_placements_minus_a_half_not_placements(self):
+        """**这条测试守的正是那个被抄错的除法。**
+
+        「每足 38 个步态周期」很自然被读成「38 个步幅」。但 38 是**落脚次数**，
+        并脚起步、并脚收尾时两端各有半步，所以只跨 37.5 个步幅。
+        """
+        stride = stride_length_from_placements(FIELD_45, COURSE_PLACEMENTS)
+
+        assert stride == pytest.approx(FIELD_45 / 37.5)
+        assert stride == pytest.approx(2 * COURSE_PITCH_M, abs=1e-4), "步幅 = 两个砖距"
+
+        naive = FIELD_45 / COURSE_PLACEMENTS
+        assert stride > naive
+        # 差 1.3% —— 在 3% 的距离判据下吃掉近一半预算，且是系统性偏置
+        assert (stride - naive) / stride == pytest.approx(0.0132, abs=5e-4)
+
+    def test_the_two_conversions_are_inverses(self):
+        """两个函数互为逆运算：同一条几何不该有两套算法。"""
+        for placements in (2, 7, 38, 101):
+            length = course_length_from_pitch(COURSE_PITCH_M, placements)
+            stride = stride_length_from_placements(length, placements)
+            assert stride == pytest.approx(2 * COURSE_PITCH_M)
+
+    @pytest.mark.parametrize("placements", [0, -1, 2.5, True])
+    def test_a_placement_count_that_is_not_a_positive_integer_is_refused(
+        self, placements
+    ):
+        """落脚数是数出来的整数。`True` 也要挡 —— `bool` 是 `int` 的子类。"""
+        with pytest.raises(ProtocolError):
+            course_length_from_pitch(COURSE_PITCH_M, placements)
+        with pytest.raises(ProtocolError):
+            stride_length_from_placements(FIELD_45, placements)
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+    def test_a_length_that_is_not_positive_and_finite_is_refused(self, bad):
+        with pytest.raises(ProtocolError):
+            course_length_from_pitch(bad, COURSE_PLACEMENTS)
+        with pytest.raises(ProtocolError):
+            stride_length_from_placements(bad, COURSE_PLACEMENTS)
+
+    def test_the_field_constant_is_the_measured_course_not_the_nominal_one(self):
+        """`FIELD_45` 是**实测**值，不是 75×600＋74×2 那个标称值。
+
+        标称与实测差 80.5 mm。这条断言存在，是因为此前那个常量的注释**自称实测**
+        而其实没量过 —— 一个自称实测的标称值比一个明说是标称的值更危险。
+        """
+        nominal = 75 * 0.600 + 74 * 0.002
+        assert FIELD_45 != pytest.approx(nominal, abs=1e-4)
+        assert nominal - FIELD_45 == pytest.approx(0.0805, abs=1e-4)
