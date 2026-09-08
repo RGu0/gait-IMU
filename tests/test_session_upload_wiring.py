@@ -78,13 +78,18 @@ def test_an_incomplete_session_is_queued_too(tmp_path: Path) -> None:
 def test_a_run_without_a_session_root_tracks_nothing_and_says_so(
     tmp_path: Path,
 ) -> None:
-    """没在记账要说出来，而不是报一个永远为 0 的待传数。"""
+    """没在记账要说出来，而不是报一个永远为 0 的待传数。
+
+    RAY-416 起还多说一件事：`drain` 为 `None` —— **也没有在传**。两件事分开说，
+    是因为它们的原因不同（没有落盘目录 vs 没有配置上传通路），而且「配了但线程
+    死了」必须与这两者都区分得开。
+    """
     service = TerminalService(source=StubDeviceSource(), session_root=None)
     assert service.uploads is None
     summary = service.handle({"id": "a", "method": "snapshot"})["result"][
         "uploadSummary"
     ]
-    assert summary == {"tracked": False}
+    assert summary == {"tracked": False, "drain": None}
 
 
 def test_the_workbench_sees_the_real_backlog(tmp_path: Path) -> None:
