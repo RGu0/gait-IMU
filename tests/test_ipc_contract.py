@@ -409,7 +409,10 @@ def test_every_capability_declares_who_owns_it() -> None:
 
 
 def test_login_does_not_pretend_there_is_an_auth_backend() -> None:
-    """非空就放行等于没有认证 —— 那是在假装一个后端存在。
+    """非空就放行等于没有认证 —— 那是在假装一个后端存在。**罪名不随实现改变。**
+
+    RAY-323 接通之后这条测试的形态换了，守的东西一个字没变：一台**没有认证客户端**
+    的终端，喂它非空的账号口令，**必须**得到一个说得出原因的错误，而不是一次成功。
 
     也不该给它套一个 `E-BLE` 码：那说的是采集现场的连接故障，用它表示登录问题
     会在日志里造出一个查无此事的设备故障。
@@ -417,8 +420,9 @@ def test_login_does_not_pretend_there_is_an_auth_backend() -> None:
     response = TerminalService().handle(
         {"id": "1", "method": "login", "params": {"organization": "康健", "password": "x"}}
     )
-    assert response["status"] == protocol.STATUS_UNIMPLEMENTED
-    assert response["unimplemented"]["capability"] == "operator-auth"
+    assert response["status"] == protocol.STATUS_ERROR
+    assert response["error"]["code"] == "E-NET-6043"
+    assert not response["error"]["code"].startswith("E-BLE")
 
 
 def test_session_result_tolerates_absent_link_params() -> None:
@@ -445,7 +449,6 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
     ("method", "capability", "issue"),
     [
         ("runCalibration", "calibration", "RAY-208"),
-        ("login", "operator-auth", "RAY-323"),
     ],
 )
 def test_gaps_are_visible_not_faked(
@@ -457,8 +460,9 @@ def test_gaps_are_visible_not_faked(
     测试要挡住的事。
 
     这份名单是**会缩短的**：`report` 在 RAY-345 接通后移出，`lookupSubject` 在
-    RAY-322 接通后移出（见下一条测试）。名单空掉那天这条测试就该删，而不是留着
-    一个空 parametrize 假装还在守什么。
+    RAY-322 接通后移出，`login` 在 RAY-323 接通后移出（各见下面的「不再是缺口」）。
+    名单空掉那天这条测试就该删，而不是留着一个空 parametrize 假装还在守什么 ——
+    **现在只剩 `calibration` 一条了**。
     """
     response = TerminalService().handle({"id": "1", "method": method})
     assert response["status"] == protocol.STATUS_UNIMPLEMENTED
@@ -478,6 +482,28 @@ def test_lookup_subject_is_no_longer_a_gap() -> None:
     )
     assert response["status"] == protocol.STATUS_ERROR
     assert response["error"]["code"] == "E-NET-6024"
+
+
+def test_login_is_no_longer_a_gap() -> None:
+    """RAY-323 接通后它必须**停止**报缺口 —— 与 `lookupSubject` 同型。
+
+    未预配置的终端给的是 `E-NET-6043`（做了，但这台机器还没配），不是缺口
+    （这个能力还没做）。两者对操作员要做的事完全不同：前者去找服务方配终端，
+    后者只能等下一个版本。
+    """
+    response = TerminalService().handle(
+        {"id": "1", "method": "login", "params": {"organization": "康健", "password": "x"}}
+    )
+    assert response["status"] == protocol.STATUS_ERROR
+    assert response["error"]["code"] == "E-NET-6043"
+
+
+def test_logout_is_registered_and_answers() -> None:
+    """换班要有一条出路（R1-3）。没有它，7 天票据下第二个操作员做的会话会归到
+    第一个人名下 —— 而那是一条不会报错的错误归属。"""
+    assert "logout" in protocol.METHODS
+    response = TerminalService().handle({"id": "1", "method": "logout", "params": {}})
+    assert response["status"] == "ok"
 
 
 # ── stdio 往返 ────────────────────────────────────────────────────────────

@@ -150,15 +150,16 @@ describe("能力缺口", () => {
     // 上一版这里把「它是缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，
     // 红了就改。这一条**每次翻面都会红一次**，那正是它的用处：契约与实现必须
     // 同时翻面，不能一边好了另一边还在报坑。
-    for (const name of ["report", "upload-transport", "subject-directory"]) {
+    for (const name of ["report", "upload-transport", "subject-directory", "operator-auth"]) {
       expect(capabilityGap(name), name).toBeNull();
       expect(CAPABILITIES[name].implemented, name).toBe(true);
     }
   });
 
   it("仍是缺口的各自指向认领它的 Issue", () => {
+    // 名单只剩一条了：`operator-auth` 在 RAY-323 接通后移出（见上一条断言）。
+    // 空掉那天这条测试就该删，而不是留着一个空的 it 假装还在守什么。
     expect(capabilityGap("calibration").issue).toBe("RAY-208");
-    expect(capabilityGap("operator-auth").issue).toBe("RAY-323");
   });
 
   it("每个缺口都声明了归属，且非空的号长得像 Issue 号", () => {

@@ -54,7 +54,37 @@ def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalSe
         source=StubDeviceSource(autofeed_hz=feed_hz),
         session_root=session_root,
         uploader=build_uploader(session_root, values.get("GAIT_ACCESS_ROOT")),
+        **build_operator_auth(values.get("GAIT_ACCESS_ROOT")),
     )
+
+
+def build_operator_auth(access_root: Any) -> dict[str, Any]:  # pragma: no cover - 真实环境
+    """按预配置造认证客户端与票据存放处（RAY-323 R1）。**造不出就两个都是 None。**
+
+    与 `build_uploader` 同一条理由放在进程入口：构造它需要 `AccessStore`（预配置目录
+    与密钥库），而 service 本身不该知道环境变量长什么样。
+
+    **票据的密钥库与终端凭据共用同一个** `AccessStore.secrets` —— 两者都是「不能落
+    文件的秘密」，分两个库只会多一处要各自记得清理的地方。键不同（见
+    `operator.TICKET_SECRET_KEY`），所以不会互相覆盖。
+
+    返回一个 dict 而不是二元组：调用点是 `TerminalService(**...)`，用 dict 就不必在
+    那里再写一遍两个关键字的名字 —— 少一处会与签名分头漂移的重复。
+    """
+    from gait.cloud.operator import HttpOperatorAuth, TicketStore
+    from gait.cloud.tenancy import AccessError, AccessStore
+
+    if access_root is None:
+        return {"auth": None, "tickets": None}
+    try:
+        store = AccessStore(access_root)
+        auth = HttpOperatorAuth.from_access_store(store)
+    except (AccessError, OSError):
+        # 未预配置的终端没有云端可验 —— 与 `build_uploader` 一样，这是正常状态
+        # 而不是错误。**注意由此 startSession 不设登录闸**，理由见
+        # `TerminalService.__init__` 里那段注释。
+        return {"auth": None, "tickets": None}
+    return {"auth": auth, "tickets": TicketStore(store.secrets)}
 
 
 def serve(stdin: TextIO, stdout: TextIO, service: TerminalService | None = None) -> int:

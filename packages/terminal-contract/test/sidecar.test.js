@@ -137,9 +137,15 @@ describe("真实 sidecar 往返（不经 mock）", () => {
     expect(result.error.message).toMatch(/70%/);
   });
 
-  it("登录没有后端，因此以缺口出境而不是一个假的通过", async () => {
-    // 「账号密码非空就放行」等于没有认证 —— 那是在假装一个后端存在。
-    const outcome = await adapter.login({ organization: "康健社区卫生服务中心", password: "x" });
-    expect(adapter.gapOf(outcome)).toMatchObject({ capability: "operator-auth", issue: "RAY-323" });
+  it("未预配置的终端登录不了，但给的是原因而不是一个假的通过", async () => {
+    // 「账号密码非空就放行」等于没有认证 —— 那是在假装一个后端存在。**罪名不随
+    // 实现改变**：RAY-323 接通后这条换了形态，守的东西一个字没变。
+    //
+    // 这个 sidecar 没有 GAIT_ACCESS_ROOT，所以造不出认证客户端。它必须给一个
+    // 说得出原因的错误（E-NET-6043：做了，但这台机器还没配），既不是缺口
+    // （那表示能力还没做），也不是一次成功。
+    await expect(
+      adapter.login({ organization: "康健社区卫生服务中心", password: "x" }),
+    ).rejects.toMatchObject({ code: "E-NET-6043" });
   });
 });

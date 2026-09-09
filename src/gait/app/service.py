@@ -41,7 +41,9 @@ from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
 from gait.app.uploadloop import Uploader, UploadLoop
 from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
+from gait.cloud import operator as operator_auth
 from gait.cloud.chain import ChainResult, run_basic_chain
+from gait.cloud.operator import OperatorAuth, OperatorAuthFailed, TicketStore
 from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
@@ -107,6 +109,8 @@ class TerminalService:
         session_root: Path | None = None,
         subjects: SubjectDirectory | None = None,
         uploader: Uploader | None = None,
+        auth: OperatorAuth | None = None,
+        tickets: TicketStore | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
         self.config = config or ProtocolConfig()
@@ -116,6 +120,15 @@ class TerminalService:
         #: 能力不存在：契约里 `subject-directory` 已经翻成 implemented，再报缺口
         #: 就是在骗界面。
         self.subjects = subjects
+        #: 操作员认证客户端与票据存放处（RAY-323 R1）。**两个都可能是 None** ——
+        #: 未预配置的终端没有云端可验，那是 v1 的正常状态（同 `subjects` 的理由）。
+        #:
+        #: ⚠️ 由此产生一条必须说清的后果：**`tickets is None` 时 `startSession`
+        #: 不设登录闸**。未预配置终端本来就没有登录可言，加闸只会让它彻底开不了工；
+        #: 而一台预配置过的终端，闸就一定在。这不是「可选的安全」，是「没有云端时
+        #: 没有可验的东西」。
+        self.auth = auth
+        self.tickets = tickets
         #: 排空线程（RAY-416）。**建了但不自动起** —— 起它是 `serve()` 的事，
         #: 因为「什么时候开始传」是进程入口的调度决定，而不是构造一个 service
         #: 的副作用。单元测试构造 service 时不会凭空多出一个后台线程。
@@ -182,22 +195,53 @@ class TerminalService:
     def _do_describe(self, _: dict[str, Any]) -> dict[str, Any]:
         return protocol.describe()
 
-    def _do_login(self, _: dict[str, Any]) -> Any:
-        """P-00 机构登录 —— **没有后端**。
+    def _do_login(self, params: dict[str, Any]) -> Any:
+        """P-00 机构登录（RAY-323 R1）。
 
         FR-01 写明操作员在 P-00 登录的是**机构账号**，用于识别「谁在操作」，与终端的
-        预配置技术凭据是两件事。RAY-225 交付的是后者（`cloud/tenancy.py` 的终端身份
-        与设备绑定），前者在本仓库没有任何实现。
+        预配置技术凭据是两件事。RAY-225 交付的是后者（`cloud/tenancy.py`），本方法
+        接的是前者。
 
-        先前这里写过一个「账号密码非空就放行」的检查，并给它套了 `E-BLE-1001`。
-        那有两处错：一是它在假装存在一个认证后端 —— 非空就通过等于没有认证；二是
-        `E-BLE` 说的是采集现场的连接故障，拿它表示一个登录问题，会在日志里造出一个
-        查无此事的设备故障（`__main__._fatal` 拒绝这么做的理由完全相同）。
+        **这里没有任何不发请求就能成功的路径。** 先前写过一个「账号密码非空就放行」
+        并给它套了 `E-BLE-1001`，那有两处错：一是在假装存在一个认证后端 —— 非空就
+        通过等于没有认证；二是 `E-BLE` 说的是采集现场的连接故障，拿它表示登录问题
+        会在日志里造出一个查无此事的设备故障。两处都不能回来。
 
         字段非空这类表单校验留在渲染进程：它没有错误码，因此不受「文案与错误码同源」
-        约束 —— 那条约束管的是错误，不是表单。
+        约束 —— 那条约束管的是错误，不是表单。所以这里遇到空字段抛 `ProtocolError`，
+        而不是造一个错误码。
         """
-        return _Unimplemented("operator-auth")
+        account = str(params.get("organization") or "").strip()
+        password = str(params.get("password") or "")
+        if not account or not password:
+            raise protocol.ProtocolError("login 需要 organization 与 password")
+        if self.auth is None:
+            # 契约里 `operator-auth` 已翻成 implemented，所以这里不能再报缺口 ——
+            # 那是在骗界面。给一个说得出原因的错误（同 `lookupSubject` 的取法）。
+            return operator_auth.not_provisioned()
+        try:
+            ticket = self.auth.login(account, password)
+        except OperatorAuthFailed as failed:
+            # 客户端已经把它翻成「现象 + 动作 + 码」，原样带出去。再包一层会让文案
+            # 多一个出处，而多一个出处就是两份会分头漂移的开始（同 lookupSubject）。
+            return failed.failure
+        if self.tickets is not None:
+            self.tickets.save(ticket)
+        # `operator` 只留**给界面看的部分** —— `snapshot()` 不含 token（见
+        # `cloud/operator.py` 的模块文档）。它也因此不会随快照进任何落盘文件。
+        self.operator = ticket.snapshot()
+        return self._snapshot()
+
+    def _do_logout(self, _: dict[str, Any]) -> dict[str, Any]:
+        """换班（R1-3）：清票据、回 P-00。
+
+        没有它，7 天票据下第二个操作员做的会话会归到第一个人名下 —— 而那是一条
+        **不会报错**的错误归属。
+        """
+        if self.tickets is not None:
+            self.tickets.clear()
+        self.operator = None
+        return self._snapshot()
 
     def _do_snapshot(self, _: dict[str, Any]) -> dict[str, Any]:
         return self._snapshot()
@@ -400,7 +444,18 @@ class TerminalService:
         )
         return items
 
-    def _do_startSession(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _do_startSession(self, params: dict[str, Any]) -> Any:
+        """开一次会话。**预配置过的终端要先有未过期的票据**（R1-1 / R1-3）。
+
+        闸放在这里而不是只放在渲染进程：渲染端的门是给人看的，sidecar 的门才是
+        真的 —— 而 RAY-248 已经记过一次「渲染端只 catch 异常就穿过了缺口」的教训。
+
+        `tickets is None` 时不设闸，理由见 `__init__` 里那段注释：未预配置终端没有
+        可验的东西。
+        """
+        if self.tickets is not None and self.tickets.load() is None:
+            self.operator = None
+            return operator_auth.ticket_expired()
         now = float(params.get("now", 0.0))
         self.walk = TimedWalk(self.config)
         self._aborted = None
