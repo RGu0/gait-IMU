@@ -21,7 +21,21 @@ const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
 /** 起一个真进程，并把它包成 adapter 要的 transport。 */
 function startSidecar() {
-  const child = spawn("uv", ["run", "--locked", "python", "-m", "gait.app"], {
+  // `--no-sync` 而不是 `--locked`。`--locked` 会让 uv 在**每一次** `uv run` 上重新
+  // 解析依赖，而依赖里的 techflex-cloud-foundation 是一个 GitHub release 资产直链：
+  // 它的 HTTP 缓存项每次都判过期，于是每次 spawn 都要向 github.com 发一轮
+  // revalidate（302 → release-assets → 304）。实测约 3.8 s，**冷热缓存一模一样**
+  // （新建 venv 4.8 s / 复用 venv 5.0 s），`--offline` 则是 0.03 s —— 所以这笔开销
+  // 是网络往返，不是建 venv、装包或起解释器。
+  //
+  // 本文件每条用例都各起一个进程，7 条就是 ~28 s；而单条用例的预算是 5 s，扣掉这
+  // 4 s 只剩不到 1 s 余量。网络一抖就超时，且超时落在哪一条纯属随机 —— 这正是它
+  // 「间歇失败」的成因。改用 --no-sync 后单次 spawn 到应答约 0.19 s。
+  //
+  // 锁文件的新鲜度不靠这里守：`./dev test` 与 `./dev lint` 里的 `uv run --locked`
+  // 已经守了，CI 还先跑 `./dev setup`（`uv sync --locked`）。这条用例要验的是 IPC
+  // 两侧能不能对上话，不是依赖解析。
+  const child = spawn("uv", ["run", "--no-sync", "python", "-m", "gait.app"], {
     cwd: REPO_ROOT,
     // UV_NO_CONFIG：本机的 uv 镜像配置会让 uv 报一个假的 lockfile 陈旧错误。
     env: { ...process.env, UV_NO_CONFIG: "1", PYTHONUTF8: "1" },
@@ -31,6 +45,17 @@ function startSidecar() {
   let buffer = "";
   const waiting = [];
   let stderr = "";
+  let dead = null;
+
+  // 子进程没能应答就死了的时候，立刻把等待中的（和之后来的）请求全部拒绝，并把
+  // stderr 带上。否则「sidecar 起不来」只会表现为一次超时 —— 而超时读不出原因，
+  // 正是这条用例此前教人重跑而不是读日志的地方。--no-sync 让这条更必要：环境没跑
+  // 过 `./dev setup` 时 uv 会给出一个空 venv，`python -m gait.app` 随即以
+  // "No module named gait" 退出，现在这句话会直接出现在断言失败里。
+  const fail = (error) => {
+    dead = error;
+    while (waiting.length) waiting.shift().reject(error);
+  };
 
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
@@ -45,20 +70,37 @@ function startSidecar() {
       const line = buffer.slice(0, index).trim();
       buffer = buffer.slice(index + 1);
       if (!line) continue;
-      const resolve = waiting.shift();
-      if (resolve) resolve(JSON.parse(line));
+      const pending = waiting.shift();
+      if (pending) pending.resolve(JSON.parse(line));
     }
+  });
+
+  child.on("error", (error) => fail(new Error(`sidecar 起不来：${error.message}`)));
+  child.on("exit", (code, signal) => {
+    // afterEach 主动 kill 时 signal 非空，那是正常收尾，不是失败。
+    if (signal) return;
+    fail(new Error(`sidecar 未及应答就退出（code=${code}）；stderr=${stderr}`));
   });
 
   const transport = (request) =>
     new Promise((resolve, reject) => {
+      if (dead) {
+        reject(dead);
+        return;
+      }
       const timer = setTimeout(
         () => reject(new Error(`sidecar 超时未回应 ${request.method}；stderr=${stderr}`)),
         30_000,
       );
-      waiting.push((message) => {
-        clearTimeout(timer);
-        resolve(message);
+      waiting.push({
+        resolve: (message) => {
+          clearTimeout(timer);
+          resolve(message);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       child.stdin.write(`${JSON.stringify(request)}\n`);
     });
