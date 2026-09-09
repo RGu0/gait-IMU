@@ -249,8 +249,8 @@ class TestTheCriteriaAreTheOnlySourceOfThresholds:
     def test_the_known_distance_is_declared_by_the_data_not_hardcoded(self):
         """R3 的实现口径：距离由数据声明，下限被冻结。
 
-        45.148 m 与 50 m 都是合法的已知距离，且**判定门槛对两者相同** ——
-        判据一量的是相对误差，绝对距离不进入它。
+        `FIELD_45`（走廊全程实测值）与 50 m 都是合法的已知距离，
+        且**判定门槛对两者相同** —— 判据一量的是相对误差，绝对距离不进入它。
         """
         for truth in (FIELD_45, 50.0):
             inside = measure(
