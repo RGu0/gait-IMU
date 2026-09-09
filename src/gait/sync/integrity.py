@@ -61,6 +61,18 @@ PRD §6.1 要求"到达率逐秒监控"，本模块照做。但那个数**含抖
 
 所以：**逐秒到达率用于定位（哪一秒链路忙），分级建在实测丢失上。** 两者都进报告，
 但它们回答的不是同一个问题。
+
+## 逐秒丢失也不能**取极值**来分级（RAY-274 R1 追加）
+
+上一条只说对了一半。逐秒**丢失**确实不含抖动，但**拿它的极值给整段定性**同样失败：
+1800 秒里必然有一秒最差。实测十个设备轮次里九个被判 `unusable`，**包括两轮 V2 达标的
+2 m 贴地+遮挡**（整轮丢失率 0.066% / 0.119%，卡在最差单秒 64.58% / 84.76%）。
+调数值救不了 —— 不达标组最好的最差单秒是 53.02%，可用区间只有 **1.2 倍**。
+
+分级因此改建在**两条轴**上：整轮丢失率（实测分离 **19.6 倍**）与最差 30 s 窗丢失率
+（**8.8 倍**）。逐秒量退回定位（`seconds_below_*`、`worst_second_*`）。
+
+窗口那个量就是 PRD §17.1 V2 判据二「无持续性欠采」所看的，见 `worst_window_loss`。
 """
 
 from __future__ import annotations
@@ -142,6 +154,9 @@ class IntegrityReport:
     segments: list[tuple[int, int]]
     #: 最长一段占全部样本的比例。它比"段数"更能说明这次采集还剩多少可用的连续数据。
     longest_segment_fraction: float
+    #: 最差 `AlgoConfig.integrity_sustained_window_s` 秒窗的丢失率。PRD §17.1 V2
+    #: 判据二「无持续性欠采」看的就是它（RAY-274 R1）。
+    sustained_loss: float
 
     grade: str
     version: str = INTEGRITY_REPORT_VERSION
@@ -182,12 +197,15 @@ class IntegrityReport:
             "lost_samples": self.lost_samples,
             "segments": [list(segment) for segment in self.segments],
             "longest_segment_fraction": self.longest_segment_fraction,
+            "sustained_loss": self.sustained_loss,
             "grade": self.grade,
             "version": self.version,
         }
 
 
-def _packet_boundaries(arrival: np.ndarray, nominal_fs: float, gap_fraction: float) -> np.ndarray:
+def _packet_boundaries(
+    arrival: np.ndarray, nominal_fs: float, gap_fraction: float
+) -> np.ndarray:
     """新包的起始索引。与 `sync/timebase.py` 的聚簇判据一致。"""
     threshold = gap_fraction / nominal_fs
     return np.flatnonzero(np.diff(arrival) > threshold) + 1
@@ -268,7 +286,9 @@ def find_gaps(
 PERIOD_BLOCK_PACKETS: Final[int] = 25
 
 
-def _robust_period(arrival: np.ndarray, boundaries: np.ndarray, nominal_fs: float) -> float:
+def _robust_period(
+    arrival: np.ndarray, boundaries: np.ndarray, nominal_fs: float
+) -> float:
     """采样周期的稳健估计，s。
 
     ## 为什么不能取逐包比值的中位数
@@ -364,11 +384,7 @@ def split_segments(samples: int, gaps: list[Gap]) -> list[tuple[int, int]]:
     if samples <= 0:
         return []
     boundaries = sorted({gap.after for gap in gaps} | {0, samples})
-    return [
-        (start, stop)
-        for start, stop in pairwise(boundaries)
-        if stop > start
-    ]
+    return [(start, stop) for start, stop in pairwise(boundaries) if stop > start]
 
 
 def per_second_rate(arrival: np.ndarray, nominal_fs: float) -> np.ndarray:
@@ -411,25 +427,68 @@ def per_second_loss(
     return losses
 
 
-def _grade(overall_loss_rate: float, losses: np.ndarray, nominal_fs: float, cfg: AlgoConfig) -> str:
+def worst_window_loss(
+    per_second_loss: np.ndarray, measured_fs: float, *, window: int
+) -> float:
+    """最差的一个 `window` 秒窗口里丢了多少（占该窗应收的比例）。
+
+    这是 PRD §17.1 V2 判据二与 06 §4 的「无持续性欠采」所看的量：**整轮均值会把
+    一段集中的坏时期洗掉**，而这个数专门把它捞出来。
+
+    ## 它住在这里，不住在 `cli/linktest.py`
+
+    两个消费者：V2 的 pass/fail（`cli/linktest.py`）与本模块的 `_grade`。放在 cli 里
+    会让 `sync` 反向依赖 `cli` —— 跨层。**一个量一个家。**
+
+    ## 分母是器件实发数
+
+    `measured_fs` 必须是 `estimate_period` 推出来的**器件实发速率**，不是标称 200 Hz。
+    器件晶振比标称低约 1%，按标称算光这一项就吃掉 0.5% 判据的全部预算。
+    """
+    losses = np.asarray(per_second_loss, dtype=np.float64)
+    if losses.size == 0 or measured_fs <= 0 or window < 1:
+        return 0.0
+    span = min(window, losses.size)
+    summed = np.convolve(losses, np.ones(span), mode="valid")
+    return float(summed.max() / (span * measured_fs))
+
+
+def _grade(overall_loss_rate: float, sustained_loss: float, cfg: AlgoConfig) -> str:
     """分级。PRD §6.1「分级告警」。
 
-    **建在实测丢失上，不建在到达率上。** 逐秒到达率含抖动：实测无丢包时它会掉到
-    0.94（一次 50 ms 重传推 10 个样本过秒边界），按 0.98 判会把干净的会话判成
-    degraded。空洞检测器则是精确的 —— 零误报、丢失数一个不差。
+    **两条轴，取更差的那一档**：整轮丢失率，与最差 `integrity_sustained_window_s`
+    秒窗的丢失率。一次集中在几秒里的丢包与均匀分布的同样多丢包，整轮丢失率一样，
+    但对轨迹的影响完全不同 —— 前者毁掉那几秒里的每一步，后者可能一步都没毁。
+    只看整轮会把前者放过去。
 
-    **两条线都看总体与逐秒**：一次集中在几秒里的丢包与均匀分布的同样多丢包，总体
-    丢失率一样，但对轨迹的影响完全不同 —— 前者毁掉那几秒里的每一步，后者可能一步
-    都没毁。只看总体会把前者放过去。
+    ## 为什么不再看「最差单秒」（RAY-274 R1）
+
+    改前这里第二条轴是逐秒丢失的**极值**。实测的后果是它**根本不区分**：
+    十个设备轮次里九个判 `unusable`，**包括两轮 V2 达标的 2 m 贴地+遮挡**
+    （整轮丢失率 0.066% / 0.119%）—— 卡在最差单秒 64.58% / 84.76%。
+
+    调数值救不了：不达标组最好的最差单秒是 53.02%，可用区间只有 **1.2 倍**。
+    根子在于 **1800 秒里必然有一秒最差，用它给整段定性等于用极值代表分布**。
+    换成 30 秒窗之后，同一批数据上的分离度是 **8.8 倍**。
+
+    逐秒量没有被丢掉，它退回本来的用途 —— **定位**（`seconds_below_*`、
+    `worst_second_*`），见本模块 §「逐秒到达率不能用来分级」。
+
+    ## 阈值是暂定的，而且借了一条无关的边界
+
+    见 `AlgoConfig.integrity_loss_warn` 的文档：本函数回答「这段数据还能不能算出
+    步态参数」，而阈值取自 V2 的「链路可不可接受」。缺的是「丢包率 → 步长/步速
+    误差」的实测曲线，本项目从未做过。
     """
-    # 比的是**接收率**而不是丢失率，因为阈值本身就是按接收率写的（0.98 / 0.90）。
-    # 写成 `丢失率 > 1 - 阈值` 会在边界上被浮点表示翻转：1.0 - 0.90 在 float 里是
-    # 0.09999999999999998，于是"正好丢 10%"会判成 unusable。实测撞上过。
-    worst = 1.0 - float(losses.max()) / nominal_fs if losses.size else 1.0
-    overall = 1.0 - overall_loss_rate
-    if overall < cfg.integrity_rate_unusable or worst < cfg.integrity_rate_unusable:
+    if (
+        overall_loss_rate >= cfg.integrity_loss_unusable
+        or sustained_loss >= cfg.integrity_sustained_unusable
+    ):
         return "unusable"
-    if overall < cfg.integrity_rate_warn or worst < cfg.integrity_rate_warn:
+    if (
+        overall_loss_rate >= cfg.integrity_loss_warn
+        or sustained_loss >= cfg.integrity_sustained_warn
+    ):
         return "degraded"
     return "normal"
 
@@ -465,6 +524,9 @@ def assess(
     losses = per_second_loss(times, gaps, nominal_fs, rates.size)
     lost = sum(gap.estimated_lost for gap in gaps)
     loss_rate = lost / (received + lost) if received + lost else 0.0
+    sustained = worst_window_loss(
+        losses, float(nominal_fs), window=cfg.integrity_sustained_window_s
+    )
 
     return IntegrityReport(
         nominal_fs=float(nominal_fs),
@@ -477,14 +539,17 @@ def assess(
         per_second_loss=losses,
         worst_second_rate=float(rates.min()) if rates.size else 1.0,
         worst_second_loss=int(losses.max()) if losses.size else 0,
-        seconds_below_warn=int(np.sum(1.0 - losses / nominal_fs < cfg.integrity_rate_warn)),
+        seconds_below_warn=int(
+            np.sum(1.0 - losses / nominal_fs < cfg.integrity_rate_warn)
+        ),
         seconds_below_unusable=int(
             np.sum(1.0 - losses / nominal_fs < cfg.integrity_rate_unusable)
         ),
         gaps=gaps,
         segments=segments,
         longest_segment_fraction=longest / received if received else 0.0,
-        grade=_grade(loss_rate, losses, float(nominal_fs), cfg),
+        sustained_loss=sustained,
+        grade=_grade(loss_rate, sustained, cfg),
     )
 
 

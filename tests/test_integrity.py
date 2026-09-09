@@ -29,6 +29,7 @@ from gait.sync.integrity import (
     per_second_rate,
     spans_gap,
     split_segments,
+    worst_window_loss,
 )
 from gait.sync.timebase import build_timebase
 
@@ -89,7 +90,9 @@ def simulate(
         (8, {500, 3000}, 2),
     ],
 )
-def test_injected_packet_loss_is_detected_and_counted_exactly(per_packet, drop, expected_gaps):
+def test_injected_packet_loss_is_detected_and_counted_exactly(
+    per_packet, drop, expected_gaps
+):
     """检出的空洞数与丢失样本数都必须**一个不差**。
 
     "估计丢失"这个名字来自它的算法（时间差除以周期，带一个采样的量化误差），不是来自
@@ -141,7 +144,9 @@ def test_segments_tile_the_whole_series_without_dropping_samples():
 
     assert report.segments[0][0] == 0
     assert report.segments[-1][1] == report.received
-    for (_, stop), (start, _) in zip(report.segments[:-1], report.segments[1:], strict=True):
+    for (_, stop), (start, _) in zip(
+        report.segments[:-1], report.segments[1:], strict=True
+    ):
         assert stop == start
     assert sum(stop - start for start, stop in report.segments) == report.received
 
@@ -223,7 +228,10 @@ def test_a_slow_crystal_does_not_drift_the_baseline_into_false_gaps():
     previous = -np.inf
     for start in range(0, n, per_packet):
         stop = min(start + per_packet, n)
-        moment = max((stop - 1) / fs_slow + BASE_LATENCY + rng.exponential(0.004), previous + 1e-4)
+        moment = max(
+            (stop - 1) / fs_slow + BASE_LATENCY + rng.exponential(0.004),
+            previous + 1e-4,
+        )
         previous = moment
         arrivals.append(moment + 1e-6 * np.arange(stop - start))
     arrival = np.concatenate(arrivals)
@@ -254,7 +262,9 @@ def test_the_grade_is_normal_when_nothing_was_lost_however_bad_the_jitter():
     """同一份数据，分级必须是 normal —— 因为分级看的是实测丢失。"""
     for retransmit_rate in (0.0, 0.01, 0.05):
         for jitter_mean in (0.002, 0.008):
-            arrival, lost = simulate(retransmit_rate=retransmit_rate, jitter_mean=jitter_mean)
+            arrival, lost = simulate(
+                retransmit_rate=retransmit_rate, jitter_mean=jitter_mean
+            )
             assert lost == 0
             report = assess(arrival, NOMINAL_FS)
             assert report.grade == "normal"
@@ -288,35 +298,67 @@ def _synthetic_losses(worst: int, seconds: int = 60) -> np.ndarray:
 
 
 @pytest.mark.parametrize(
-    ("worst_second_samples", "expected"),
+    ("overall", "sustained", "expected"),
     [
-        (0, "normal"),
-        (4, "normal"),  # 4/200 = 2%，接收率正好 0.98 —— 阈值是"低于"才降级
-        (5, "degraded"),
-        (20, "degraded"),  # 20/200 = 10%，接收率正好 0.90 —— 同上
-        (21, "unusable"),
+        (0.0, 0.0, "normal"),
+        (0.004, 0.0, "normal"),
+        (0.005, 0.0, "degraded"),  # 边界即降级：阈值是"达到"就降
+        (0.009, 0.0, "degraded"),
+        (0.010, 0.0, "unusable"),
+        (0.0, 0.079, "normal"),
+        (0.0, 0.08, "degraded"),
+        (0.0, 0.159, "degraded"),
+        (0.0, 0.16, "unusable"),
+        (0.0, 0.20, "unusable"),  # 任一轴到 unusable 即整体 unusable
+        (0.02, 0.0, "unusable"),
     ],
 )
-def test_the_grade_boundaries_are_decided_by_the_received_fraction(worst_second_samples, expected):
-    """边界比的是**接收率**，不是丢失率。
+def test_the_grade_is_the_worse_of_the_two_loss_axes(overall, sustained, expected):
+    """分级建在**丢失**上，两条轴取更差的那一档（RAY-274 R1）。
 
-    写成 `丢失率 > 1 − 阈值` 会在边界上被浮点表示翻转：`1.0 - 0.90` 在 float 里是
-    0.09999999999999998，于是"正好丢 10%"判成 unusable。实测撞上过这个，所以边界值
-    进了参数表。
+    两条轴缺一不可：一次集中在几秒里的丢包与均匀分布的同样多丢包，整轮丢失率一样，
+    但前者毁掉那几秒里的每一步 —— 只看整轮会把它放过去。反过来，均匀铺开的丢包
+    每个窗口都不越线而总量越线，只看窗口又会把它放过去。
     """
     from gait.sync.integrity import _grade
 
-    grade = _grade(0.0, _synthetic_losses(worst_second_samples), NOMINAL_FS, AlgoConfig())
-    assert grade == expected
+    assert _grade(overall, sustained, AlgoConfig()) == expected
 
 
-def test_loss_spread_thin_across_the_session_still_trips_the_overall_line():
-    """均匀分布的丢包每一秒都不越线，但总量越线 —— 总体那条线就是为它准备的。"""
+def test_the_grade_no_longer_condemns_a_session_for_one_bad_second():
+    """**这条守的是一个曾经让分级完全失去区分力的结构缺陷。**
+
+    改前第二条轴是逐秒丢失的**极值**。1800 秒里必然有一秒最差，用它给整段定性等于
+    用极值代表分布 —— 实测十个设备轮次里九个判 `unusable`，**包括两轮 V2 达标的
+    2 m 贴地+遮挡**（整轮丢失率 0.066% / 0.119%，卡在最差单秒 64.58% / 84.76%）。
+
+    这里造的正是那种数据：整轮几乎不丢，只有一秒塌掉。它必须是 `normal`。
+    """
     from gait.sync.integrity import _grade
 
-    losses = np.full(600, 2, dtype=np.int64)  # 每秒丢 2 个 = 1%，逐秒都过得去
-    assert _grade(0.01, losses, NOMINAL_FS, AlgoConfig()) == "normal"
-    assert _grade(0.05, losses, NOMINAL_FS, AlgoConfig()) == "degraded"
+    # 一秒丢掉 40%（80/200），其余 1799 秒一个不丢 ⇒ 整轮 0.022%、最差 30 s 窗 0.13%
+    losses = np.zeros(1800, dtype=np.int64)
+    losses[900] = 80
+    sustained = worst_window_loss(losses, NOMINAL_FS, window=30)
+    overall = losses.sum() / (1800 * NOMINAL_FS)
+
+    assert sustained < AlgoConfig().integrity_sustained_warn
+    assert _grade(overall, sustained, AlgoConfig()) == "normal"
+
+
+def test_a_sustained_bad_stretch_is_caught_even_when_the_average_is_fine():
+    """反向：整轮均值过得去，但坏时期集中 —— 窗口那条轴就是为它准备的。"""
+    from gait.sync.integrity import _grade
+
+    # 连续 30 秒每秒丢 40（20%），其余 1770 秒不丢 ⇒ 整轮 0.33% < 0.5% 仍"达标"
+    losses = np.zeros(1800, dtype=np.int64)
+    losses[600:630] = 40
+    sustained = worst_window_loss(losses, NOMINAL_FS, window=30)
+    overall = losses.sum() / (1800 * NOMINAL_FS)
+
+    assert overall < AlgoConfig().integrity_loss_warn, "构造前提：均值这条轴放它过去"
+    assert sustained == pytest.approx(0.20, abs=1e-9)
+    assert _grade(overall, sustained, AlgoConfig()) == "unusable"
 
 
 def test_every_grade_is_one_of_the_declared_values():
@@ -371,7 +413,9 @@ def test_longest_segment_fraction_says_how_much_usable_data_is_left():
     assert len(assess(early, NOMINAL_FS).segments) == 2
     assert len(assess(middle, NOMINAL_FS).segments) == 2
     assert assess(early, NOMINAL_FS).longest_segment_fraction > 0.9
-    assert assess(middle, NOMINAL_FS).longest_segment_fraction == pytest.approx(0.5, abs=0.05)
+    assert assess(middle, NOMINAL_FS).longest_segment_fraction == pytest.approx(
+        0.5, abs=0.05
+    )
 
 
 # ── 空洞跨越判断（RAY-216 的步态周期要用）────────────────────────────────────
@@ -443,6 +487,16 @@ def test_the_unusable_threshold_must_be_stricter_than_the_warn_threshold():
     """反过来会让 degraded 永远比 unusable 更严，分级失去意义。"""
     with pytest.raises(ConfigError, match="unusable < warn"):
         replace(AlgoConfig(), integrity_rate_warn=0.80, integrity_rate_unusable=0.95)
+
+
+@pytest.mark.parametrize("name", ["integrity_loss", "integrity_sustained"])
+def test_the_loss_thresholds_must_run_the_other_way_round(name):
+    """丢失阈值越大越差，与建在到达率上的那一对**方向相反**。
+
+    两套阈值同住一个配置里，方向却相反 —— 这正是容易写反的地方，所以两边都有断言。
+    """
+    with pytest.raises(ConfigError, match=f"{name}_warn"):
+        replace(AlgoConfig(), **{f"{name}_warn": 0.5, f"{name}_unusable": 0.1})
 
 
 def test_the_gap_threshold_is_three_samples_because_the_prd_says_so():

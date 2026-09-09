@@ -79,6 +79,7 @@ from wt901.recording import read_recording
 from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
+from gait.config import AlgoConfig
 from gait.device.binding import DeviceIdentity
 from gait.device.ble import (
     AppliedConfig,
@@ -89,19 +90,29 @@ from gait.device.ble import (
 )
 from gait.device.identity import resolve_recording_identity
 from gait.device.recorder import ThreadedRecordingWriter
-from gait.sync.integrity import IntegrityReport, assess, estimate_period
+from gait.sync.integrity import (
+    IntegrityReport,
+    assess,
+    estimate_period,
+    worst_window_loss,
+)
 
 __all__ = ["BenchEnvironment", "DeviceRun", "main", "run_bench", "worst_window_loss"]
 
 #: V2 判据：平均缺失率 < 0.5%。
 LOSS_RATE_CRITERION = 0.005
-#: 「无持续性欠采」看多长的窗口，秒。见 `worst_window_loss`。
+#: 「无持续性欠采」看多长的窗口，秒。取自 `AlgoConfig`，两条路共用同一个数。
+SUSTAINED_WINDOW_S = AlgoConfig().integrity_sustained_window_s
+#: V2 判据二：最差 30 s 窗丢失率 < 8%（PRD v1.12 §17.1、06 v1.8 §4，RAY-274 R1）。
 #:
-#: **阈值刻意不在代码里定。** PRD §17.1 只写了「无持续性欠采」，没有定量口径；
-#: RAY-200 的实测分布已具备定它的条件，但那属 requirement 变更，不由工具发明。
-#: 所以本模块只把「最差 30 s 窗缺失率」报出来，pass/fail 仅由「平均缺失率 <
-#: 0.5%」这一条已明文的判据决定。
-SUSTAINED_WINDOW_S = 30
+#: **这个数是选的，不是标定出来的，用它之前要知道这件事。** 实测五轮十个设备轮次里，
+#: 本判据与「平均缺失率 < 0.5%」**0 处分歧** —— 因为没有一轮出现「均值达标但丢包
+#: 集中」，而那正是它要防的失效模式。数据只能定界 **(1.60%, 14.10%]**，区间内无法
+#: 再区分；8% 距不达边界仅 **1.76 倍**，偏「宁可放过不可误拦」。
+#:
+#: 采到「均值达标但丢包集中」的样本后本值应重新审视 —— 那时它才第一次真正被数据检验。
+#: 依据与逐轮读数：`evidence/ray-274/threshold-calibration/`。
+SUSTAINED_LOSS_CRITERION = 0.08
 
 #: 主机单调时钟分辨率必须细于采样周期的这个比例，测量才有意义（见模块 docstring）。
 #: 取 10：量化误差 ≤ 半个周期的 1/5，不足以在残差上造出 3 样本（PRD 的空洞阈值）
@@ -144,6 +155,7 @@ def host_clock_resolution() -> float:
     不是 `perf_counter` —— 两者在 Windows 上曾经是不同的实现。
     """
     return time.get_clock_info("monotonic").resolution
+
 
 _RATE_BY_HZ = {
     10: ReturnRate.HZ_10,
@@ -260,53 +272,6 @@ def _battery_snapshot(battery: Battery | None) -> dict[str, Any] | None:
     return {"raw": battery.raw, "percent": battery.percent}
 
 
-def worst_window_loss(
-    per_second_loss: np.ndarray,
-    measured_fs: float,
-    *,
-    window: int = SUSTAINED_WINDOW_S,
-) -> float:
-    """最差的一个 ``window`` 秒窗口里丢了多少（占该窗应收的比例）。
-
-    这是 PRD §17.1「无持续性欠采」该看的量：**整轮均值会把一段集中的坏时期
-    洗掉**，而这个数专门把它捞出来。实测四轮（RAY-200）：
-
-    | 工况 | 整轮缺失 | 最差 30 s 窗 |
-    | --- | --- | --- |
-    | ≤1 m 桌面 | 0.000% / 0.002% | 0.00% / 0.07% |
-    | 2 m 贴地 + 全程躯干遮挡 | 0.064% / 0.118% | 1.60% / 1.14% |
-    | 3 m 贴地 | 3.45% / 2.27% | 23.8% / 25.3% |
-    | 5 m 桌面 | 3.90% / 5.08% | 24.9% / 37.7% |
-
-    数量级分开，且**不含抖动**。
-
-    ## 为什么不建在逐秒到达率上（被替换掉的那版就是）
-
-    上一版实现是「30 s 窗内逐秒**到达率**均值 < 0.99」。它建在
-    `integrity.py` 明确警告过「不能用来分级」的量上，被真机两次证伪：
-
-    1. **round-1（零丢包）**：534/1799 秒的逐秒率低于 0.99，而**一个样本都没丢**
-       —— 那是 BLE 通知成簇造成的读数波动，基线本来就贴着 0.99 晃。
-    2. **round-4**：报出 29 个「持续欠采窗口」，追下去实际是**一次 0.4 秒的瞬断**
-       （单秒丢 82 个）被 30 秒窗口摊开的。区间中位数 1.0092，健康。
-
-    改成中位数并不能修好它 —— 只是把误报换到另一台设备上（0→16）。问题不在
-    均值还是中位，在于底下那个量本身含抖动。丢失不含抖动，所以建在丢失上。
-
-    ## 阈值不在这里定
-
-    本函数只返回数，**不判 pass/fail**：把它变成判据需要一个阈值，而那属于
-    PRD §17.1 的措辞（「无持续性欠采」目前没有定量口径）。RAY-200 的实测分布
-    已经具备定它的条件，但那是 requirement 变更，不由工具发明。
-    """
-    losses = np.asarray(per_second_loss, dtype=np.float64)
-    if losses.size == 0 or measured_fs <= 0:
-        return 0.0
-    span = min(window, losses.size)
-    summed = np.convolve(losses, np.ones(span), mode="valid")
-    return float(summed.max() / (span * measured_fs))
-
-
 async def _consume(device: WT901Device, run: DeviceRun, started: float) -> None:
     """把样本的 ``t_host`` 收进 ``run.arrivals``，直到被取消或流结束。
 
@@ -363,7 +328,7 @@ def _finalize(run: DeviceRun, nominal_fs: float) -> None:
     run.measured_fs = 1.0 / estimate_period(arrival, nominal_fs)
     run.integrity = assess(arrival, run.measured_fs)
     run.worst_window_loss = worst_window_loss(
-        run.integrity.per_second_loss, run.measured_fs
+        run.integrity.per_second_loss, run.measured_fs, window=SUSTAINED_WINDOW_S
     )
 
 
@@ -402,6 +367,12 @@ def _verdict(
         if loss >= LOSS_RATE_CRITERION:
             problems.append(
                 f"{run.device_id}: 缺失率 {loss:.3%} ≥ {LOSS_RATE_CRITERION:.1%}"
+            )
+        sustained = run.worst_window_loss
+        if sustained is not None and sustained >= SUSTAINED_LOSS_CRITERION:
+            problems.append(
+                f"{run.device_id}: 最差 {SUSTAINED_WINDOW_S} s 窗丢失 "
+                f"{sustained:.2%} ≥ {SUSTAINED_LOSS_CRITERION:.0%}（持续性欠采）"
             )
         if run.disconnected_at is not None:
             problems.append(f"{run.device_id}: 采集中断连")
@@ -612,9 +583,7 @@ async def run_bench(
             if replay_transports:
                 # 回放喂完就结束，不必等满 duration；等消费者把队列排空再收，
                 # 否则最后一批样本会被裁掉，全速回放下尤其明显。
-                await asyncio.gather(
-                    *(t.wait_exhausted() for t in replay_transports)
-                )
+                await asyncio.gather(*(t.wait_exhausted() for t in replay_transports))
                 drain_deadline = loop.time() + 5.0
                 while (
                     any(device.pending_samples for device in devices)
@@ -663,9 +632,7 @@ async def run_bench(
         source="replay" if replay_files else "live",
         sources=[str(p) for p in replay_files] if replay_files else None,
         replay_speed=(
-            ("full" if replay_speed is None else replay_speed)
-            if replay_files
-            else None
+            ("full" if replay_speed is None else replay_speed) if replay_files else None
         ),
         echo=echo,
     )
@@ -709,6 +676,7 @@ def _emit_report(
         "issue": "RAY-200",
         "criterion": {
             "loss_rate": LOSS_RATE_CRITERION,
+            "sustained_loss": SUSTAINED_LOSS_CRITERION,
             "sustained_window_s": SUSTAINED_WINDOW_S,
         },
         "started_utc": started_utc,
@@ -894,9 +862,7 @@ def analyze_recordings(
         if observed is not None:
             resolutions.append(observed)
         first, last = _streaming_span(counts, stamps)
-        arrivals = [
-            stamps[i] for i in range(first, last + 1) for _ in range(counts[i])
-        ]
+        arrivals = [stamps[i] for i in range(first, last + 1) for _ in range(counts[i])]
         trimmed = {
             "leading_s": round(stamps[first] - stamps[0], 3) if stamps else 0.0,
             "trailing_s": round(stamps[-1] - stamps[last], 3) if stamps else 0.0,
@@ -923,7 +889,11 @@ def analyze_recordings(
         env=env,
         nominal_fs=nominal_fs,
         duration=max(
-            (run.arrivals[-1] - run.arrivals[0] for run in runs if len(run.arrivals) > 1),
+            (
+                run.arrivals[-1] - run.arrivals[0]
+                for run in runs
+                if len(run.arrivals) > 1
+            ),
             default=0.0,
         ),
         started_utc=datetime.now(UTC).isoformat(),
@@ -976,7 +946,7 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- 时长（请求）：{report['duration_requested_s']:.0f} s",
         f"- 标称速率：{report['nominal_fs']:.0f} Hz",
         (
-            f"- 距离：{'未记录' if env['distance_m'] is None else f'{env['distance_m']} m'}；"
+            f"- 距离：{'未记录' if env['distance_m'] is None else f'{env["distance_m"]} m'}；"
             f"遮挡：{env['occlusion']}"
         ),
         f"- 平台：{env['platform']}",
@@ -1007,7 +977,9 @@ def _markdown(report: dict[str, Any]) -> str:
         )
     lines += ["", "## 判据（PRD §17.1 V2）", ""]
     lines.append(
-        f"pass/fail 只看**平均缺失率 < {report['criterion']['loss_rate']:.1%}**"
+        f"pass/fail 看**两条**：平均缺失率 < {report['criterion']['loss_rate']:.1%} "
+        f"**且**最差 {report['criterion']['sustained_window_s']} s 窗丢失 "
+        f"< {report['criterion']['sustained_loss']:.0%}"
         f"（分母为器件实测速率）。「无持续性欠采」以"
         f"**最差 {report['criterion']['sustained_window_s']} s 窗缺失率**量化并列在下表，"
         "但 PRD §17.1 尚未给出定量口径，故不参与判定。"
@@ -1079,9 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--distance-m", type=float, default=None)
     parser.add_argument("--occlusion", default="无")
     parser.add_argument("--note", default="")
-    parser.add_argument(
-        "--rate", type=int, default=200, choices=sorted(_RATE_BY_HZ)
-    )
+    parser.add_argument("--rate", type=int, default=200, choices=sorted(_RATE_BY_HZ))
     parser.add_argument(
         "--bandwidth",
         type=lambda s: int(s, 0),

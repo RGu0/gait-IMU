@@ -408,14 +408,39 @@ class AlgoConfig:
     #: 极度敏感，而丢 3 个样本（15 ms @200 Hz）已经足够让一步的速度积分跑偏，且
     #: 不会有任何东西报错。
     integrity_gap_samples: int = 3
-    #: 到达率的分级阈值。低于 `warn` 标 degraded，低于 `unusable` 标 unusable。
+    #: 逐秒到达率的**定位**阈值 —— `seconds_below_warn` / `seconds_below_unusable`
+    #: 两个计数器用它，**分级不再用它**（RAY-274 R1）。
     #:
-    #: **这两个数 PRD 没有给。** PRD §6.1 只说"分级告警"，§7 给的 70% 是会话级有效
-    #: 时长的判据、不是到达率的。这里的取值是暂定的工程判断：98% 意味着每秒丢不到
-    #: 4 个样本（一个包的量级），90% 意味着每秒丢 20 个（一整步的支撑相都可能受损）。
-    #: 真实取值待 RAY-200（V2 双设备 30 分钟压测）给出实际的丢包分布。
+    #: 它们回答的是「哪几秒链路忙」，不是「这段数据好不好」。逐秒到达率含抖动
+    #: （一次 50 ms 重传把约 10 个样本推过秒边界，那一秒读作 0.95 而一个样本都没丢），
+    #: 见本模块 §「逐秒到达率不能用来分级」。
+    #:
+    #: 实测还表明**逐秒丢失取极值也不能分级**：1800 秒里必然有一秒最差，用它给整段
+    #: 定性等于用极值代表分布。V2 达标的 2 m 贴地+遮挡两轮最差单秒是 64.58% / 84.76%，
+    #: 而不达标组最好的是 53.02% —— 可用区间只有 1.2 倍，两级阈值挤不进去。
     integrity_rate_warn: float = 0.98
     integrity_rate_unusable: float = 0.90
+    #: 「持续性欠采」看多长的窗口，秒。PRD §17.1 V2 判据二、06 §4（RAY-274 R1）。
+    integrity_sustained_window_s: int = 30
+    #: 分级阈值，建在**实测丢失**上（RAY-274 R1）。两条轴，取更差的那一档：
+    #: 整轮丢失率，与最差 `integrity_sustained_window_s` 秒窗的丢失率。
+    #:
+    #: 实测五轮十个设备轮次的分离度（`evidence/ray-274/threshold-calibration/`）：
+    #: 整轮丢失率 **19.6 倍**、最差 30 s 窗 **8.8 倍**、最长段占比 2.9 倍、
+    #: 最差单秒 1.2 倍 —— 前两个是仅有的两个能撑住阈值的量。
+    #:
+    #: **⚠️ 取值暂定，且借用了一条无关的边界。** 分级要答的是「这段数据还能不能算出
+    #: 步态参数」，而 V2 的 0.5% / 8% 答的是「链路可不可接受」——**不是同一个问题**。
+    #: 真要标定它需要「丢包率 → 步长/步速误差」的实测曲线，**本项目从未做过这条曲线**。
+    #: 在有那条曲线之前，`warn` 取 V2 的两条判据线，`unusable` 取其 **2 倍** ——
+    #: 「2 倍」是一条**声明出来的规则**，不是两个各自编出来的数。
+    #:
+    #: 这套取值在十个轮次上给出：≤1 m 与 2 m 遮挡（V2 达标）→ `normal`，
+    #: 2.5 m / 3 m / 5 m（V2 不达标）→ `unusable`。改前那两轮 2 m 被判 `unusable`。
+    integrity_loss_warn: float = 0.005
+    integrity_loss_unusable: float = 0.010
+    integrity_sustained_warn: float = 0.08
+    integrity_sustained_unusable: float = 0.16
 
     # ── 双脚协同的周期规划（RAY-328）。PRD §6.1 ────────────────────────────
     #
@@ -603,6 +628,10 @@ class AlgoConfig:
             "anchor_pairing_window_s",
             "integrity_rate_warn",
             "integrity_rate_unusable",
+            "integrity_loss_warn",
+            "integrity_loss_unusable",
+            "integrity_sustained_warn",
+            "integrity_sustained_unusable",
             "cross_foot_period_ratio_max",
             "planning_gap_guard_s",
             "planning_min_coverage",
@@ -636,6 +665,22 @@ class AlgoConfig:
                 "相邻配对的失效点实测就在一个步时上，取 1 或更大等于把闸门设在"
                 "失效之后，闸门就不再拦任何东西。"
             )
+        if self.integrity_sustained_window_s < 1:
+            raise ConfigError(
+                f"integrity_sustained_window_s 至少为 1 秒，收到 "
+                f"{self.integrity_sustained_window_s}。窗口短于一秒就退化成逐秒量，"
+                "而「持续性」欠采要问的正是「一段时间里」，不是「某一秒」。"
+            )
+        for name in ("integrity_loss", "integrity_sustained"):
+            warn = getattr(self, f"{name}_warn")
+            unusable = getattr(self, f"{name}_unusable")
+            if not 0.0 < warn < unusable <= 1.0:
+                raise ConfigError(
+                    f"{name}_warn / _unusable 必须满足 0 < warn < unusable ≤ 1，"
+                    f"收到 {warn} 与 {unusable}。这两个阈值建在**丢失率**上，"
+                    "丢得越多越差，所以 unusable 必须比 warn 大 —— 与建在到达率上的"
+                    "`integrity_rate_*` 方向相反，那一对是越小越差。"
+                )
         if self.integrity_gap_samples < 1:
             raise ConfigError(
                 f"integrity_gap_samples 至少为 1，收到 {self.integrity_gap_samples}。"

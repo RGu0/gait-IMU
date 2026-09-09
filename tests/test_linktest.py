@@ -123,14 +123,14 @@ def test_worst_window_loss_surfaces_a_bad_stretch_the_average_hides() -> None:
     loss[600:630] = 20.0
 
     whole_round = loss.sum() / (1800 * fs)
-    worst = worst_window_loss(loss, fs)
+    worst = worst_window_loss(loss, fs, window=30)
 
     assert abs(worst - 20 / fs) < 1e-12  # 那 30 s 窗：每秒丢 20/200 = 10%
     assert abs(whole_round - 600 / 360_000) < 1e-12  # 整轮均值只有 0.167%
     assert worst > 50 * whole_round, "整轮均值把这段坏时期洗掉了，正是要捞它"
 
     # 干净的一轮是 0。
-    assert worst_window_loss(np.zeros(1800), fs) == 0.0
+    assert worst_window_loss(np.zeros(1800), fs, window=30) == 0.0
 
 
 def test_worst_window_loss_is_immune_to_arrival_rate_jitter() -> None:
@@ -139,14 +139,14 @@ def test_worst_window_loss_is_immune_to_arrival_rate_jitter() -> None:
     这一版只看丢失：抖动不改变「样本存不存在」，所以零丢包必然读 0，
     无论逐秒到达率怎么起伏。
     """
-    assert worst_window_loss(np.zeros(1800), 200.0) == 0.0
+    assert worst_window_loss(np.zeros(1800), 200.0, window=30) == 0.0
 
 
 def test_worst_window_loss_handles_short_captures() -> None:
     """短于一个窗口时按实际长度算，而不是静默返回 0。"""
     loss = np.full(5, 10.0)
-    assert worst_window_loss(loss, 200.0) == 10.0 / 200.0
-    assert worst_window_loss(np.zeros(0), 200.0) == 0.0
+    assert worst_window_loss(loss, 200.0, window=30) == 10.0 / 200.0
+    assert worst_window_loss(np.zeros(0), 200.0, window=30) == 0.0
 
 
 def _synthetic_arrivals(
