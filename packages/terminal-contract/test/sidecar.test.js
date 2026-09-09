@@ -76,7 +76,12 @@ function startSidecar() {
   });
 
   child.on("error", (error) => fail(new Error(`sidecar 起不来：${error.message}`)));
-  child.on("exit", (code, signal) => {
+  // 用 close 而不是 exit：exit 在进程终止时就触发，此时 stdout 里可能还有没送达的
+  // 数据，于是「应答已写出、进程随即退出」会被误判成「没应答就死了」。close 等到
+  // stdio 全部关闭才触发，那一刻该收的行都已经收完。今天的 sidecar 是长驻的，不会
+  // 边应答边退出，所以这条竞态还够不着；但它只值一个词，而将来若有人让它改成应答
+  // 一次就退出，差别就是间歇性假失败。
+  child.on("close", (code, signal) => {
     // afterEach 主动 kill 时 signal 非空，那是正常收尾，不是失败。
     if (signal) return;
     fail(new Error(`sidecar 未及应答就退出（code=${code}）；stderr=${stderr}`));
