@@ -48,14 +48,14 @@ case "$cmd" in
     run_node pnpm run test
     ;;
   lint)
-    uv run --locked python -m ruff check . "$@"
-    # 分层红线。ruff 管不了这条：它是项目自己的依赖方向约束，不是通用 lint 规则。
-    uv run --locked python tools/check_layering.py
-    uv run --locked python tools/check_quality_single_source.py
-    uv run --locked python tools/check_calibration_channel.py
-    # 上游引用红线。守的是对**别的仓库**的引用：那些仓库不在 CI 上，也不在本仓库
-    # 任何测试的视野里，它们改了这边的文档会开始说错话而不会有任何东西变红。
-    uv run --locked python tools/check_upstream_refs.py
+    # ruff 与四条项目红线合并进**一次** uv run（RAY-467）。此前是五次，而 `--locked`
+    # 让 uv 每次调用都重新解析依赖 —— 其中的 GitHub release 资产每次都要 revalidate
+    # 一轮，实测五次合计 18.87 s，占 ./dev lint 总时长的 92%，而真实工作量是 0.12 s。
+    #
+    # `--locked` 一点没放弃：锁文件新鲜度仍然每次都验，只是验一遍而不是五遍。
+    # 逐条检查各自守什么、以及「五项全跑完再报齐」这个与旧行为的差异，见该脚本的文档。
+    # "$@" 只透传给 ruff，与合并前一致。
+    uv run --locked python tools/run_lint_checks.py "$@"
     run_node pnpm run lint
     ;;
   build)
