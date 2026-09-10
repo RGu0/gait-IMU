@@ -61,12 +61,9 @@ switch ($Command) {
         Invoke-Node "pnpm" @("run", "test")
     }
     "lint" {
-        Invoke-Step "uv" (@("run", "--locked", "python", "-m", "ruff", "check", ".") + $Rest)
-        # 分层红线，与 ./dev 对应。
-        Invoke-Step "uv" @("run", "--locked", "python", "tools/check_layering.py")
-        Invoke-Step "uv" @("run", "--locked", "python", "tools/check_quality_single_source.py")
-        Invoke-Step "uv" @("run", "--locked", "python", "tools/check_calibration_channel.py")
-        Invoke-Step "uv" @("run", "--locked", "python", "tools/check_upstream_refs.py")
+        # 与 dev 对称：五项 Python 侧检查合并进一次 uv run（RAY-467）。理由见
+        # tools/run_lint_checks.py 的文档；$Rest 只透传给 ruff。
+        Invoke-Step "uv" (@("run", "--locked", "python", "tools/run_lint_checks.py") + $Rest)
         Invoke-Node "pnpm" @("run", "lint")
     }
     "build" {
