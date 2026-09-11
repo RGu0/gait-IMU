@@ -2,10 +2,17 @@ import React from "react";
 import { SideBadge } from "./SideBadge.jsx";
 
 /**
- * LinkStatus — BLE link health as three tiers, expressed by ARRIVAL RATE and
- * nothing else. At 200 Hz the module registers cannot be read, so battery must
- * never appear during capture. The number of SOLID bars carries the tier, so
- * the icon still reads with color removed.
+ * LinkStatus — BLE link health as three tiers, expressed by the TRAILING-WINDOW
+ * LOSS RATE and nothing else. At 200 Hz the module registers cannot be read, so
+ * battery must never appear during capture. The number of SOLID bars carries the
+ * tier, so the icon still reads with color removed.
+ *
+ * NOT arrival rate. An earlier version of this component documented arrival-rate
+ * tiers at 99% / 95%; on real hardware a 30-minute round that lost ZERO samples
+ * read below 0.99 for 534 of 1799 seconds, because BLE notifications arrive in
+ * bursts. Loss carries no jitter (RAY-274). This component never computes the
+ * tier — it renders the one it is given — but the docs said the wrong thing, and
+ * whoever wires it up reads the docs.
  *
  * During capture a drop to "bad" changes this row and nothing else: no dialog,
  * no toast. The operator cannot act on it mid-walk without ruining the test.

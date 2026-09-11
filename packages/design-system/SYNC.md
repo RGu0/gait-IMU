@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | 源项目 | `40065384-1a4c-4f8f-93eb-4d067444d67f`（`PROJECT_TYPE_DESIGN_SYSTEM`） |
-| 拉取时间 | 2026-08-21 |
+| 拉取时间 | 2026-08-21（`components/gait/LinkStatus.*` 三份于 2026-09-10 单独重拉，RAY-274 交付 4） |
 | 拉取方式 | DesignSync `get_file`，逐个文件 |
 | 对应 Issue | RAY-249 |
 
