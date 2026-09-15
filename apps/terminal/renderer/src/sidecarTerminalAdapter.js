@@ -103,19 +103,58 @@ export function recordStatusOf(complete) {
   return "状态未知";
 }
 
+/**
+ * 走满协议算「完成」的容差，单位秒。
+ *
+ * 收尾由渲染端倒计时触发，`now` 取自它自己的时钟，所以走满 60 秒的会话实测落在
+ * 60 秒上下几十毫秒。没有容差，正常走完的检测会被写成「已停止（60/60 秒）」。
+ */
+const FULL_WALK_TOLERANCE_S = 1;
+
+/**
+ * 会话结局（RAY-496）。
+ *
+ * 在这之前状态只看 `complete`，而 `complete` 说的是**写队列有没有丢块**，
+ * 回答不了「走满了没有」—— 于是走满 60 秒与第 5 秒手动停止都显示「完成」。
+ * 现在先看协议侧的事实；只有本次改动之前落盘的旧会话（磁盘上没有这些字段）
+ * 才退回 `complete` 三态，而不是替它编一个结局。
+ */
+export function recordOutcomeOf(record) {
+  // 丢块比走没走满严重：它说的是这份数据本身不可信。先说这个。
+  if (record?.complete === false) return { status: "不完整", kind: "incomplete" };
+  const state = record?.protocolState;
+  if (typeof state !== "string") {
+    return { status: recordStatusOf(record?.complete), kind: "legacy" };
+  }
+  if (state === "aborted") return { status: "已中断", kind: "aborted" };
+  // `finished` 是唯一走到终点的状态。停在 `walking` 之类的，是收尾前进程就没了。
+  if (state !== "finished") return { status: "未正常结束", kind: "unfinished" };
+  const elapsed = record?.elapsedSeconds;
+  const configured = record?.protocolSeconds;
+  if (!Number.isFinite(elapsed) || !Number.isFinite(configured)) {
+    return { status: recordStatusOf(record?.complete), kind: "legacy" };
+  }
+  if (elapsed + FULL_WALK_TOLERANCE_S >= configured) return { status: "完成", kind: "finished" };
+  return { status: `已停止（${Math.round(elapsed)}/${configured} 秒）`, kind: "stopped" };
+}
+
 function sortKey(record) {
   return dateOf(record)?.getTime() ?? -Infinity;
 }
 
 export function toRecordView(record) {
   const seconds = record?.protocolSeconds;
+  const outcome = recordOutcomeOf(record);
   return {
     ...record,
     id: record?.id,
     assessedAt: assessedAtOf(record),
     subjectLabel: subjectLabelOf(record?.subjectUuid),
     protocol: Number.isFinite(seconds) ? `${seconds} 秒` : NOT_RECORDED,
-    status: recordStatusOf(record?.complete),
+    status: outcome.status,
+    // 「已停止（5/60 秒）」的文案带着数字，按文案查配色会查不到。
+    // 配色查这个稳定的键，文案只管给人看。
+    statusKind: outcome.kind,
     reportVersion: record?.id ?? NOT_RECORDED,
     validSteps: Number.isFinite(record?.validSteps) ? record.validSteps : "未统计",
   };

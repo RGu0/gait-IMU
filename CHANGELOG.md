@@ -11,6 +11,30 @@
 
 ### 变更
 
+* **会话 `meta.json` 的 `protocol_config` 现在写两次，`integrity_report.complete` 的
+  口径被写清楚了（RAY-496）。** `SessionMeta` 的字段没变，`CONTRACT_VERSION` 因此不动。
+
+  改前只在建会话时写一次 —— 那一刻还没开走，`TimedWalk.elapsed_seconds` 停表后才有值，
+  于是磁盘上 `state` 恒为 `walking`、时长恒为 0。**走满 60 秒与第 5 秒手动停止落盘完全
+  相同**，而检测记录列表读 `integrity_report.complete` 判「完成」—— 那个字段说的是写队列
+  没丢块，不是协议走完了。
+
+  | 读法 | 改前 | 改后 |
+  | --- | --- | --- |
+  | 走满配置时长 | `state: walking`、`elapsed_seconds: 0` | `state: finished`、`elapsed_seconds ≈ duration_s` |
+  | 中途停止 | 同上，分不出来 | `state: finished`、`elapsed_seconds` 是实际秒数 |
+  | 安全停止（写盘失败等） | 同上 | `state: aborted` + `abort_reason` |
+  | 收尾前进程被杀 | 同上 | 仍是 `state: walking`（判据不变） |
+
+  连带：`abort()` 改为**先**让流程进中止态**再**收尾 —— 顺序不换，中止态就赶不上收尾那次
+  快照，「被安全停止」与「进程被杀」在磁盘上又会长得一样，而那正是 `abort()` 存在的理由。
+
+  新增 `extra.session_outcome.valid_steps`（收尾时抄下的左右步数之和）。`listRecords`
+  随之多出 `protocolState` / `elapsedSeconds` / `validSeconds` / `abortReason` / `validSteps`
+  五个字段；**本改动之前落盘的会话读到的是 `None`，不是 0** —— 0 会被读成「走了 0 秒」。
+
+  详见《05 数据格式规范》v1.9 §3.3。
+
 * **`report.json` 里两个字段的读数口径变了。** `cloud/chain.py` 的事件分割改用
   `analysis/events.py::detect_stance_intervals`（支撑相**区间**），此前走的是
   `refine_stance_edges`（零速区间的**边缘细化**）。

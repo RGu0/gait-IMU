@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { DeviceSupportScreen } from "./DeviceSupportScreen.jsx";
-import { RecordsScreen } from "./RecordsScreen.jsx";
+import { RecordsScreen, statusShapeOf } from "./RecordsScreen.jsx";
 import { ReportPreviewScreen } from "./ReportPreviewScreen.jsx";
 import { REPORT } from "./mockTerminalAdapter.js";
 
@@ -24,6 +24,18 @@ const support = { phone: "400-000-0000", terminalId: "T-KJ-0042", appVersion: "0
 describe("P-10a — the records list", () => {
   const renderList = (props = {}) =>
     render(<RecordsScreen records={records} onOpenRecord={vi.fn()} onNavigate={vi.fn()} {...props} />);
+
+  // RAY-496：「已停止（5/60 秒）」的文案带数字，按文案查配色查不到，
+  // 于是会落进兜底的绿勾 —— 一个中途停掉的检测画成绿勾比不画还糟。
+  it("已停止的会话不会落进兜底的绿勾", () => {
+    expect(statusShapeOf("完成", "finished")).toMatchObject({ tone: "success", icon: "check" });
+    const stopped = statusShapeOf("已停止（5/60 秒）", "stopped");
+    expect(stopped.tone).not.toBe("success");
+    expect(stopped.icon).not.toBe("check");
+    expect(statusShapeOf("已中断", "aborted")).toMatchObject({ tone: "warning" });
+    // 旧文案照旧查得到，不受新键影响。
+    expect(statusShapeOf("未通过质检", undefined)).toMatchObject({ tone: "warning" });
+  });
 
   it("shows a status with words and an icon, not colour alone", () => {
     renderList();

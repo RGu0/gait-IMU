@@ -6,6 +6,7 @@ import {
   recordStatusOf,
   subscribeEvents,
   TerminalFailure,
+  toRecordView,
 } from "./sidecarTerminalAdapter.js";
 import {
   CREATE_SUBJECT,
@@ -90,6 +91,17 @@ describe("数据形状翻成视图形状", () => {
 
   it("complete 三态各有各的话", () => {
     expect([true, false, null, undefined].map(recordStatusOf)).toEqual(["完成", "不完整", "未正常结束", "状态未知"]);
+  });
+
+  // RAY-496：走满与中途停止在这之前都显示「完成」，因为状态只看 complete，
+  // 而 complete 说的是写盘完整性。
+  it("走满协议的会话与第 5 秒停掉的会话不再共用一个状态", () => {
+    const outcome = { protocolSeconds: 60, complete: true, protocolState: "finished" };
+    const full = toRecordView({ ...outcome, id: "a", elapsedSeconds: 60, validSeconds: 60, validSteps: 81 });
+    const stopped = toRecordView({ ...outcome, id: "b", elapsedSeconds: 5, validSeconds: 5, validSteps: 6 });
+    expect(full.status).toBe("完成");
+    expect(stopped.status).toBe("已停止（5/60 秒）");
+    expect(stopped.validSteps).toBe(6);
   });
 
   it("deviceSupport 包成设备屏的 devices / support", async () => {

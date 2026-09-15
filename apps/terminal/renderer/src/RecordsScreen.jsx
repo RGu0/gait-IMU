@@ -24,9 +24,29 @@ const STATUS_TONE = {
   未正常结束: { tone: "warning", icon: "warning" },
 };
 
-function statusCell(status) {
-  const shape = STATUS_TONE[status] ?? { tone: "info", icon: "check" };
-  return DataTable.status({ ...shape, label: status });
+/**
+ * 会话结局的配色（RAY-496）。按 `statusKind` 查，不按文案查 —— 「已停止（5/60 秒）」
+ * 的文案里带着数字，按文案查永远查不到，然后落进兜底的绿勾，而一个中途停掉的检测
+ * 画成绿勾，比不画还糟。
+ *
+ * `stopped` 用 neutral 而不是 warning：操作员自己按的停止不是故障，它只是**不是**
+ * 一次完整检测。warning 留给真出了事的三种 —— 丢块、中断、没正常收尾 —— 否则
+ * 警告色出现得太频繁，就没人再看它。
+ */
+const KIND_TONE = {
+  finished: { tone: "success", icon: "check" },
+  stopped: { tone: "neutral", icon: "dot" },
+  aborted: { tone: "warning", icon: "warning" },
+  incomplete: { tone: "warning", icon: "warning" },
+  unfinished: { tone: "warning", icon: "warning" },
+};
+
+export function statusShapeOf(status, kind) {
+  return KIND_TONE[kind] ?? STATUS_TONE[status] ?? { tone: "info", icon: "check" };
+}
+
+function statusCell(status, row) {
+  return DataTable.status({ ...statusShapeOf(status, row?.statusKind), label: status });
 }
 
 const ANY = "全部";
