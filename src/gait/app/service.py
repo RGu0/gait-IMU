@@ -670,6 +670,16 @@ class TerminalService:
                     "state": "not_computed",
                     "reason": "主机侧同步在离线重算阶段产出",
                 },
+                # 重新快照，而不是沿用 `_meta_at_start()` 写下的那一份（RAY-496）。
+                # 那一份是**开走前**拍的：`TimedWalk.elapsed_seconds` 停表后才有值，
+                # 所以它的 `state` 恒为 `walking`、时长恒为 0。留着它，走满 60 秒与
+                # 第 5 秒手动停止在磁盘上就一模一样 —— 而两者都是真实会发生的结局。
+                #
+                # 进程被杀时这里根本不会执行，磁盘上留下的仍是开走前那份 `walking`，
+                # 于是「没正常收尾」继续自己说得清楚（与 `sync_report` 停在 pending 同理）。
+                protocol_config=self.walk.protocol_snapshot()
+                if self.walk
+                else meta.protocol_config,
             ),
         )
         self.capture = None
@@ -770,6 +780,22 @@ class TerminalService:
                     "source": provenance.get("source")
                     if isinstance(provenance, dict)
                     else None,
+                    # 会话结局（RAY-496）。`complete` 说的是「写队列没丢块」，
+                    # 回答不了「走满了没有」—— 下面这几个才回答得了。
+                    # 收尾前被杀的会话读到的是开走前那份快照（`state: walking`、
+                    # 时长 0），本 Issue 之前的旧会话则一个都读不到；两种情况都让
+                    # 渲染端自己判，这里不替它编。
+                    "protocolState": meta.protocol_config.get("state"),
+                    "elapsedSeconds": meta.protocol_config.get("elapsed_seconds"),
+                    "validSeconds": meta.protocol_config.get("valid_seconds"),
+                    "abortReason": meta.protocol_config.get("abort_reason"),
+                    # **没有 `validSteps`，这是有意的。** 手边唯一的步数是
+                    # `source.step_counts()`，而 `StepCounter` 的文档写明它「仅供显示…
+                    # 从不进报告、不进会话元数据，任何指标都不该从它算」。把它落进
+                    # 元数据、再填进列表的「有效步数」列，是拿一个采集界面用的粗数
+                    # 冒充分析口径的有效步 —— 那比现在的「未统计」更坏：空着是实话，
+                    # 填错了是假话，而且事后看不出来。真正的有效步数在 `core/` 里，
+                    # 要跑离线分析才有，不在本 scope 的边界内（RAY-496 验收记录）。
                 }
             )
         return records
@@ -1054,10 +1080,20 @@ class TerminalService:
         在此之前 `abort()` 只中止 `TimedWalk`，采集就那么挂着：写线程还在跑，元数据
         永远停在 pending，而 pending 的含义是「进程没了」。一个被安全停止的会话与一个
         被杀掉的进程在磁盘上因此长得一样，那正好把上个 scope 建立的判据毁掉。
+
+        ## 流程先进中止态，再收尾（RAY-496 调整）
+
+        `walk.abort()` 只改 `TimedWalk` 自己的状态机，不碰磁盘，所以把它挪到
+        `_close_capture()` 之前**不推迟任何收尾动作**，上一段的理由原样成立。
+
+        非挪不可，是因为收尾现在要重新快照 `protocol_config`：收尾时流程若还没进中止
+        态，落下的就仍是开走前那份 `state: "walking"` —— 于是「被安全停止」与「进程被
+        杀」在磁盘上又长回一样了，正是上一段要防的那件事。顺序换过来，磁盘上留下的是
+        `state: "aborted"` 加一条 `abort_reason`，说得出中断的是什么。
         """
         walk = self._require_walk()
-        self._close_capture()
         walk.abort(now, failure.message)
+        self._close_capture()
         self._aborted = failure.snapshot()
         self._event_seq += 1
         return protocol.event(
