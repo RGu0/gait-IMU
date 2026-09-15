@@ -15,7 +15,12 @@
   box-sizing: border-box;
   margin: 0 auto;
   color: #0F172A;
-  font-family: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", sans-serif;
+  /* Noto / 思源（同一套字形）排在最前：装了它的机器上，mac 与 Windows 出同样的
+     字宽、同样的分页。没装时退到各平台自带的中文字体 —— macOS 的 PingFang /
+     冰蓝黑体，Windows 的微软雅黑 —— 而不是落到一个没有中文字形的 sans-serif，
+     让 printToPDF 拿系统兜底字体去拼（RAY-224 pdf-export）。 */
+  font-family: "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
   font-size: 10.5pt;
   line-height: 1.6;
 }

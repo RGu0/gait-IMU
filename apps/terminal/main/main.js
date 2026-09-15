@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { registerReportExport } from "./reportExport.js";
 import { SidecarSupervisor, SidecarUnavailable } from "./sidecarSupervisor.js";
 import { resolveSidecarCommand } from "./sidecarCommand.js";
 import {
@@ -202,6 +203,14 @@ ipcMain.handle("gait:sidecar-request", async (_event, message) => {
     }
     throw error;
   }
+});
+
+// 报告导出 PDF 与打印（RAY-224）。逻辑与测试在 reportExport.js，这里只递真的 electron 对象。
+registerReportExport({
+  ipcMain,
+  dialog,
+  getWindow: () => (window && !window.isDestroyed() ? window : null),
+  getDocumentsDir: () => app.getPath("documents"),
 });
 
 app.whenReady().then(() => {

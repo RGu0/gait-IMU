@@ -179,6 +179,15 @@ describe("the page is built for A4, not for a screen", () => {
     expect(CSS).toMatch(/font-family:[^;]*Noto Sans SC/);
   });
 
+  it("names a CJK face that every shipped platform actually has", () => {
+    // Noto 不是 mac / Windows 自带的；没有平台字体兜底，导出的 PDF 就会用系统随便挑的字体。
+    const stack = CSS.match(/\.rp-page\s*\{[^}]*font-family:([^;]*);/)[1];
+    for (const face of ["PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC"]) {
+      expect(stack).toContain(`"${face}"`);
+    }
+    expect(stack.trim()).toMatch(/sans-serif$/);
+  });
+
   it("prints the professional-parameters footnote when the payload carries one", () => {
     // RAY-288 范围 1：双支撑期读数与生理双支撑期差约 100 ms，那是口径差不是异常。
     // 不印出来，读者会拿它跟文献直接比。

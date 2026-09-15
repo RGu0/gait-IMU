@@ -801,6 +801,54 @@ body {
 .preview-meta h1 { margin: 0; font: var(--text-h2); }
 .preview-actions { display: flex; gap: var(--space-3); }
 
+/* 打印 / printToPDF（RAY-224 pdf-export）。主进程对的是**当前这个页面**，所以打印时
+   只留报告那一张纸：应用栏、右侧信息栏、演示数据条、预览版条一律不出现在纸上。
+   预览的 zoom 0.72、阴影、灰底、内边距都是给屏幕看的外框，打印时全部还原 ——
+   页边距只由 report.css 的 `@page { margin: 18mm }` 决定，这里不重复声明 @page，
+   也不碰 .rp-* 的任何版式（R-4：模板是唯一来源）。
+   祖先一律 display: block、高度自然、不裁剪：预览时 .preview-body 被钉在视口高度且
+   overflow: hidden，照搬到打印会只出第一页。 */
+@media print {
+  html,
+  body,
+  #root {
+    min-height: 0;
+    height: auto;
+    overflow: visible;
+    background: #fff;
+  }
+
+  #root:has(.report-preview-page) > :not(.report-preview-page),
+  .report-preview-page .app-bar,
+  .report-preview-page .preview-meta {
+    display: none !important;
+  }
+
+  .report-preview-page,
+  .report-preview-page .preview-body,
+  .report-preview-page .preview-pane {
+    display: block;
+    min-height: 0;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .report-preview-page .preview-sheet {
+    zoom: 1;
+    width: auto;
+    min-height: 0;
+    padding: 0;
+    box-shadow: none;
+    background: none;
+  }
+}
+
 /* ── P-10c devices and support ────────────────────────────────────── */
 
 .module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
