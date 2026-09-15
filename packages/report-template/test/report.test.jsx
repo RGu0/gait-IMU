@@ -6,7 +6,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ReportDocument } from "../index.js";
+import { ReportDocument, joinAnnotations } from "../index.js";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const CSS = fs.readFileSync(path.join(DIR, "..", "report.css"), "utf8");
@@ -124,6 +124,27 @@ describe("section order is the one PRD §12 fixes", () => {
     const markup = html();
     expect(markup.indexOf("受试者使用了拄拐")).toBeGreaterThan(markup.indexOf("步态检测报告"));
     expect(markup.indexOf("受试者使用了拄拐")).toBeLessThan(markup.indexOf("筛查摘要"));
+  });
+
+  it("joins notes that already end in 。 without doubling the punctuation", () => {
+    // RAY-493 B3：sidecar 给的每条标注都以「。」结尾，直接 join("；") 会印出「。；」。
+    const notes = [
+      "预览版：出厂标定参数未匹配，按预览策略放行；数值不作为评估依据。",
+      "演示数据（合成/回放），非实测。",
+      "本次报告由采集端就地重算。",
+    ];
+    const markup = renderToStaticMarkup(<ReportDocument report={{ ...report, annotations: notes }} />);
+    const strip = markup.match(/<p class="rp-annotation">([^<]*)<\/p>/)[1];
+    expect(strip).toBe(
+      "预览版：出厂标定参数未匹配，按预览策略放行；数值不作为评估依据；演示数据（合成/回放），非实测；本次报告由采集端就地重算。",
+    );
+    expect(strip).not.toMatch(/[。；.]{2}/);
+  });
+
+  it("ends a single unpunctuated note with 。 and skips blank notes", () => {
+    expect(joinAnnotations(["受试者使用了拄拐"])).toBe("受试者使用了拄拐。");
+    expect(joinAnnotations(["A.", "  ", "B；"])).toBe("A；B。");
+    expect(joinAnnotations([])).toBe("");
   });
 });
 
