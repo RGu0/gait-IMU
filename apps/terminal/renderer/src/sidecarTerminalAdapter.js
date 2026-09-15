@@ -49,7 +49,149 @@ export class TerminalFailure extends Error {
   }
 }
 
-export function createSidecarAdapter(transport, { now = () => Date.now() / 1000 } = {}) {
+/**
+ * 视图形状归渲染端（RAY-493）。
+ *
+ * sidecar 返回的是**数据**形状（`subjectUuid`、`protocolSeconds`、`modules`），界面
+ * 读的是**视图**形状（`maskedId`、`protocol`、`devices.modules`）。翻译只在这里做一次：
+ * 散在各屏里各翻一遍，就是每一屏各自在真 sidecar 上崩一次的原因 —— mock 恰好直接
+ * 给视图形状，所以浏览器里从来看不出来。
+ *
+ * 缺字段时给**说得出含义的文字**（「未提供」「未记录」），不给空白、0 或破折号 ——
+ * 那三者在屏上读起来都像一个测到的值。
+ */
+export const SUBJECT_UNKNOWN = "未提供";
+export const NOT_RECORDED = "未记录";
+export const NOT_CONFIGURED = "未配置";
+
+/** 临时受检者的显示标签：uuid 前 4 位。不含任何身份明文（FR-02）。 */
+export function subjectLabelOf(subjectUuid) {
+  if (typeof subjectUuid !== "string" || subjectUuid.length === 0) return SUBJECT_UNKNOWN;
+  return `临时-${subjectUuid.slice(0, 4).toUpperCase()}`;
+}
+
+const SESSION_ID_TIME = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/;
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function dateOf(record) {
+  if (typeof record?.createdAt === "string") {
+    const parsed = new Date(record.createdAt);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  if (typeof record?.id === "string") {
+    const m = SESSION_ID_TIME.exec(record.id);
+    if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  }
+  return null;
+}
+
+/** 会话时间：优先 `createdAt`（ISO），否则从会话 id `YYYYMMDDTHHMMSSZ-xxxx` 解出。本地时间显示。 */
+export function assessedAtOf(record) {
+  const date = dateOf(record);
+  if (!date) return NOT_RECORDED;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** `complete` 三态：true 完成 / false 采集不完整 / null 进程没正常收尾。字段缺失另说。 */
+export function recordStatusOf(complete) {
+  if (complete === true) return "完成";
+  if (complete === false) return "不完整";
+  if (complete === null) return "未正常结束";
+  return "状态未知";
+}
+
+function sortKey(record) {
+  return dateOf(record)?.getTime() ?? -Infinity;
+}
+
+export function toRecordView(record) {
+  const seconds = record?.protocolSeconds;
+  return {
+    ...record,
+    id: record?.id,
+    assessedAt: assessedAtOf(record),
+    subjectLabel: subjectLabelOf(record?.subjectUuid),
+    protocol: Number.isFinite(seconds) ? `${seconds} 秒` : NOT_RECORDED,
+    status: recordStatusOf(record?.complete),
+    reportVersion: record?.id ?? NOT_RECORDED,
+    validSteps: Number.isFinite(record?.validSteps) ? record.validSteps : "未统计",
+  };
+}
+
+export function toRecordViews(records) {
+  if (!Array.isArray(records)) return [];
+  return [...records]
+    .sort((a, b) => sortKey(b) - sortKey(a))
+    .map(toRecordView);
+}
+
+function toUploadSummary(summary) {
+  const raw = summary && typeof summary === "object" ? summary : {};
+  const pendingCount = Number.isFinite(raw.pending) ? raw.pending : raw.sessions;
+  return {
+    ...raw,
+    pending: Number.isFinite(pendingCount) ? pendingCount : 0,
+  };
+}
+
+function toModuleView(module) {
+  return {
+    ...module,
+    firmware: module?.firmware ?? NOT_RECORDED,
+    lastConnected: module?.lastConnected ?? NOT_RECORDED,
+    factoryCalibrated: Boolean(module?.factoryCalibrated),
+  };
+}
+
+export function toDeviceSupportView(raw) {
+  if (raw?.devices && raw?.support) return raw;
+  const modules = Array.isArray(raw?.modules) ? raw.modules.map(toModuleView) : [];
+  const battery = (side) => modules.find((m) => m.side === side)?.batteryPercent;
+  return {
+    devices: {
+      leftBattery: battery("left"),
+      rightBattery: battery("right"),
+      modules,
+    },
+    support: {
+      phone: NOT_CONFIGURED,
+      terminalId: NOT_CONFIGURED,
+      appVersion: NOT_CONFIGURED,
+      algoVersion: NOT_CONFIGURED,
+      ...(raw?.support ?? {}),
+    },
+    ipcContractVersion: raw?.ipcContractVersion,
+  };
+}
+
+export function toSubjectView(raw) {
+  return {
+    ageBand: SUBJECT_UNKNOWN,
+    sex: SUBJECT_UNKNOWN,
+    lastAssessedAt: "无检测记录",
+    lastProtocolSeconds: null,
+    consentValid: false,
+    ...raw,
+    maskedId: raw?.maskedId ?? subjectLabelOf(raw?.subjectUuid),
+  };
+}
+
+/** 步数键：sidecar 说 left/right；万一给的是足标签 L/R 也认。 */
+function toSides(value) {
+  if (!value || typeof value !== "object") return undefined;
+  return {
+    left: value.left ?? value.L,
+    right: value.right ?? value.R,
+  };
+}
+
+export function createSidecarAdapter(
+  transport,
+  { now = () => Date.now() / 1000, events = null, recentLimit = 5 } = {},
+) {
   let counter = 0;
 
   async function call(method, params = {}) {
@@ -76,23 +218,56 @@ export function createSidecarAdapter(transport, { now = () => Date.now() / 1000 
     return value && typeof value === "object" && value.unimplemented ? value.unimplemented : null;
   }
 
+  async function listRecords() {
+    return toRecordViews(await call("listRecords"));
+  }
+
+  async function snapshot() {
+    const raw = await call("snapshot");
+    // 最近记录拉不到不挡工作台：工作台是「开始检测」的入口，不该被一张列表拖住。
+    let recentRecords = [];
+    try {
+      recentRecords = (await listRecords()).slice(0, recentLimit);
+    } catch {
+      recentRecords = [];
+    }
+    return {
+      ...raw,
+      deviceSummary: {
+        ready: false,
+        issues: [],
+        ...(raw?.deviceSummary ?? {}),
+      },
+      uploadSummary: toUploadSummary(raw?.uploadSummary),
+      recentRecords,
+    };
+  }
+
   return {
     call,
     gapOf,
 
     describe: () => call("describe"),
-    snapshot: () => call("snapshot"),
+    snapshot,
     login: ({ organization, password }) => call("login", { organization, password }),
     recheckDevices: () => call("recheckDevices"),
-    createSubject: () => call("createSubject"),
-    listRecords: () => call("listRecords"),
-    deviceSupport: () => call("deviceSupport"),
+    createSubject: async () => toSubjectView(await call("createSubject")),
+    listRecords,
+    deviceSupport: async () => toDeviceSupportView(await call("deviceSupport")),
 
     // 真实后端：三态电量准入、到达率、出厂标定、磁盘
     runPreflight: () => call("runPreflight"),
 
-    // 真实后端：TimedWalk
-    startSession: () => call("startSession", { now: now() }),
+    // 真实后端：TimedWalk。受检者 uuid 随会话落进元数据。
+    startSession: async (subject) => {
+      const params = { now: now() };
+      if (subject?.subjectUuid) params.subjectUuid = subject.subjectUuid;
+      const started = await call("startSession", params);
+      if (gapOf(started)) return started;
+      const steps = toSides(started?.steps);
+      const link = toSides(started?.link);
+      return { ...started, ...(steps ? { steps } : {}), ...(link ? { link } : {}) };
+    },
     stopSession: () => call("stopSession", { now: now() }),
 
     // 真实后端：TimedWalk.verdict + summarize_session
@@ -104,8 +279,14 @@ export function createSidecarAdapter(transport, { now = () => Date.now() / 1000 
 
     // RAY-345：报告已接通。record 来自 listRecords（含 id=sessionId）；缺省时
     // sidecar 用当前会话（startSession 之后）。swapped 是佩戴确认里的一键对调。
-    reportFor: (record) =>
-      call("reportFor", { sessionId: record?.id, swapped: record?.swapped ?? false }),
+    reportFor: (record) => {
+      const params = { sessionId: record?.id, swapped: record?.swapped ?? false };
+      if (record?.subjectLabel) params.subjectLabel = record.subjectLabel;
+      return call("reportFor", params);
+    },
+
+    /** 采集中的实时值（P-08）。桥接没给事件源时，诚实地什么也不推。 */
+    subscribeSession: (onUpdate) => (events ? subscribeEvents(events, onUpdate) : () => {}),
   };
 }
 
@@ -122,16 +303,21 @@ export function subscribeEvents(source, onUpdate) {
     if (event.kind !== "event") return;
     if (event.seq <= last) return; // 迟到或重放的事件不能让计数倒退
     last = event.seq;
+    const payload = event.payload ?? {};
     if (event.topic === "session.tick") {
-      onUpdate({
-        remainingSeconds: event.payload.remainingSeconds,
-        steps: event.payload.steps,
-        link: event.payload.link,
-      });
+      // 缺的字段不带出去：`{ steps: undefined }` 合进 live 会把上一拍的步数抹掉，
+      // 下一次渲染就在 `live.steps.left` 上崩。
+      const update = {};
+      if (payload.remainingSeconds !== undefined) update.remainingSeconds = payload.remainingSeconds;
+      const steps = toSides(payload.steps);
+      if (steps) update.steps = steps;
+      const link = toSides(payload.link);
+      if (link) update.link = link;
+      onUpdate(update);
     } else if (event.topic === "session.notice") {
-      onUpdate({ notices: [event.payload.text] });
+      onUpdate({ notices: [payload.text] });
     } else if (event.topic === "session.aborted") {
-      onUpdate({ aborted: event.payload.error });
+      onUpdate({ aborted: payload.error });
     }
   });
   return unsubscribe;

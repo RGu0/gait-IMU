@@ -1,16 +1,26 @@
 import { Banner, BatteryPair, Button, DataTable, SideBadge, StatusPill } from "@gait/design-system";
 import { AppBar } from "./AppBar.jsx";
 
+const ATTENTION_STATUSES = new Set(["不完整", "未正常结束", "未通过质检"]);
+const PENDING_STATUSES = new Set(["待上传", "状态未知"]);
+
 function recordStatus(status) {
+  if (ATTENTION_STATUSES.has(status)) {
+    return DataTable.status({ tone: "warning", icon: "warning", label: status });
+  }
   return DataTable.status({
-    tone: status === "待上传" ? "info" : "success",
+    tone: PENDING_STATUSES.has(status) ? "info" : "success",
     icon: status === "待上传" ? "spinner" : "check",
     label: status,
   });
 }
 
 export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigate }) {
-  const { deviceSummary, uploadSummary, recentRecords } = snapshot;
+  const { deviceSummary, uploadSummary = {}, recentRecords = [] } = snapshot;
+  const issues = deviceSummary.issues ?? [];
+  // sidecar 没有上传队列时说「没在记账」，界面也照说，不报一个 0（见 service._upload_summary）。
+  const uploadTracked = uploadSummary.tracked !== false;
+  const pending = Number.isFinite(uploadSummary.pending) ? uploadSummary.pending : 0;
   const hasBattery = Number.isFinite(deviceSummary.leftBattery) && Number.isFinite(deviceSummary.rightBattery);
   const needsAttention = !deviceSummary.ready;
 
@@ -28,7 +38,7 @@ export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigat
           </StatusPill>
         </section>
 
-        {needsAttention ? deviceSummary.issues.map((issue) => (
+        {needsAttention ? issues.map((issue) => (
           <Banner key={issue} tone="warning" title="设备需要检查">{issue}</Banner>
         )) : null}
 
@@ -43,10 +53,14 @@ export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigat
           </article>
           <article className="hub-card">
             <h2>数据上传</h2>
-            <StatusPill tone="info" icon="spinner" spin={uploadSummary.pending > 0}>
-              待上传 {uploadSummary.pending} 条
-            </StatusPill>
-            <p>已上传 {uploadSummary.uploaded} 条记录</p>
+            {uploadTracked ? (
+              <StatusPill tone="info" icon="spinner" spin={pending > 0}>
+                待上传 {pending} 条
+              </StatusPill>
+            ) : (
+              <StatusPill tone="info" icon="check">本机未接入上传</StatusPill>
+            )}
+            {Number.isFinite(uploadSummary.uploaded) ? <p>已上传 {uploadSummary.uploaded} 条记录</p> : null}
           </article>
         </section>
 

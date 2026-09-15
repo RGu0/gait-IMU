@@ -213,3 +213,43 @@ describe("a failed check blocks, and says what to do", () => {
     expect(screen.getByText("左右模块电量")).toBeVisible();
   });
 });
+
+describe("RAY-493 — real sidecar item shapes", () => {
+  const waived = [
+    { id: "link-l", label: "左模块连接", status: "pass", hint: "已连接", error: null },
+    { id: "factory-cal", label: "出厂标定参数", status: "waived", hint: "预览版已豁免出厂标定", error: null },
+  ];
+
+  it("advances past a waived item, but says it was waived rather than all-green", async () => {
+    const onReady = vi.fn();
+    render(<PreflightScreen runChecks={async () => waived} onReady={onReady} dwellMs={10} />);
+    tickAllSafety();
+    expect(await screen.findByLabelText("已豁免")).toBeInTheDocument();
+    expect(screen.getByText("预览版已豁免出厂标定")).toBeVisible();
+    expect(screen.queryByText("设备已就绪")).not.toBeInTheDocument();
+    expect(screen.getByText(/出厂标定参数 已豁免/)).toBeVisible();
+    await waitFor(() => expect(onReady).toHaveBeenCalledOnce());
+  });
+
+  it("shows the sidecar's message, code and action when hint is null", async () => {
+    const failing = [
+      {
+        id: "disk", label: "磁盘空间", status: "fail", hint: null,
+        error: { code: "E-BLE-1020", message: "磁盘剩余 0.5 GB，不足以安全落盘。", action: "请清理磁盘后重新检查。" },
+      },
+    ];
+    render(<PreflightScreen runChecks={async () => failing} onReady={vi.fn()} />);
+    tickAllSafety();
+    expect(
+      await screen.findByText("磁盘剩余 0.5 GB，不足以安全落盘。（E-BLE-1020） 请清理磁盘后重新检查。"),
+    ).toBeVisible();
+  });
+
+  it("turns a rejected pre-check call into a blocking row instead of spinning forever", async () => {
+    const rejection = Object.assign(new Error("自检调用失败。"), { code: "E-BLE-1001", action: "请重新检查。" });
+    render(<PreflightScreen runChecks={() => Promise.reject(rejection)} onReady={vi.fn()} />);
+    tickAllSafety();
+    expect(await screen.findByText(/自检调用失败。（E-BLE-1001） 请重新检查。/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新检查" })).toBeVisible();
+  });
+});

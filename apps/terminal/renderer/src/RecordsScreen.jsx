@@ -18,6 +18,10 @@ const STATUS_TONE = {
   处理中: { tone: "info", icon: "spinner", spin: true },
   未通过质检: { tone: "warning", icon: "warning" },
   上传中: { tone: "info", icon: "spinner", spin: true },
+  // 真 sidecar 的会话三态（RAY-493）
+  完成: { tone: "success", icon: "check" },
+  不完整: { tone: "warning", icon: "warning" },
+  未正常结束: { tone: "warning", icon: "warning" },
 };
 
 function statusCell(status) {
