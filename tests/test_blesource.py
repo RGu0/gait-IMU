@@ -506,3 +506,49 @@ class TestConnectOrchestration:
             _wait_for(lambda: got == [b"after-reconnect"])
         finally:
             source.close()
+
+
+def test_one_foot_connected_still_reports_both_feet_and_preflight_does_not_raise():
+    """service 的标定准入与自检按「两只脚的键都在」来用读数，少一只就抛。
+
+    真实场景只有一种能走到「一只连着、一只没连」：连上后其中一只断链。
+    """
+    from gait.app.service import TerminalService
+
+    world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+    source = BleDeviceSource(ops=world.ops())
+    try:
+        assert source.refresh(timeout=5) == "connected"
+        loop = source._loop
+        assert loop is not None
+        loop.call_soon_threadsafe(world.transports["AA:00:00:00:00:02"].drop)
+        _wait_for(lambda: source.read_batteries()["R"] is None)
+
+        feet = {"L", "R"}
+        for reading in (
+            source.read_batteries(),
+            source.arrival_rates(),
+            source.link_grades(),
+            source.step_counts(),
+            source.device_readings(),
+            source.transports(),
+        ):
+            assert set(reading) == feet
+        assert source.read_batteries()["L"].percent == 80
+        assert source.arrival_rates()["R"] == 0.0
+        assert source.link_grades()["R"] == "bad"
+        right = source.device_readings()["R"]
+        assert set(right) == {"kind", "value", "provenance", "firmware"}
+        assert right["kind"] == "platform-address" and right["firmware"] == "unknown"
+        assert source.device_readings()["L"]["kind"] == "mac"
+        assert [m["side"] for m in source.module_info()] == ["left", "right"]
+
+        items = TerminalService(source=source).handle(
+            {"id": "1", "method": "runPreflight"}
+        )["result"]
+        by_id = {item["id"]: item for item in items}
+        assert by_id["link-l"]["status"] == "pass"
+        assert by_id["link-r"]["status"] == "fail"
+        assert by_id["link-r"]["error"]["code"] == "E-BLE-1001"
+    finally:
+        source.close()

@@ -755,12 +755,17 @@ class BleDeviceSource:
         没连上的脚给一份如实标注的占位：`kind` 是 `platform-address`（不可移植），
         值说明未连接。它在参数库里必然查不到，出厂标定因此判不通过 —— 那正是
         「没连上就不能说标定匹配」的实话。
+
+        **断了链的脚同样给占位**，哪怕上次读到的身份还留着：service 在 `runPreflight`
+        与会话元数据里都按「每只脚都在、且读数代表此刻」来用它，一份过期身份会让
+        一只已断开的脚在标定准入上看起来是好的。其余读数方法同一口径：两只脚的键
+        永远都在，没连上就是电量 `None`、到达率 0、链路 `bad`。
         """
         readings: dict[str, dict[str, str]] = {}
         with self._lock:
             for label in FEET:
                 foot = self._feet.get(label)
-                if foot is None or foot.identity is None:
+                if foot is None or foot.identity is None or not self._connected(label):
                     readings[label] = {
                         "kind": "platform-address",
                         "value": f"unconnected-{label}",
