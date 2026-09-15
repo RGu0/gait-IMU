@@ -175,6 +175,9 @@ export function ResultScreen({ result, onNextSubject, onOpenReport, onRetry, onB
         {!result.fullReportReady ? (
           <span className="result-actions__note">完整报告生成后可查看。</span>
         ) : null}
+        {onBackToHub ? (
+          <Button variant="secondary" onClick={onBackToHub}>返回工作台</Button>
+        ) : null}
       </footer>
     </div>
   );

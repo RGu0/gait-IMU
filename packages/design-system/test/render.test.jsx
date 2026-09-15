@@ -197,6 +197,20 @@ describe("StatusPill — status never rests on color alone", () => {
   });
 });
 
+describe("ChecklistItem — a waived row is not a passed row", () => {
+  // A waived pre-check lets the session start, which is exactly why it must not
+  // borrow the pass look: an operator scanning for green would read it as checked.
+  it("labels itself as waived and uses the warning channel, not success", () => {
+    const waived = html(<ChecklistItem status="waived" label="出厂标定参数" hint="预览版已豁免" />);
+    const passed = html(<ChecklistItem status="pass" label="出厂标定参数" hint="已匹配" />);
+    expect(waived).toContain("已豁免");
+    expect(waived).toContain("--warning-fg");
+    expect(waived).not.toContain("--success-fg");
+    expect(waived).toContain("预览版已豁免");
+    expect(passed).not.toContain("已豁免");
+  });
+});
+
 describe("cross-file composition still resolves", () => {
   // Dialog imports Button, DataTable imports StatusPill, LinkStatus and
   // BatteryPair import SideBadge. A re-sync that renames or drops a file breaks

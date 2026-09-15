@@ -7,6 +7,7 @@ import "@gait/design-system/styles.css";
 import "@gait/report-template/report.css";
 import "./app.css";
 import { TerminalApp } from "./TerminalApp.jsx";
+import { ErrorBoundary } from "./ErrorBoundary.jsx";
 import { mockTerminalAdapter } from "./mockTerminalAdapter.js";
 import { createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 
@@ -27,7 +28,11 @@ export function selectAdapter(scope = globalThis) {
   const bridge = scope?.gaitSidecar;
   if (bridge?.request) {
     return {
-      adapter: createSidecarAdapter((request) => bridge.request(request)),
+      // `onEvent` 是 sidecar 推来的采集事件（tick / notice / aborted）。不传它，
+      // 采集页的步数与链路永远停在开局那一拍（RAY-493）。
+      adapter: createSidecarAdapter((request) => bridge.request(request), {
+        events: bridge.onEvent ? (handler) => bridge.onEvent(handler) : null,
+      }),
       mocked: false,
       lifecycle: bridge.onSidecarState ? { subscribe: bridge.onSidecarState } : null,
     };
@@ -45,7 +50,9 @@ if (typeof document !== "undefined" && document.getElementById("root")) {
           演示数据：未连接 sidecar，界面显示的不是真实采集结果。
         </div>
       ) : null}
-      <TerminalApp adapter={adapter} lifecycle={lifecycle} />
+      <ErrorBoundary>
+        <TerminalApp adapter={adapter} lifecycle={lifecycle} preview={!mocked} />
+      </ErrorBoundary>
     </React.StrictMode>,
   );
 }

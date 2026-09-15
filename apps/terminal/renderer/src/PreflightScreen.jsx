@@ -32,6 +32,21 @@ const SAFETY_ITEMS = [
 
 export const ALL_GREEN_DWELL_MS = 800;
 
+/**
+ * 真 sidecar 的失败项 `hint` 是 null，现象与动作在 `error` 里（RAY-493）。
+ * 只看 hint 的话，失败那一行右侧是空的 —— 操作员知道拦住了，却不知道该做什么。
+ */
+export function hintOf(check) {
+  if (check.hint) return check.hint;
+  const error = check.error;
+  if (!error) return undefined;
+  const parts = [error.message, error.code ? `（${error.code}）` : "", error.action ? ` ${error.action}` : ""];
+  return parts.join("").trim() || undefined;
+}
+
+/** 已豁免的项不拦路，但要被看见：它不是「通过」。 */
+const clears = (check) => check.status === "pass" || check.status === "waived";
+
 function SafetyItem({ item, checked, onToggle }) {
   return (
     <label className="safety-item">
@@ -58,6 +73,16 @@ export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_
     setChecks(null);
     try {
       setChecks(await runChecks());
+    } catch (error) {
+      // 自检调用本身失败（sidecar 拒绝或断开）：画成一条拦路项，而不是停在「正在检查」。
+      setChecks([
+        {
+          id: "preflight-call",
+          label: "设备自检",
+          status: "fail",
+          hint: hintOf({ error: { message: error?.notice?.message ?? error?.message, code: error?.code, action: error?.notice?.action ?? error?.action } }),
+        },
+      ]);
     } finally {
       setRunning(false);
     }
@@ -91,7 +116,8 @@ export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_
     }
   }
 
-  const allPassed = Boolean(checks?.length) && checks.every((check) => check.status === "pass");
+  const allPassed = Boolean(checks?.length) && checks.every(clears);
+  const waived = checks?.filter((check) => check.status === "waived") ?? [];
   const blocked = checks?.filter((check) => check.status === "fail") ?? [];
 
   useEffect(() => {
@@ -137,10 +163,15 @@ export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_
               key={check.id}
               status={check.status}
               label={check.label}
-              hint={check.hint}
+              hint={hintOf(check)}
             />
           ))}
-          {allPassed ? (
+          {allPassed && waived.length ? (
+            <Banner tone="warning" title="部分检查已豁免">
+              {waived.map((check) => check.label).join("、")} 已豁免，正在进入下一步。
+            </Banner>
+          ) : null}
+          {allPassed && !waived.length ? (
             <Banner tone="success" title="设备已就绪">
               全部通过，正在进入下一步。
             </Banner>
