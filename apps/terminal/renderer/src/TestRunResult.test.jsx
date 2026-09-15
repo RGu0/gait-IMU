@@ -281,6 +281,21 @@ describe("P-09 finished — C-7 and C-8", () => {
     expect(screen.getByRole("button", { name: "查看完整报告" })).toBeDisabled();
   });
 
+  it("offers a way back to the hub from a finished result (RAY-493)", () => {
+    const onBackToHub = vi.fn();
+    render(
+      <ResultScreen
+        result={VALID_RESULT}
+        onNextSubject={vi.fn()}
+        onOpenReport={vi.fn()}
+        onRetry={vi.fn()}
+        onBackToHub={onBackToHub}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
+    expect(onBackToHub).toHaveBeenCalledOnce();
+  });
+
   it("flags an assistive device for interpretation", () => {
     renderResult();
     expect(screen.getByText(/受试者使用了拄拐/)).toBeVisible();

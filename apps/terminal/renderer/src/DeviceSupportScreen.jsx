@@ -49,14 +49,18 @@ export function DeviceSupportScreen({ devices, support, onRecheck, onRepair, onN
         <h1>设备与支持</h1>
 
         <section className="module-grid" aria-label="采集模块">
-          {devices.modules.map((module) => (
+          {(devices.modules ?? []).map((module) => (
             <ModuleCard key={module.side} module={module} />
           ))}
         </section>
 
         <section className="device-battery" aria-label="模块电量">
           <h2>电量</h2>
-          <BatteryPair left={devices.leftBattery} right={devices.rightBattery} />
+          {Number.isFinite(devices.leftBattery) && Number.isFinite(devices.rightBattery) ? (
+            <BatteryPair left={devices.leftBattery} right={devices.rightBattery} />
+          ) : (
+            <p>电量未读取</p>
+          )}
         </section>
 
         <div className="device-actions">

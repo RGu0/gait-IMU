@@ -101,6 +101,16 @@ export function TestRunScreen({
     return () => clearInterval(id);
   }, [tickMs, live.aborted]);
 
+  // sidecar 的 tick 带着它自己算的剩余时间（RAY-493）。本地计时器在窗口失焦时会被
+  // 浏览器节流，而受试者还在走 —— 所以 sidecar 说剩得更少时以它为准。只往下收，
+  // 不往回拨：迟到的一拍不能让倒计时倒退。
+  const sidecarRemaining = live.remainingSeconds;
+  useEffect(() => {
+    if (!Number.isFinite(sidecarRemaining)) return;
+    const reported = Math.max(0, Math.ceil(sidecarRemaining));
+    setRemaining((current) => (reported < current ? reported : current));
+  }, [sidecarRemaining]);
+
   const ended = remaining === 0;
 
   // Deps are stable values only: `ended` flips once, `holdMs` is a number, and

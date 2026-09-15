@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, StatusPill } from "@gait/design-system";
 import { ConsentScreen } from "./ConsentScreen.jsx";
 import { DeviceSupportScreen } from "./DeviceSupportScreen.jsx";
@@ -16,6 +16,8 @@ import { CapabilityGap } from "./CapabilityGap.jsx";
 import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
 import { SidecarDownScreen } from "./SidecarDownScreen.jsx";
 import { AppBar } from "./AppBar.jsx";
+import { PreviewBanner } from "./PreviewBanner.jsx";
+import { ReportErrorScreen } from "./ReportErrorScreen.jsx";
 
 /**
  * Screens are selected by an explicit `stage` rather than by inferring one from
@@ -35,6 +37,7 @@ const STAGE = {
   records: "records",
   reportPreview: "reportPreview",
   deviceSupport: "deviceSupport",
+  reportError: "reportError",
 };
 
 /** Nav labels are the AppBar's contract; the mapping lives in one place. */
@@ -45,10 +48,45 @@ const NAV_STAGE = {
 };
 
 /**
+ * TestRunScreen 读的每一个字段。sidecar 的 `startSession` 只给计时与步数，
+ * 缺的那几样在这里补齐 —— 补在屏外，因为屏是会话的视图，不负责猜会话的形状。
+ */
+const LIVE_DEFAULTS = Object.freeze({
+  instruction: "",
+  steps: { left: 0, right: 0 },
+  // 没拿到链路读数时按 sidecar 自己的约定记「差」，不替它报「好」。
+  link: { left: "bad", right: "bad" },
+  footfalls: { left: [], right: [] },
+  notices: [],
+  aborted: null,
+});
+
+export const SNAPSHOT_RETRY_MS = 1000;
+
+/**
  * `lifecycle` 是可选的：它由主进程提供（`window.gaitSidecar.onSidecarState`）。
  * 走 mock 时没有进程可看护，因此不传 —— 而不是造一个永远 ready 的假生命周期。
+ *
+ * `preview` 为真时每一屏顶部都有「预览版」条（真 sidecar 路径）；mock 路径由 main.jsx
+ * 自己的演示数据条负责，这里不重复。
  */
-export function TerminalApp({ adapter, lifecycle }) {
+export function TerminalApp({ adapter, lifecycle, preview = false, snapshotRetryMs = SNAPSHOT_RETRY_MS }) {
+  // 预览条要知道数据来源（`snapshot.source`）；快照归工作台，条只借它的 source 一读。
+  const [source, setSource] = useState(undefined);
+  return (
+    <>
+      {preview ? <PreviewBanner source={source} /> : null}
+      <TerminalStages
+        adapter={adapter}
+        lifecycle={lifecycle}
+        snapshotRetryMs={snapshotRetryMs}
+        onSnapshot={(snap) => setSource(snap?.source)}
+      />
+    </>
+  );
+}
+
+function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
   const [snapshot, setSnapshot] = useState(null);
   // 最小 MVP 无登录（P-00 暂不考虑）：冷启动直接进工作台。
   const [stage, setStage] = useState(STAGE.hub);
@@ -68,48 +106,89 @@ export function TerminalApp({ adapter, lifecycle }) {
   // sidecar 的进程状态。null 表示「没有进程可看护」（mock 路径），
   // 与「进程状态未知」不是一回事，所以不给它一个默认的 ready。
   const [sidecar, setSidecar] = useState(null);
+  // 报告/收尾失败（RAY-493）。之前 reportFor 的拒绝没人接，界面就停在采集页上。
+  const [reportError, setReportError] = useState(null);
+  // lifecycle 每回到 ready 一次就重拉一次快照：sidecar 重启后旧快照已不可信。
+  const [snapshotEpoch, setSnapshotEpoch] = useState(0);
+  const lastSidecarState = useRef(null);
+  // 收尾开始后 sidecar 仍会继续推 remainingSeconds: 0 的 tick，直到 stopSession 落地。
+  // 那些 tick 不再属于这一场，也不能让收尾被触发第二次。
+  const finishingRef = useRef(false);
 
   async function navigate(label) {
     const next = NAV_STAGE[label];
     if (!next) return;
-    if (next === STAGE.records) setRecords(await adapter.listRecords());
-    if (next === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
+    try {
+      if (next === STAGE.records) setRecords(await adapter.listRecords());
+      if (next === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
+    } catch (error) {
+      if (next === STAGE.records) setRecords([]);
+      if (next === STAGE.deviceSupport) {
+        setReportError({ error, retryStage: null });
+        setStage(STAGE.reportError);
+        return;
+      }
+    }
     setStage(next);
   }
 
   useEffect(() => {
     if (!lifecycle?.subscribe) return undefined;
-    return lifecycle.subscribe(setSidecar);
+    return lifecycle.subscribe((next) => {
+      setSidecar(next);
+      const previous = lastSidecarState.current;
+      lastSidecarState.current = next?.state ?? null;
+      if (next?.state === "ready" && previous !== null && previous !== "ready") {
+        setSnapshotEpoch((epoch) => epoch + 1);
+      }
+    });
   }, [lifecycle]);
 
-  // 冷启动直接进工作台（无登录）：快照在挂载时拉取一次，之后由「重新检查」刷新。
+  // 冷启动直接进工作台（无登录）：快照在挂载时拉取，失败就隔一会儿再拉，直到拿到为止。
+  // 原先失败一次就放弃，而占位屏上没有任何按钮 —— sidecar 起得比窗口慢一点，
+  // 界面就永远停在「正在连接采集服务…」。
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer = null;
+    const load = async () => {
       try {
         const snap = await adapter.snapshot();
         if (!cancelled) setSnapshot(snap);
       } catch {
-        // 快照失败不挡路：工作台留空，操作员可点「重新检查」再拉。
-        if (!cancelled) setSnapshot(null);
+        if (!cancelled) timer = setTimeout(load, snapshotRetryMs);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [adapter]);
+    };
+    load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [adapter, snapshotRetryMs, snapshotEpoch]);
+
+  const onSnapshotRef = useRef(onSnapshot);
+  onSnapshotRef.current = onSnapshot;
+  useEffect(() => {
+    if (snapshot) onSnapshotRef.current?.(snapshot);
+  }, [snapshot]);
 
   // The live sidebar values arrive while the walk is happening. They are held
   // here rather than inside TestRunScreen so that screen stays a view of a
   // session it does not own — the session outlives any one render of it.
   useEffect(() => {
     if (stage !== STAGE.running || !adapter.subscribeSession) return undefined;
-    return adapter.subscribeSession((update) =>
-      setLive((current) => (current ? { ...current, ...update } : current)),
-    );
+    return adapter.subscribeSession((update) => {
+      if (finishingRef.current) return;
+      setLive((current) => (current ? { ...current, ...update } : current));
+    });
   }, [stage, adapter]);
 
   async function handleRecheck() {
-    await adapter.recheckDevices();
-    setSnapshot(await adapter.snapshot());
+    try {
+      await adapter.recheckDevices();
+      setSnapshot(await adapter.snapshot());
+    } catch {
+      // 重查失败时保留上一份快照；下一次点击会再试。
+    }
   }
 
   function confirmSubject(chosen) {
@@ -126,8 +205,35 @@ export function TerminalApp({ adapter, lifecycle }) {
     setStage(STAGE.consent);
   }
 
-  function startWalk() {
-    setLive(adapter.startSession());
+  function toHub() {
+    setResult(null);
+    setReport(null);
+    setReportGap(null);
+    setReportError(null);
+    setLive(null);
+    setStage(STAGE.hub);
+  }
+
+  function failed(error, retryStage, title) {
+    setReportError({ error, retryStage, title });
+    setStage(STAGE.reportError);
+  }
+
+  /**
+   * 真 sidecar 的 startSession 是异步的。以前这里把 Promise 直接塞进 live，
+   * TestRunScreen 在 `live.steps.left` 上当场崩。
+   */
+  async function startWalk() {
+    let started;
+    try {
+      started = await adapter.startSession(subject);
+    } catch (error) {
+      failed(error, STAGE.preflight, "检测未能开始");
+      return;
+    }
+    finishingRef.current = false;
+    const totalSeconds = started?.totalSeconds ?? started?.remainingSeconds ?? snapshot?.protocolSeconds ?? 0;
+    setLive({ ...LIVE_DEFAULTS, ...started, totalSeconds });
     setStage(STAGE.running);
   }
 
@@ -135,11 +241,49 @@ export function TerminalApp({ adapter, lifecycle }) {
    * 打开一份报告：缺省用当前会话，records 路径传 record（含 id=sessionId）。
    * `swapped` 是佩戴确认里的一键对调，决定 sidecar 读哪一侧的录制。
    */
-  async function openReport(record) {
-    const opened = await adapter.reportFor(record);
+  async function openReport(record, retryStage = null) {
+    let opened;
+    try {
+      opened = await adapter.reportFor(record);
+    } catch (error) {
+      failed(error, retryStage);
+      return;
+    }
     if (opened?.unimplemented) setReportGap(opened.unimplemented);
     else setReport(opened);
     setStage(STAGE.reportPreview);
+  }
+
+  // 放在所有分支最前面：sidecar 不在时，别的屏上每一个按钮点下去都只会再失败
+  // 一次，让它们看起来还能用才是真正的伤害。
+  if (sidecar && (sidecar.state === "unavailable" || sidecar.state === "restarting")) {
+    return (
+      <SidecarDownScreen
+        notice={sidecar.notice ?? { message: "采集服务正在启动。", action: "请稍候。", recoverable: true }}
+        onRetry={() => setStage(STAGE.hub)}
+      />
+    );
+  }
+
+  if (stage === STAGE.reportError && reportError) {
+    const { retryStage } = reportError;
+    return (
+      <ReportErrorScreen
+        error={reportError.error}
+        title={reportError.title}
+        onBackToHub={toHub}
+        onRetry={
+          retryStage
+            ? () => {
+                setReportError(null);
+                setResult(null);
+                setLive(null);
+                setStage(subject ? retryStage : STAGE.subject);
+              }
+            : null
+        }
+      />
+    );
   }
 
   if (stage === STAGE.subject) {
@@ -211,16 +355,33 @@ export function TerminalApp({ adapter, lifecycle }) {
         live={live}
         onFinish={async () => {
           // 先收尾落盘，再判定、再生成报告 —— 顺序反了报告读到的是未排空的录制。
-          await adapter.stopSession();
-          const sessionResult = await adapter.sessionResult({ wearing });
+          if (finishingRef.current) return;
+          finishingRef.current = true;
+          let sessionResult;
+          try {
+            await adapter.stopSession();
+            sessionResult = await adapter.sessionResult({ wearing });
+          } catch (error) {
+            failed(error, STAGE.preflight);
+            return;
+          }
           setResult(sessionResult);
-          if (sessionResult.report?.status === "ready") {
-            await openReport({ swapped });
+          if (sessionResult?.report?.status === "ready") {
+            await openReport({ swapped, subjectLabel: subject?.maskedId }, STAGE.preflight);
           } else {
             setStage(STAGE.result);
           }
         }}
-        onAbort={() => {
+        onAbort={async () => {
+          // 操作员停止或 sidecar 已中止：都要让 sidecar 收尾，否则采集一直开着。
+          // 已中止的会话再 stop 会被拒 —— 那个拒绝不影响回工作台。
+          if (finishingRef.current) return;
+          finishingRef.current = true;
+          try {
+            await adapter.stopSession?.();
+          } catch {
+            // ignore
+          }
           setLive(null);
           setStage(STAGE.hub);
         }}
@@ -242,7 +403,7 @@ export function TerminalApp({ adapter, lifecycle }) {
           {result.error ? <p className="invalid-advice">{result.error.action}</p> : null}
           <div className="invalid-actions">
             <Button size="lg" onClick={() => { setResult(null); startWalk(); }}>重新检测</Button>
-            <Button variant="secondary" onClick={() => { setResult(null); setStage(STAGE.hub); }}>
+            <Button variant="secondary" onClick={toHub}>
               返回工作台
             </Button>
           </div>
@@ -263,7 +424,7 @@ export function TerminalApp({ adapter, lifecycle }) {
           setSwapped(false);
           setStage(STAGE.subject);
         }}
-        onOpenReport={() => openReport({ swapped })}
+        onOpenReport={() => openReport({ swapped, subjectLabel: subject?.maskedId }, STAGE.preflight)}
         onRetry={() => {
           setResult(null);
           startWalk();
@@ -282,17 +443,6 @@ export function TerminalApp({ adapter, lifecycle }) {
         records={records}
         onNavigate={navigate}
         onOpenRecord={(record) => openReport(record)}
-      />
-    );
-  }
-
-  // 放在所有分支最前面：sidecar 不在时，别的屏上每一个按钮点下去都只会再失败
-  // 一次，让它们看起来还能用才是真正的伤害。
-  if (sidecar && (sidecar.state === "unavailable" || sidecar.state === "restarting")) {
-    return (
-      <SidecarDownScreen
-        notice={sidecar.notice ?? { message: "采集服务正在启动。", action: "请稍候。", recoverable: true }}
-        onRetry={() => setStage(STAGE.hub)}
       />
     );
   }
@@ -323,8 +473,8 @@ export function TerminalApp({ adapter, lifecycle }) {
   if (stage === STAGE.deviceSupport && deviceInfo) {
     return (
       <DeviceSupportScreen
-        devices={deviceInfo.devices}
-        support={deviceInfo.support}
+        devices={deviceInfo.devices ?? { modules: deviceInfo.modules ?? [] }}
+        support={deviceInfo.support ?? {}}
         onNavigate={navigate}
         onRecheck={handleRecheck}
         onRepair={() => {}}
