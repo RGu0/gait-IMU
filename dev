@@ -8,6 +8,21 @@ cd "$(dirname "$0")"
 # 有同一个显式前提，比让它们各自依赖平台默认好：后者正是 Windows 侧崩溃的成因。
 export PYTHONUTF8=1
 
+# 索引隔离（RAY-483）。本机若在 ~/.config/uv/uv.toml 里设了镜像（如 aliyun 且
+# default = true），它会改写 uv.lock 比对时所用的索引来源，于是 `uv sync --locked`
+# 报一个**假的**「lockfile 需要更新」—— 锁其实没过期，别去跑 `uv lock`。
+#
+# 用 UV_CONFIG_FILE 指向空设备，**不要**用 UV_NO_CONFIG=1：后者除了停用 uv.toml，
+# 还会**一并停用 .python-version 的发现**，新建的 .venv 会落到最新解释器（本机
+# 实测 3.14.7）上，随后 pyobjc 因无 cp314 wheel 退回 sdist，报出一条指向
+# `pkg_resources` 的误导性错误。两个变量对索引的隔离效果相同，只有这一个保留 pin。
+# 解法出自 techflex-cloud-foundation 的 RAY-400，已在本仓库复验。
+#
+# 已核：空配置文件不会遮蔽本项目 pyproject.toml 的 [tool.uv.sources] —— `uv lock
+# --check` 通过，而 wt901 未发布到 PyPI，它能解析出来就证明 sources 被读到了。
+# 若将来在 pyproject.toml 里新增 [tool.uv] 的其他子表，这一条要重新验。
+export UV_CONFIG_FILE=/dev/null
+
 # Node 侧与 Python 侧对称。
 #
 # `uv run --locked` 自己按 .python-version 解析解释器，不看调用方的 PATH，

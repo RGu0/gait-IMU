@@ -104,9 +104,10 @@ def test_no_session_root_means_explicitly_not_writing(tmp_path: Path) -> None:
 
 
 def _sidecar(root: Path, *, feed_hz: float) -> subprocess.Popen:
+    # 这里起的是 `sys.executable -m gait.app`，**不经 uv**，所以不设任何 UV_* 变量。
+    # 此前这里有一条 UV_NO_CONFIG=1，是从经 uv 起进程的地方抄来的死代码（RAY-483 删除）。
     environment = {
         **os.environ,
-        "UV_NO_CONFIG": "1",
         "PYTHONUTF8": "1",
         "GAIT_SESSION_ROOT": str(root),
         "GAIT_STUB_FEED_HZ": str(feed_hz),

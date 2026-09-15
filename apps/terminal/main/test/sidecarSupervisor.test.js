@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { UV_CONFIG_FILE_NULL } from "../sidecarCommand.js";
 
 import {
   MAX_CONSECUTIVE_RESTARTS,
@@ -166,7 +167,8 @@ describe("真实 Python sidecar", () => {
       command: "uv",
       args: ["run", "--locked", "python", "-m", "gait.app"],
       cwd: repoRoot,
-      env: { ...process.env, UV_NO_CONFIG: "1", PYTHONUTF8: "1" },
+      // 取值与产品路径共用（RAY-483）；不用 UV_NO_CONFIG，它会连 .python-version 一起关掉。
+      env: { ...process.env, UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
       requestTimeoutMs: 60_000,
     });
     live.push(supervisor);
