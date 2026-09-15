@@ -65,6 +65,12 @@ app.whenReady().then(async () => {
     if (preloadError) throw new Error(`preload 加载失败：${preloadError.message ?? preloadError}`);
     if (bridge !== "onEvent,onSidecarState,request") throw new Error(`桥接不完整：「${bridge}」`);
     process.stdout.write(`bridge: ${bridge}\n`);
+    // 外壳桥（RAY-224）：多暴露一个键就是红线 R-1 变宽了，所以按全集比对。
+    const shell = await window.webContents.executeJavaScript(
+      "Object.keys(window.gaitShell ?? {}).sort().join(',')",
+    );
+    if (shell !== "exportReportPdf,printReport") throw new Error(`外壳桥不符：「${shell}」`);
+    process.stdout.write(`shell bridge: ${shell}\n`);
 
     fs.mkdirSync(sessionRoot(userDataDir), { recursive: true });
     const command = resolveSidecarCommand({ packaged: false, repoRoot: REPO_ROOT });

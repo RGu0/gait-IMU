@@ -77,10 +77,11 @@ describe("P-10b — the preview renders the one template", () => {
     expect(sheet).not.toBeNull();
   });
 
-  it("disables export and print, and says why", () => {
+  it("disables export and print, and says why, when there is no shell bridge", () => {
     renderPreview();
-    // Both go through printToPDF, which lives in an Electron main process that
-    // does not exist yet. Offering them would be a promise the app cannot keep.
+    // Both go through printToPDF in the Electron main process; in a browser or
+    // under mock there is none. Offering them would be a promise the app cannot keep.
+    expect(globalThis.gaitShell).toBeUndefined();
     expect(screen.getByRole("button", { name: "导出 PDF" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "打印" })).toBeDisabled();
     expect(screen.getByText(/导出与打印由应用外壳提供/)).toBeVisible();

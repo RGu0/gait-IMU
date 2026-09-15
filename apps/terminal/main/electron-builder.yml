@@ -20,6 +20,8 @@ files:
   - sidecarSupervisor.js
   - sidecarCommand.js
   - runtimeConfig.js
+  # RAY-224 pdf-export：main.js import 的导出/打印模块。漏掉它，打包态主进程启动即 ERR_MODULE_NOT_FOUND。
+  - reportExport.js
   - package.json
   - from: ../renderer/dist
     to: renderer
