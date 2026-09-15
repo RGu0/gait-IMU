@@ -15,7 +15,15 @@ function recordStatus(status) {
   });
 }
 
-export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigate }) {
+export function HubScreen({
+  snapshot,
+  onRecheck,
+  onStartNewAssessment,
+  onNavigate,
+  rechecking = false,
+  recheckError = null,
+  onDismissRecheckError,
+}) {
   const { deviceSummary, uploadSummary = {}, recentRecords = [] } = snapshot;
   const issues = deviceSummary.issues ?? [];
   // sidecar 没有上传队列时说「没在记账」，界面也照说，不报一个 0（见 service._upload_summary）。
@@ -37,6 +45,12 @@ export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigat
             {needsAttention ? "设备需要检查" : "设备已就绪"}
           </StatusPill>
         </section>
+
+        {recheckError ? (
+          <Banner tone="warning" aria-label="重新检查设备失败" onClose={onDismissRecheckError}>
+            {recheckError}
+          </Banner>
+        ) : null}
 
         {needsAttention ? issues.map((issue) => (
           <Banner key={issue} tone="warning" title="设备需要检查">{issue}</Banner>
@@ -81,7 +95,9 @@ export function HubScreen({ snapshot, onRecheck, onStartNewAssessment, onNavigat
 
         <div className="hub-action">
           {needsAttention ? (
-            <Button size="lg" onClick={onRecheck}>重新检查设备</Button>
+            <Button size="lg" onClick={onRecheck} loading={rechecking} loadingText="正在重新检查…">
+              重新检查设备
+            </Button>
           ) : (
             <Button size="lg" onClick={onStartNewAssessment}>开始新的检测</Button>
           )}
