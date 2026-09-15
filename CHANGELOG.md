@@ -29,9 +29,12 @@
   连带：`abort()` 改为**先**让流程进中止态**再**收尾 —— 顺序不换，中止态就赶不上收尾那次
   快照，「被安全停止」与「进程被杀」在磁盘上又会长得一样，而那正是 `abort()` 存在的理由。
 
-  新增 `extra.session_outcome.valid_steps`（收尾时抄下的左右步数之和）。`listRecords`
-  随之多出 `protocolState` / `elapsedSeconds` / `validSeconds` / `abortReason` / `validSteps`
-  五个字段；**本改动之前落盘的会话读到的是 `None`，不是 0** —— 0 会被读成「走了 0 秒」。
+  `listRecords` 随之多出 `protocolState` / `elapsedSeconds` / `validSeconds` / `abortReason`
+  四个字段；**本改动之前落盘的会话读到的是 `None`，不是 0** —— 0 会被读成「走了 0 秒」。
+
+  **步数没有一起落盘**，检测记录的「有效步数」列仍是「未统计」：手边唯一的步数是
+  `source.step_counts()`，而 `StepCounter` 的文档写明它仅供显示、不进会话元数据、
+  任何指标都不该从它算。真正的有效步数在 `core/`，要跑离线分析才有。
 
   详见《05 数据格式规范》v1.9 §3.3。
 

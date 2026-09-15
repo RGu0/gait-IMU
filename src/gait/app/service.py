@@ -680,10 +680,6 @@ class TerminalService:
                 protocol_config=self.walk.protocol_snapshot()
                 if self.walk
                 else meta.protocol_config,
-                # 步数只活在设备源的计数器里，进程一走就没了。落在这里，
-                # 而不是塞进 `protocol_config` —— 后者是 `TimedWalk` 自己的快照，
-                # 往里加外人的字段会让「这份快照来自谁」不再有答案。
-                extra={**meta.extra, "session_outcome": {"valid_steps": sum(self._steps().values())}},
             ),
         )
         self.capture = None
@@ -772,7 +768,6 @@ class TerminalService:
             meta = read_meta(session_directory(self.session_root, session_id))
             complete = meta.integrity_report.get("complete")
             provenance = meta.extra.get("provenance") or {}
-            outcome = meta.extra.get("session_outcome") or {}
             records.append(
                 {
                     "id": session_id,
@@ -794,9 +789,13 @@ class TerminalService:
                     "elapsedSeconds": meta.protocol_config.get("elapsed_seconds"),
                     "validSeconds": meta.protocol_config.get("valid_seconds"),
                     "abortReason": meta.protocol_config.get("abort_reason"),
-                    "validSteps": outcome.get("valid_steps")
-                    if isinstance(outcome, dict)
-                    else None,
+                    # **没有 `validSteps`，这是有意的。** 手边唯一的步数是
+                    # `source.step_counts()`，而 `StepCounter` 的文档写明它「仅供显示…
+                    # 从不进报告、不进会话元数据，任何指标都不该从它算」。把它落进
+                    # 元数据、再填进列表的「有效步数」列，是拿一个采集界面用的粗数
+                    # 冒充分析口径的有效步 —— 那比现在的「未统计」更坏：空着是实话，
+                    # 填错了是假话，而且事后看不出来。真正的有效步数在 `core/` 里，
+                    # 要跑离线分析才有，不在本 scope 的边界内（RAY-496 验收记录）。
                 }
             )
         return records

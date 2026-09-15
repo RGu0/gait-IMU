@@ -97,11 +97,22 @@ describe("数据形状翻成视图形状", () => {
   // 而 complete 说的是写盘完整性。
   it("走满协议的会话与第 5 秒停掉的会话不再共用一个状态", () => {
     const outcome = { protocolSeconds: 60, complete: true, protocolState: "finished" };
-    const full = toRecordView({ ...outcome, id: "a", elapsedSeconds: 60, validSeconds: 60, validSteps: 81 });
-    const stopped = toRecordView({ ...outcome, id: "b", elapsedSeconds: 5, validSeconds: 5, validSteps: 6 });
+    const full = toRecordView({ ...outcome, id: "a", elapsedSeconds: 60, validSeconds: 60 });
+    const stopped = toRecordView({ ...outcome, id: "b", elapsedSeconds: 5, validSeconds: 5 });
     expect(full.status).toBe("完成");
     expect(stopped.status).toBe("已停止（5/60 秒）");
-    expect(stopped.validSteps).toBe(6);
+    // sidecar 不发 validSteps —— 手边唯一的步数是采集界面用的粗数，不是分析口径的
+    // 有效步（见 service.py::_do_listRecords 的注释）。空着是实话。
+    expect(stopped.validSteps).toBe("未统计");
+  });
+
+  it("中断与没正常收尾各说各的", () => {
+    const base = { protocolSeconds: 60, complete: true };
+    expect(toRecordView({ ...base, protocolState: "aborted", abortReason: "写盘失败" }).status).toBe("已中断");
+    // 收尾前进程就没了：磁盘上停在开走前那份 walking。
+    expect(toRecordView({ ...base, protocolState: "walking", elapsedSeconds: 0 }).status).toBe("未正常结束");
+    // 丢块比走没走满严重，先说这个。
+    expect(toRecordView({ ...base, complete: false, protocolState: "finished", elapsedSeconds: 60 }).status).toBe("不完整");
   });
 
   it("deviceSupport 包成设备屏的 devices / support", async () => {

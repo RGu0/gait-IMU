@@ -41,19 +41,9 @@ def test_meta_records_the_walk_as_it_actually_ended(tmp_path) -> None:
     assert protocol["elapsed_seconds"] == 60.0
 
 
-def test_the_step_count_is_written_down_before_the_process_forgets_it(tmp_path) -> None:
-    """步数只活在设备源的计数器里。不落盘，重开这份记录就再也数不出来。"""
-    source = StubDeviceSource(steps={"L": 41, "R": 40})
-    _, session_id = _run(tmp_path, stop_at=60.0, source=source)
-    outcome = read_meta(session_directory(tmp_path, session_id)).extra["session_outcome"]
-    assert outcome["valid_steps"] == 81
-
-
 def test_list_records_carries_the_outcome_and_not_only_write_integrity(tmp_path) -> None:
     """列表要能自己回答「走了多久」—— 否则渲染端只能拿 `complete` 硬凑。"""
-    service, session_id = _run(
-        tmp_path, stop_at=5.0, source=StubDeviceSource(steps={"L": 3, "R": 3})
-    )
+    service, session_id = _run(tmp_path, stop_at=5.0)
     record = next(
         item
         for item in service.handle({"id": "l", "method": "listRecords"})["result"]
@@ -62,27 +52,29 @@ def test_list_records_carries_the_outcome_and_not_only_write_integrity(tmp_path)
     assert record["protocolState"] == "finished"
     assert record["elapsedSeconds"] == 5.0
     assert record["validSeconds"] == 5.0
-    assert record["validSteps"] == 6
     # 「走了多久 / 配了多久」这对比较是列表区分「完成」与「已停止」的全部依据。
     assert record["elapsedSeconds"] < record["protocolSeconds"]
 
 
-def test_the_record_and_the_session_result_agree_on_the_step_count(tmp_path) -> None:
-    """钉住：列表里的步数与报告页上的步数是同一个数。
+def test_the_display_only_step_count_stays_out_of_the_session_metadata(tmp_path) -> None:
+    """钉住 `StepCounter` 的那句话：这个数不进会话元数据。
 
-    两者读的是同一个计数器，但读的时机不同 —— 落盘在 `_close_capture()` 里，
-    `sessionResult` 在它之后。哪天有人把落盘挪到停流之前，报告说 81 步、
-    记录说 79 步，而这种不一致没人会当成 bug 报上来。
+    手边唯一的步数是 `source.step_counts()`，而它的文档写明「仅供显示…从不进报告、
+    不进会话元数据，任何指标都不该从它算」—— 它数的是陀螺模长的上升沿，不是步态
+    算法的步。把它落进元数据、再填进列表的「有效步数」列，是拿采集界面用的粗数冒充
+    分析口径的有效步：空着是实话，填错了是假话，而且事后看不出来。
+
+    本 Issue 的需求里写了「『有效步数』列一并接上」，开工后判定**不能这么接** ——
+    真正的有效步数在 `core/` 里，要跑离线分析才有。理由与去向见验收记录。
     """
-    source = StubDeviceSource(steps={"L": 41, "R": 40})
-    service, session_id = _run(tmp_path, stop_at=60.0, source=source)
-    reported = service.handle({"id": "r", "method": "sessionResult", "params": {}})["result"]
+    service, session_id = _run(tmp_path, stop_at=60.0, source=StubDeviceSource(steps={"L": 41, "R": 40}))
+    assert "session_outcome" not in read_meta(session_directory(tmp_path, session_id)).extra
     record = next(
         item
         for item in service.handle({"id": "l", "method": "listRecords"})["result"]
         if item["id"] == session_id
     )
-    assert record["validSteps"] == reported["validSteps"] == 81
+    assert "validSteps" not in record
 
 
 def test_write_integrity_stays_write_integrity(tmp_path) -> None:
@@ -127,11 +119,7 @@ def test_a_session_from_before_this_change_reads_as_unknown_not_as_zero(tmp_path
     meta = read_meta(directory)
     write_meta(
         directory,
-        replace(
-            meta,
-            protocol_config={"duration_s": meta.protocol_config["duration_s"]},
-            extra={key: value for key, value in meta.extra.items() if key != "session_outcome"},
-        ),
+        replace(meta, protocol_config={"duration_s": meta.protocol_config["duration_s"]}),
     )
 
     service = TerminalService(source=StubDeviceSource(), session_root=tmp_path)
@@ -142,4 +130,5 @@ def test_a_session_from_before_this_change_reads_as_unknown_not_as_zero(tmp_path
     )
     assert record["protocolState"] is None
     assert record["elapsedSeconds"] is None
-    assert record["validSteps"] is None
+    assert record["validSeconds"] is None
+    assert record["abortReason"] is None
