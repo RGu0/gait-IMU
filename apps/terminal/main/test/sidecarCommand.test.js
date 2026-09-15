@@ -25,9 +25,9 @@ describe("packagedCommand", () => {
     });
   });
 
-  it("打包态没有 uv：env 不带 UV_NO_CONFIG", () => {
+  it("打包态没有 uv：env 不带 UV_CONFIG_FILE", () => {
     const { env } = packagedCommand({ resourcesPath: "/r", platform: "linux" });
-    expect(env).not.toHaveProperty("UV_NO_CONFIG");
+    expect(env).not.toHaveProperty("UV_CONFIG_FILE");
   });
 
   it("缺 resourcesPath 时抛错，而不是拼出一个相对路径", () => {
