@@ -221,10 +221,11 @@ describe("真 sidecar 形状上的检测流程", () => {
     await walkToRun();
     const aborted = { code: "E-BLE-1020", domain: "E-BLE", message: "原始数据写盘失败，测试已安全停止。", action: "请检查磁盘剩余空间后重新检测。", blocking: true };
     act(() => emit({ kind: "event", v: "1.0", topic: "session.aborted", seq: 5, payload: { error: aborted } }));
-    expect(await screen.findByText(aborted.action)).toBeVisible();
+    // Windows runner 上默认 1 s 等不到（中止 → stopSession 被拒 → 重渲染），放宽等待。
+    expect(await screen.findByText(aborted.action, {}, { timeout: 5000 })).toBeVisible();
     click("返回工作台");
-    expect(await screen.findByRole("heading", { name: "工作台" })).toBeVisible();
-  }, 10000);
+    expect(await screen.findByRole("heading", { name: "工作台" }, { timeout: 5000 })).toBeVisible();
+  }, 15000);
 });
 
 describe("兜底", () => {
