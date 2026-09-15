@@ -17,6 +17,17 @@ import React from "react";
  * Section order is fixed by PRD §12 and must not be rearranged.
  */
 
+/**
+ * 标注条的文字。每条标注各自可能已带句末标点（sidecar 给的都以「。」结尾），
+ * 直接用「；」拼会出现「。；」。先去掉每条的句末标点，再以「；」连接、以「。」收尾。
+ */
+export function joinAnnotations(annotations) {
+  const parts = annotations
+    .map((note) => String(note ?? "").trim().replace(/[。；;.．]+$/u, ""))
+    .filter(Boolean);
+  return parts.length ? `${parts.join("；")}。` : "";
+}
+
 const GRADE_NOTE = {
   low: "本次有效步数较少，此项仅供参考。",
 };
@@ -98,7 +109,7 @@ export function ReportDocument({ report }) {
 
       {/* 顶部标注条 — 只在需要时插入，位置固定在①之后 */}
       {report.annotations.length ? (
-        <p className="rp-annotation">{report.annotations.join("；")}</p>
+        <p className="rp-annotation">{joinAnnotations(report.annotations)}</p>
       ) : null}
 
       {/* ② 筛查摘要 —— 措辞受限，不得出现诊断语 */}

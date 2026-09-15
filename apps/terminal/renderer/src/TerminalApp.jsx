@@ -80,13 +80,14 @@ export function TerminalApp({ adapter, lifecycle, preview = false, snapshotRetry
         adapter={adapter}
         lifecycle={lifecycle}
         snapshotRetryMs={snapshotRetryMs}
+        preview={preview}
         onSnapshot={(snap) => setSource(snap?.source)}
       />
     </>
   );
 }
 
-function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
+function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapshot }) {
   const [snapshot, setSnapshot] = useState(null);
   // 最小 MVP 无登录（P-00 暂不考虑）：冷启动直接进工作台。
   const [stage, setStage] = useState(STAGE.hub);
@@ -114,10 +115,19 @@ function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
   // 收尾开始后 sidecar 仍会继续推 remainingSeconds: 0 的 tick，直到 stopSession 落地。
   // 那些 tick 不再属于这一场，也不能让收尾被触发第二次。
   const finishingRef = useRef(false);
+  // 「重新检查设备」（RAY-493 B2）：进行中不叠加点击；失败要说出来，不能静默。
+  const [rechecking, setRechecking] = useState(false);
+  const recheckingRef = useRef(false);
+  const [recheckError, setRecheckError] = useState(null);
+  // 每次回到工作台都重拉快照（RAY-493 B1）：走完、停止、从报告/错误屏/顶栏回来时，
+  // sidecar 已经多了会话，旧快照里的待上传数与最近记录都过期了。
+  const wasHubRef = useRef(true);
 
   async function navigate(label) {
     const next = NAV_STAGE[label];
     if (!next) return;
+    // 已在工作台时再点「工作台」不会触发进入工作台的重拉，这里补一次。
+    if (next === STAGE.hub && stage === STAGE.hub) setSnapshotEpoch((epoch) => epoch + 1);
     try {
       if (next === STAGE.records) setRecords(await adapter.listRecords());
       if (next === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
@@ -165,6 +175,15 @@ function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
     };
   }, [adapter, snapshotRetryMs, snapshotEpoch]);
 
+  // 进入工作台时换一个 epoch，由上面的拉取 effect 重拉。重拉期间继续显示上一份快照，
+  // 不回到「正在连接采集服务…」占位。
+  const isHub = stage === STAGE.hub;
+  useEffect(() => {
+    const entering = isHub && !wasHubRef.current;
+    wasHubRef.current = isHub;
+    if (entering) setSnapshotEpoch((epoch) => epoch + 1);
+  }, [isHub]);
+
   const onSnapshotRef = useRef(onSnapshot);
   onSnapshotRef.current = onSnapshot;
   useEffect(() => {
@@ -183,11 +202,19 @@ function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
   }, [stage, adapter]);
 
   async function handleRecheck() {
+    if (recheckingRef.current) return;
+    recheckingRef.current = true;
+    setRechecking(true);
     try {
       await adapter.recheckDevices();
       setSnapshot(await adapter.snapshot());
-    } catch {
-      // 重查失败时保留上一份快照；下一次点击会再试。
+      setRecheckError(null);
+    } catch (error) {
+      // 保留上一份快照，但要告诉操作员这次没查成、原因是什么、接下来能做什么。
+      setRecheckError(recheckFailureMessage(error, preview));
+    } finally {
+      recheckingRef.current = false;
+      setRechecking(false);
     }
   }
 
@@ -488,6 +515,9 @@ function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
         snapshot={snapshot}
         onNavigate={navigate}
         onRecheck={handleRecheck}
+        rechecking={rechecking}
+        recheckError={recheckError}
+        onDismissRecheckError={() => setRecheckError(null)}
         onStartNewAssessment={() => setStage(STAGE.subject)}
       />
     );
@@ -495,4 +525,22 @@ function TerminalStages({ adapter, lifecycle, snapshotRetryMs, onSnapshot }) {
 
   // 冷启动的极短间隙：快照还没回来。给一个诚实的占位，而不是空屏或假登录页。
   return <div className="app-boot" role="status">正在连接采集服务…</div>;
+}
+
+/** 句末标点由这里统一补，原因里自带的「。」先去掉，免得出现「。。」。 */
+function trimSentenceEnd(text) {
+  return String(text ?? "").trim().replace(/[。；;.！!]+$/u, "");
+}
+
+/**
+ * 重查失败的说明：原因（sidecar 或主进程给的原话）+ sidecar 的建议动作（如有）+ 通用建议。
+ * 「预览」菜单只在预览版（Electron 外壳）里存在，别处不提。
+ */
+export function recheckFailureMessage(error, preview = false) {
+  const reason = trimSentenceEnd(error?.message) || "未知原因";
+  const action = trimSentenceEnd(error?.action);
+  const advice = preview
+    ? "请确认两个模块已开机并在附近；也可在菜单「预览」中切换到演示模式。"
+    : "请确认两个模块已开机并在附近。";
+  return `重新检查设备失败：${reason}。${action ? `${action}。` : ""}${advice}`;
 }
