@@ -105,6 +105,13 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm --filter @gait/terminal-main exec electron-builder --config electron-builder.yml --publish never
 
+      # 真实启动一次未安装的应用：验 asar 里的渲染端、extraResources 里的 sidecar、主进程替换出的
+      # 环境三者接得上。只验构件冒烟证明不了这些。
+      - name: 冒烟 3 —— 启动打包后的应用
+        if: hashFiles('apps/terminal/main/preload.cjs') != ''
+        shell: bash
+        run: uv run --locked python packaging/smoke_app.py apps/terminal/main/release
+
       - uses: actions/upload-artifact@v7.0.1
         if: hashFiles('apps/terminal/main/preload.cjs') != ''
         with:
