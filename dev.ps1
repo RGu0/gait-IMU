@@ -23,6 +23,12 @@ Set-Location -Path $PSScriptRoot
 # 只挡得住我们自己的脚本，挡不住 pytest 与 ruff 的输出。
 $env:PYTHONUTF8 = "1"
 
+# 索引隔离，与 dev 对称（RAY-483；理由见 dev 里同名设置的注释）。Windows 的空设备
+# 写 NUL —— techflex-cloud-foundation 的 dev.ps1 用的就是这个值，并已在其
+# windows-latest CI 上跑通。不用 [System.IO.Path] 或 os.devNull 那种 \\.\nul 写法：
+# 没有人验证过 uv 接受它。
+$env:UV_CONFIG_FILE = "NUL"
+
 function Invoke-Step {
     param([string]$Exe, [string[]]$StepArgs)
     & $Exe @StepArgs

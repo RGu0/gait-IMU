@@ -6,15 +6,27 @@
  * 留成一个显式的、看得见的分支 —— 而不是先写一个猜出来的路径，等打包时才发现猜错。
  */
 
+/**
+ * 让 uv 忽略用户级配置时，`UV_CONFIG_FILE` 该指向的空设备。
+ *
+ * 用它而**不是** `UV_NO_CONFIG=1`（RAY-483）：后者会连 `.python-version` 一起停用，
+ * 新 `.venv` 于是落到最新解释器上。两者对镜像的隔离效果相同，只有这一个保留 pin。
+ *
+ * Windows 写 `NUL` 而不用 `os.devNull`（那是 `\\.\nul`）：前者已在
+ * techflex-cloud-foundation 的 windows-latest CI 上跑通，后者没有人验证过 uv 接受。
+ * 导出它，是为了让测试与产品共用**同一个值**，而不是各抄一份。
+ */
+export const UV_CONFIG_FILE_NULL = process.platform === "win32" ? "NUL" : "/dev/null";
+
 /** 开发态：经 uv 跑仓库里的模块。与契约测试起 sidecar 的方式完全一致。 */
 export function developmentCommand(repoRoot) {
   return {
     command: "uv",
     args: ["run", "--locked", "python", "-m", "gait.app"],
     cwd: repoRoot,
-    // UV_NO_CONFIG：本机 uv 镜像配置会报一个假的 lockfile 陈旧错误。
+    // UV_CONFIG_FILE：本机 uv 镜像配置会报一个假的 lockfile 陈旧错误（见上面常量的注释）。
     // PYTHONUTF8：sidecar 的文案是中文，Windows 默认代码页会把它变成乱码。
-    env: { UV_NO_CONFIG: "1", PYTHONUTF8: "1" },
+    env: { UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
   };
 }
 

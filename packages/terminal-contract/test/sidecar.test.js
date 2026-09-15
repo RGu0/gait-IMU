@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { createSidecarAdapter } from "../../../apps/terminal/renderer/src/sidecarTerminalAdapter.js";
+import { UV_CONFIG_FILE_NULL } from "../../../apps/terminal/main/sidecarCommand.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -37,8 +38,9 @@ function startSidecar() {
   // 两侧能不能对上话，不是依赖解析。
   const child = spawn("uv", ["run", "--no-sync", "python", "-m", "gait.app"], {
     cwd: REPO_ROOT,
-    // UV_NO_CONFIG：本机的 uv 镜像配置会让 uv 报一个假的 lockfile 陈旧错误。
-    env: { ...process.env, UV_NO_CONFIG: "1", PYTHONUTF8: "1" },
+    // UV_CONFIG_FILE：本机的 uv 镜像配置会让 uv 报一个假的 lockfile 陈旧错误。取值与产品
+    // 路径共用同一个常量（RAY-483）；不用 UV_NO_CONFIG，它会连 .python-version 一起关掉。
+    env: { ...process.env, UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
 
