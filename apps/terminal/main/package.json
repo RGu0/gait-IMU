@@ -1,17 +1,21 @@
 {
   "name": "@gait/terminal-main",
+  "productName": "GaitIMU Preview",
+  "description": "步态评估终端（预览版）的 Electron 主进程",
+  "author": "Rui Guo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "main.js",
   "scripts": {
+    "start": "pnpm --filter @gait/terminal-renderer build && electron .",
+    "smoke": "electron smoke.js",
     "test": "vitest run",
     "lint": "eslint ."
   },
-  "dependencies": {
-    "@gait/terminal-contract": "workspace:*"
-  },
   "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
     "eslint": "latest",
     "vitest": "latest"
   }

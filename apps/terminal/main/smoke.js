@@ -7,34 +7,34 @@
  * 被执行过。这个项目在 RAY-258 上吃过这个亏：`dev.ps1` 经三个 scope 改动仍是零执行，
  * 教训写在那里，「结构正确不等于执行得通」。
  *
- * 所以本文件用真实的 Electron 运行时，走一遍与 `main.js` 完全相同的路：起窗口
- * （不显示）、拉起真实的 Python sidecar、经 IPC 发一条真请求、拿到回应、收工退出。
- * 它验的是这条链**接得通**，不是它的逻辑对不对（逻辑在监管器的单元测试里）。
+ * 所以本文件用真实的 Electron 运行时，走一遍与 `main.js` 相同的路：起窗口（不显示）、
+ * 加载 preload 并确认桥接真的出现在页面里、用与应用**同一个** `sidecarOptions` 拉起
+ * 真实的 Python sidecar、发一条 `describe`、拿到回应、收工退出。它验的是这条链
+ * **接得通**，不是它的逻辑对不对（逻辑在监管器与 runtimeConfig 的单元测试里）。
  *
- * ## 它还没有被执行过 —— 这是本 scope 交付的一个已知缺口
+ *     pnpm --filter @gait/terminal-main smoke
  *
- * 运行它需要 Electron 运行时二进制，而**开发环境取不到它**（首次执行时才下载，
- * 网络受限）。所以 `main.js` / `preload.js` / 本文件是**从未被执行过的接线**，
- * 与监管器不同 —— 那个有 10 条测试，包括对真实 Python sidecar 的 SIGKILL 恢复。
+ * 退出码 0 即通过。RAY-493 第一次真的跑通了它（macOS，Electron 44）；Electron 44
+ * 起二进制在第一次运行时才下载，网络不通时可设 `ELECTRON_MIRROR`。
  *
- * `electron` 依赖因此由 `packaging` scope 声明（它本来就拥有 Electron 运行时与打包
- * 链）。在那之前，本文件是给 RAY-247（计划中首个真机活动）用的现成工具：
- *
- *     pnpm add -D electron --filter @gait/terminal-main
- *     pnpm exec electron apps/terminal/main/smoke.js
- *
- * 退出码 0 即通过。**在有人真的跑过它之前，不要声称主进程能启动** —— 这个项目在
- * RAY-258 上吃过这个亏（`dev.ps1` 经三个 scope 改动仍零执行）。
+ * userData 指向一个临时目录：冒烟不该改写操作员的预览设置，也不该在真实数据目录
+ * 里留下会话。
  */
 import { app, BrowserWindow } from "electron";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SidecarSupervisor, SIDECAR_READY } from "./sidecarSupervisor.js";
 import { resolveSidecarCommand } from "./sidecarCommand.js";
+import { loadSettings, sessionRoot, sidecarOptions } from "./runtimeConfig.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
+
+const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gait-smoke-"));
+app.setPath("userData", userDataDir);
 
 function fail(message) {
   process.stderr.write(`smoke FAILED: ${message}\n`);
@@ -43,30 +43,57 @@ function fail(message) {
 
 app.whenReady().then(async () => {
   const started = Date.now();
-  const window = new BrowserWindow({
-    show: false,
-    webPreferences: { preload: path.join(HERE, "preload.js"), contextIsolation: true, sandbox: true },
-  });
-
-  const supervisor = new SidecarSupervisor(
-    resolveSidecarCommand({ packaged: false, repoRoot: REPO_ROOT }),
-  );
-  supervisor.on("diagnostic", (text) => process.stderr.write(`[sidecar] ${text}`));
-
-  const ready = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("sidecar 30 秒内没有 ready")), 30_000);
-    supervisor.on("state", (payload) => {
-      process.stdout.write(`state: ${payload.state}\n`);
-      if (payload.state === SIDECAR_READY) {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-  });
-
+  let supervisor = null;
   try {
+    const window = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        preload: path.join(HERE, "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    let preloadError = null;
+    window.webContents.on("preload-error", (_event, _path, error) => {
+      preloadError = error;
+    });
+    await window.loadURL("data:text/html,<title>smoke</title>");
+    const bridge = await window.webContents.executeJavaScript(
+      "Object.keys(window.gaitSidecar ?? {}).sort().join(',')",
+    );
+    if (preloadError) throw new Error(`preload 加载失败：${preloadError.message ?? preloadError}`);
+    if (bridge !== "onEvent,onSidecarState,request") throw new Error(`桥接不完整：「${bridge}」`);
+    process.stdout.write(`bridge: ${bridge}\n`);
+
+    fs.mkdirSync(sessionRoot(userDataDir), { recursive: true });
+    const command = resolveSidecarCommand({ packaged: false, repoRoot: REPO_ROOT });
+    const { executable, options } = sidecarOptions({
+      command,
+      settings: loadSettings(userDataDir),
+      userDataDir,
+      processEnv: process.env,
+      platform: process.platform,
+    });
+    if (!executable) throw new Error(`PATH 中找不到 ${command.command}`);
+    process.stdout.write(`sidecar: ${executable} ${options.args.join(" ")}\n`);
+    process.stdout.write(`sidecar env keys: ${Object.keys(options.env).sort().join(", ")}\n`);
+
+    supervisor = new SidecarSupervisor(options);
+    supervisor.on("diagnostic", (text) => process.stderr.write(`[sidecar] ${text}`));
+    const ready = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("sidecar 30 秒内没有 ready")), 30_000);
+      supervisor.on("state", (payload) => {
+        process.stdout.write(`state: ${payload.state}\n`);
+        if (payload.state === SIDECAR_READY) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
     supervisor.start();
     await ready;
+
     const response = await supervisor.request({ kind: "request", method: "describe", params: {} });
     if (response?.status !== "ok") throw new Error(`describe 回应异常：${JSON.stringify(response)}`);
     process.stdout.write(
@@ -77,9 +104,10 @@ app.whenReady().then(async () => {
     );
     await supervisor.stop();
     window.destroy();
+    fs.rmSync(userDataDir, { recursive: true, force: true });
     app.exit(0);
   } catch (error) {
-    await supervisor.stop().catch(() => {});
+    if (supervisor) await supervisor.stop().catch(() => {});
     fail(error.message);
   }
 });
