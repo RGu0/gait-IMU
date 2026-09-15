@@ -29,8 +29,9 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,23 @@ MIN_ARRIVAL_RATE = 0.95
 MIN_DISK_FREE_BYTES = 2 * 1024**3
 
 
+@dataclass(frozen=True)
+class PreviewPolicy:
+    """预览版放宽的准入（RAY-493）。**构造 service 时不给就是生产行为，一条不改。**
+
+    预览机上没有服务方下发的出厂标定参数库，`E-CAL-3001` 于是恒阻断，整条流程走不
+    到采集。这里只放宽这一道，且放宽是**看得见的**：自检项显示 `waived` 而不是
+    `pass`、元数据记下这次放行、报告打上标注。一个悄悄变绿的自检项会让预览数据与
+    实测数据在事后再也分不开 —— 那比开不了工更糟。
+    """
+
+    waive_factory_calibration: bool = False
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"waive_factory_calibration": self.waive_factory_calibration}
+
+
+
 class TerminalService:
     """一次终端会话的服务端状态。"""
 
@@ -111,8 +129,13 @@ class TerminalService:
         uploader: Uploader | None = None,
         auth: OperatorAuth | None = None,
         tickets: TicketStore | None = None,
+        preview: PreviewPolicy | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
+        #: `None` = 生产行为。见 `PreviewPolicy`。
+        self.preview = preview
+        #: 本次会话的受试者。由 `startSession` 定，`_meta_at_start` 取用。
+        self._subject_uuid: str | None = None
         self.config = config or ProtocolConfig()
         self.session_root = session_root
         #: 云端加密身份库（RAY-322）。**没有配置就是 None** —— 未预配置的终端本来
@@ -247,7 +270,14 @@ class TerminalService:
         return self._snapshot()
 
     def _do_recheckDevices(self, _: dict[str, Any]) -> dict[str, Any]:
+        self._refresh_source()
         return self._snapshot()
+
+    def _refresh_source(self) -> None:
+        """让设备源重读一次（可选能力）。真设备要重新扫描/读电量；stub 没有这一步。"""
+        refresh = getattr(self.source, "refresh", None)
+        if callable(refresh):
+            refresh()
 
     def _modules_with_calibration(self) -> list[dict[str, Any]]:
         """设备页摘要 + **派生**出来的 `factoryCalibrated`。
@@ -332,6 +362,7 @@ class TerminalService:
 
     def _do_runPreflight(self, _: dict[str, Any]) -> list[dict[str, Any]]:
         """P-05 自检。每一项的结论都由真实实现推出来，不是写死的。"""
+        self._refresh_source()
         items: list[dict[str, Any]] = []
         calibration = self._calibration_verdicts()
         arrival = self.arrival_rates_checked()
@@ -363,20 +394,34 @@ class TerminalService:
             for label, verdict in sorted(calibration.items())
             if not verdict.admitted
         )
-        items.append(
-            self._item(
-                "factory-cal",
-                "出厂标定参数",
-                all_calibrated,
-                pass_hint="已匹配",
-                fail=TerminalError(
-                    code="E-CAL-3001",
-                    message="有模块没有匹配到出厂标定参数。",
-                    action=" ".join(reasons)
-                    or "请联系服务方按模块 MAC 下发标定参数；机构侧不做六面法。",
-                ),
+        if not all_calibrated and self._waives_factory_calibration:
+            # 预览策略放行：状态是 `waived` 而不是 `pass`，原因原样带着 ——
+            # 界面要能说出「放行了什么」，而不是一个与真通过长得一样的绿勾。
+            items.append(
+                {
+                    "id": "factory-cal",
+                    "label": "出厂标定参数",
+                    "status": "waived",
+                    "hint": "预览版：未匹配出厂标定参数，已按预览策略放行，报告将注明。",
+                    "error": None,
+                    "waiver": {"code": "E-CAL-3001", "reasons": list(reasons)},
+                }
             )
-        )
+        else:
+            items.append(
+                self._item(
+                    "factory-cal",
+                    "出厂标定参数",
+                    all_calibrated,
+                    pass_hint="已匹配",
+                    fail=TerminalError(
+                        code="E-CAL-3001",
+                        message="有模块没有匹配到出厂标定参数。",
+                        action=" ".join(reasons)
+                        or "请联系服务方按模块 MAC 下发标定参数；机构侧不做六面法。",
+                    ),
+                )
+            )
 
         disk_free = self.source.disk_free_bytes()
         items.append(
@@ -457,6 +502,7 @@ class TerminalService:
             self.operator = None
             return operator_auth.ticket_expired()
         now = float(params.get("now", 0.0))
+        self._subject_uuid = _valid_uuid(params.get("subjectUuid")) or new_subject_uuid()
         self.walk = TimedWalk(self.config)
         self._aborted = None
         self._recording_errors = {}
@@ -524,7 +570,7 @@ class TerminalService:
         return SessionMeta(
             session_id=self.session_id or new_session_id(),
             created_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            subject_uuid=new_subject_uuid(),
+            subject_uuid=self._subject_uuid or new_subject_uuid(),
             scenario="walk",
             # 契约注释写的是 `{'L': {mac, ...}}`，而 RAY-441 之前这里放的是平台
             # UUID —— 换台主机就认不出，也与按身份存取的标定参数库对不上。现在放
@@ -549,8 +595,30 @@ class TerminalService:
             else {"duration_s": self.config.duration_s},
             contract_version=CONTRACT_VERSION,
             notes="本地采集会话；元数据在会话结束时改写。停在 pending 即表示未正常结束。",
-            extra={"provenance": self.source.provenance()},
+            extra=self._meta_extra(),
         )
+
+    @property
+    def _waives_factory_calibration(self) -> bool:
+        return self.preview is not None and self.preview.waive_factory_calibration
+
+    def _meta_extra(self) -> dict[str, Any]:
+        """`provenance` 恒写；有预览策略时再写 `preview`。
+
+        `factory_calibration_waived` 记的是**这一次**有没有真的用上放行 —— 策略开着
+        但两只脚都匹配上了，报告就不该说「按预览策略放行」。事后重开历史记录时，
+        报告标注只从这里读，不从进程里的策略读（换一次启动参数不该改写旧报告）。
+        """
+        extra: dict[str, Any] = {"provenance": self.source.provenance()}
+        if self.preview is not None:
+            waived = self._waives_factory_calibration and not all(
+                verdict.admitted for verdict in self._calibration_verdicts().values()
+            )
+            extra["preview"] = {
+                **self.preview.snapshot(),
+                "factory_calibration_waived": waived,
+            }
+        return extra
 
     def _do_stopSession(self, params: dict[str, Any]) -> dict[str, Any]:
         walk = self._require_walk()
@@ -688,12 +756,20 @@ class TerminalService:
         records = []
         for session_id in list_sessions(self.session_root):
             meta = read_meta(session_directory(self.session_root, session_id))
+            complete = meta.integrity_report.get("complete")
+            provenance = meta.extra.get("provenance") or {}
             records.append(
                 {
                     "id": session_id,
                     "subjectUuid": meta.subject_uuid,
                     "protocolSeconds": meta.protocol_config.get("duration_s"),
                     "algoVersion": meta.algo_version,
+                    "createdAt": meta.created_at,
+                    # 停在 pending 的会话没有 `complete` —— 那是「不知道」，不是「不完整」。
+                    "complete": complete if isinstance(complete, bool) else None,
+                    "source": provenance.get("source")
+                    if isinstance(provenance, dict)
+                    else None,
                 }
             )
         return records
@@ -787,9 +863,37 @@ class TerminalService:
         「未标定」同样是在编。
         """
         given = [str(text) for text in (params.get("annotations") or ())]
+        given.extend(self._session_annotations(params))
         if params.get("cycles"):
             return given
         return [*given, self._UNCALIBRATED_NOTE]
+
+    _PREVIEW_WAIVER_NOTE = "预览版：出厂标定参数未匹配，按预览策略放行；数值不作为评估依据。"
+    _DEMO_DATA_NOTE = "演示数据（合成/回放），非实测。"
+
+    def _session_annotations(self, params: dict[str, Any]) -> list[str]:
+        """从**落盘的元数据**读出的标注：预览放行、演示数据。
+
+        读磁盘而不是读进程状态：重开一份历史记录时，进程里的策略与设备源可能早已
+        换过，而这份报告要说的是**那一次**采集的实情。读不到元数据就不加 —— 不知道
+        的事不替它声明。`hardware` 只在明确为 `False` 时才标：缺这个字段的旧会话
+        不知道来源，同样不替它编。
+        """
+        session_id = params.get("sessionId") or self.session_id
+        if not session_id or self.session_root is None:
+            return []
+        try:
+            meta = read_meta(session_directory(self.session_root, str(session_id)))
+        except (OSError, ValueError):
+            return []
+        notes: list[str] = []
+        preview = meta.extra.get("preview")
+        if isinstance(preview, dict) and preview.get("factory_calibration_waived"):
+            notes.append(self._PREVIEW_WAIVER_NOTE)
+        provenance = meta.extra.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("hardware") is False:
+            notes.append(self._DEMO_DATA_NOTE)
+        return notes
 
     def _cycles_for(self, params: dict[str, Any]) -> list[Any]:
         """本次会话的步态周期。
@@ -969,6 +1073,11 @@ class TerminalService:
                 raise ValueError(f"{label} 的到达率 {rate} 不在 0–1 内")
         return rates
 
+    @property
+    def session_running(self) -> bool:
+        """一次步行已经开始、且尚未进入终态。进程入口的事件泵据此决定要不要 tick。"""
+        return self.walk is not None and self.walk.state not in TERMINAL
+
     def _require_walk(self) -> TimedWalk:
         if self.walk is None:
             raise protocol.ProtocolError("会话尚未开始")
@@ -995,6 +1104,9 @@ class TerminalService:
             # 一个永远显示 0 的待传数会让积压这件事永远不被发现。
             "uploadSummary": self._upload_summary(),
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
+            # 界面据此在顶栏标出「演示数据 / 预览版」—— 不标就与真机运行长得一样。
+            "source": self.source.provenance().get("source"),
+            "preview": self.preview is not None,
         }
 
     def _upload_summary(self) -> dict[str, Any]:
@@ -1025,6 +1137,9 @@ class TerminalService:
         """
         if self.drain is not None:
             self.drain.stop()
+        close = getattr(self.source, "close", None)
+        if callable(close):
+            close()
 
     @staticmethod
     def _item(
@@ -1053,6 +1168,20 @@ def _capture_snapshot(status: Any) -> dict[str, Any] | None:
         "chunks_written": dict(status.chunks_written),
         "problems": list(status.problems),
     }
+
+
+def _valid_uuid(value: Any) -> str | None:
+    """调用方给的 `subjectUuid`，是 UUID 才用。
+
+    不是 UUID 时退回新生成的，而不是报错：`SessionMeta` 会拒绝非 UUID（FR-02 的防线），
+    而机构档案号这类明文绝不能因为「调用方传错了字段」就一路落进会话文件。
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
 
 
 class _Unimplemented:
