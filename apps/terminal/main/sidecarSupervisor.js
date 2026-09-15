@@ -107,6 +107,9 @@ export class SidecarSupervisor extends EventEmitter {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
+      // 冻结的 sidecar 是控制台程序（stdio 即协议通道）。Windows 上由 GUI 进程拉起控制台
+      // 程序会弹出一个黑窗口，而且关掉它就杀掉 sidecar；其他平台上此选项无效。
+      windowsHide: true,
     });
     this.child = child;
     this._startedAt = this._now();
