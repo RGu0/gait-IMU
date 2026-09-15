@@ -1,7 +1,8 @@
 # electron-builder 配置（RAY-250 preview-installers）。构建步骤见 packaging/README.md。
 #
-# 依赖 RAY-493 electron-shell-boot 带来的 electron / electron-builder devDeps、preload.cjs、
-# runtimeConfig.js，以及 main.js 在打包态加载 `<app>/renderer/index.html`。
+# 与 RAY-493 electron-shell-boot 的约定：`files` 里的 preload.cjs / runtimeConfig.js 由它引入；
+# 打包态 main.js 从 `<appPath>/renderer/index.html` 加载渲染端（runtimeConfig.rendererIndex），
+# 并把 process.resourcesPath 交给 sidecarCommand.packagedCommand()。
 appId: com.gait.preview
 productName: GaitIMU Preview
 

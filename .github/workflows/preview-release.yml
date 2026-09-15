@@ -97,8 +97,8 @@ jobs:
       - name: 构建渲染进程
         run: pnpm --filter @gait/terminal-renderer build
 
-      # electron / electron-builder 依赖与 preload.cjs 由 RAY-493 electron-shell-boot 引入。
-      # 在它合入 main 之前跳过本步，让 sidecar 冻结与冒烟先独立变绿。
+      # electron / electron-builder 依赖与 preload.cjs 由 RAY-493 electron-shell-boot 引入（已合入）。
+      # 守卫保留：它让「Electron 外壳不在」表现为跳过而不是一条看不懂的 electron-builder 报错。
       - name: electron-builder
         if: hashFiles('apps/terminal/main/preload.cjs') != ''
         env:

@@ -11,8 +11,8 @@ PyInstaller 需要一个脚本文件作起点，而 `python -m gait.app` 是模�
 回应 `describe`，直到机构现场第一次点「连接设备」才 `ModuleNotFoundError`。
 
 所以这里把「会被延迟加载的那几个模块」在冻结产物里当场 import 一遍。CI 两个平台都跑
-它，缺一个就红。`gait.app.replay` / `gait.app.blesource` 由并行 scope 引入，本分支上
-可能还不存在 —— 只有这两个容忍缺失，并打印出来，别的缺了一律失败。
+它，缺一个就红 —— 包括 `gait.app.replay` 与 `gait.app.blesource`（RAY-493 已合入，
+不再容忍缺失）。
 """
 
 from __future__ import annotations
@@ -20,13 +20,18 @@ from __future__ import annotations
 import importlib
 import sys
 
-#: 由并行 scope（RAY-493 sidecar-preview-runtime / ble-device-source）引入的模块。
-#: 它们尚未合入时，缺失是预期的；合入后 spec 的 collect_submodules("gait") 会自动带上。
-OPTIONAL_MODULES = ("gait.app.replay", "gait.app.blesource")
-
 
 def _required_modules(platform: str) -> list[str]:
-    modules = ["bleak", "numpy", "wt901", "gait.validate.synthetic", "gait.report"]
+    modules = [
+        "bleak",
+        "numpy",
+        "wt901",
+        "gait.validate.synthetic",
+        "gait.report",
+        # 设备源按 GAIT_DEVICE_SOURCE 延迟 import（`gait.app.__main__`），静态分析看不见。
+        "gait.app.replay",
+        "gait.app.blesource",
+    ]
     if platform == "darwin":
         modules.append("bleak.backends.corebluetooth.client")
     elif platform == "win32":
@@ -38,19 +43,6 @@ def selftest_imports() -> int:
     for name in _required_modules(sys.platform):
         importlib.import_module(name)
         print(f"import ok: {name}")
-    missing: list[str] = []
-    for name in OPTIONAL_MODULES:
-        try:
-            importlib.import_module(name)
-        except ModuleNotFoundError as exc:
-            # 只容忍「这个模块本身不存在」；它存在但它的依赖缺了，照样失败。
-            if exc.name != name:
-                raise
-            missing.append(name)
-        else:
-            print(f"import ok: {name}")
-    if missing:
-        print(f"optional modules not present: {', '.join(missing)}")
     print("selftest ok")
     return 0
 
