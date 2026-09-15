@@ -93,7 +93,7 @@
     "calibration": {
       "implemented": false,
       "issue": "RAY-208",
-      "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未实现；gait/calib/ 目前是空包"
+      "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未接入 sidecar：gait/calib/ 已有实现（store.py 出厂参数库——自检 E-CAL-3001 据此判定；still.py / walk.py / accel.py），但会话标定流程还没接到 sidecar 的 runCalibration"
     },
     "report": {
       "implemented": true,
