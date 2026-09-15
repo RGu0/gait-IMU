@@ -543,11 +543,38 @@ def test_one_foot_connected_still_reports_both_feet_and_preflight_does_not_raise
         assert source.device_readings()["L"]["kind"] == "mac"
         assert [m["side"] for m in source.module_info()] == ["left", "right"]
 
+        # 自检前 service 会先调 `source.refresh()`（RAY-493 sidecar-preview-runtime）——
+        # 「重新检查」本就该尝试重连。所以这里要验的是「单足断链时自检不抛」，
+        # 而不是「断的那只仍然 fail」：假世界里右足还在广播，refresh 会把它连回来。
+        # 右足**真的**不在时自检如实报 E-BLE-1001，见下一条用例。
         items = TerminalService(source=source).handle(
             {"id": "1", "method": "runPreflight"}
         )["result"]
         by_id = {item["id"]: item for item in items}
         assert by_id["link-l"]["status"] == "pass"
+        assert by_id["link-r"]["status"] == "pass"
+    finally:
+        source.close()
+
+
+def test_preflight_reports_the_missing_foot_when_refresh_cannot_reconnect_it():
+    """右足断链且不再广播：自检里的 refresh 重连失败，读数回到断开占位，自检如实阻断。"""
+    from gait.app.service import TerminalService
+
+    world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+    source = BleDeviceSource(ops=world.ops(), connect_wait_s=5)
+    try:
+        assert source.refresh(timeout=5) == "connected"
+        loop = source._loop
+        assert loop is not None
+        world.discovered = world.discovered[:1]  # 右足从此扫不到
+        loop.call_soon_threadsafe(world.transports["AA:00:00:00:00:02"].drop)
+        _wait_for(lambda: source.read_batteries()["R"] is None)
+
+        items = TerminalService(source=source).handle(
+            {"id": "1", "method": "runPreflight"}
+        )["result"]
+        by_id = {item["id"]: item for item in items}
         assert by_id["link-r"]["status"] == "fail"
         assert by_id["link-r"]["error"]["code"] == "E-BLE-1001"
     finally:
