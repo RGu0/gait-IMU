@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { UV_CONFIG_FILE_NULL } from "../sidecarCommand.js";
 
 import {
   DEFAULT_DEVICE_SOURCE,
@@ -149,7 +150,8 @@ describe("sidecarOptions", () => {
     command: "uv",
     args: ["run", "--locked", "python", "-m", "gait.app"],
     cwd: "/repo",
-    env: { UV_NO_CONFIG: "1", PYTHONUTF8: "1" },
+    // 与 developmentCommand() 同形。取值引用产品的常量，别再手写一份会漂开的 env（RAY-483 / RAY-494）。
+    env: { UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
   };
   const processEnv = { PATH: "/bin:/opt/uv", HOME: "/Users/op", GAIT_ACCESS_ROOT: "/secret", SHELL: "/bin/zsh" };
 
@@ -174,7 +176,7 @@ describe("sidecarOptions", () => {
       "GAIT_SESSION_ROOT",
       "HOME",
       "PYTHONUTF8",
-      "UV_NO_CONFIG",
+      "UV_CONFIG_FILE",
     ]);
   });
 
@@ -193,7 +195,8 @@ describe("sidecarOptions", () => {
     });
     expect(executable).toBe(frozen.command);
     expect(options.command).toBe(frozen.command);
-    expect(options.env).not.toHaveProperty("UV_NO_CONFIG");
+    // 冻结产物不经 uv，env 里不该有任何 uv 变量。
+    expect(options.env).not.toHaveProperty("UV_CONFIG_FILE");
     expect(options.env).not.toHaveProperty("GAIT_ACCESS_ROOT");
     expect(options.env.GAIT_SESSION_ROOT).toBe(path.join("/data", "sessions"));
   });
