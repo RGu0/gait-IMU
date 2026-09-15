@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Banner, Button, MetricTile, SideBadge, StatusPill } from "@gait/design-system";
+import { joinAnnotations } from "@gait/report-template";
 import { AppBar } from "./AppBar.jsx";
 
 /**
@@ -89,7 +90,7 @@ export function ResultScreen({ result, onNextSubject, onOpenReport, onRetry, onB
 
         {result.annotations.length ? (
           <Banner tone="warning" title="解读时请注意">
-            {result.annotations.join("；")}
+            {joinAnnotations(result.annotations)}
           </Banner>
         ) : null}
 
