@@ -9,6 +9,11 @@ __pycache__/
 .ruff_cache/
 dist/
 
+# 打包产物（RAY-250 preview-installers）。PyInstaller 的 dist/gait-sidecar/ 已被上面的
+# dist/ 覆盖（uv build 也写 dist/）；这里补上它的中间目录与 electron-builder 的输出。
+build/pyinstaller/
+apps/terminal/main/release/
+
 # governance context link (device-local)
 .project-context
 

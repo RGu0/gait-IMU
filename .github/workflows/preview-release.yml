@@ -1,0 +1,123 @@
+name: Preview release
+
+# 冻结 sidecar + 打 Electron 安装包（RAY-250 preview-installers，服务 RAY-493 Preview）。
+# **只出构件，不发布** —— 没有 release、没有签名、没有公证。
+#
+# pull_request 只在打包相关文件变动时触发：一次完整冻结 + 双平台打包要几分钟，
+# 不该压在每个 PR 上；而改打包方案的 PR 必须看到它的结论。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["preview-*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/preview-release.yml"
+      - "apps/terminal/main/electron-builder.yml"
+
+concurrency:
+  group: preview-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 与 packaging/README.md 同一个 pin；升版两处一起改。
+  PYINSTALLER_VERSION: "6.22.3"
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            sidecar_exe: dist/gait-sidecar/gait-sidecar
+          - os: windows-latest
+            sidecar_exe: dist/gait-sidecar/gait-sidecar.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      # 工具链设置与 ci.yml 一致（同样的 action pin，同样读 .node-version / packageManager /
+      # .python-version），理由见那里。
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          cache: true
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - name: setup（macOS）
+        if: runner.os != 'Windows'
+        run: ./dev setup
+
+      - name: setup（Windows）
+        if: runner.os == 'Windows'
+        run: pwsh -File dev.ps1 setup
+
+      - name: 冻结 sidecar（PyInstaller）
+        shell: bash
+        run: |
+          uv run --locked --with "pyinstaller==${PYINSTALLER_VERSION}" \
+            pyinstaller packaging/gait-sidecar.spec \
+            --distpath dist --workpath build/pyinstaller --noconfirm
+          du -sh dist/gait-sidecar
+
+      - name: 冒烟 1 —— GAIT_SELFTEST=imports
+        shell: bash
+        env:
+          GAIT_SELFTEST: imports
+        run: ${{ matrix.sidecar_exe }}
+
+      - name: 冒烟 2 —— describe / snapshot 往返
+        shell: bash
+        run: uv run --locked python packaging/smoke_sidecar.py "${{ matrix.sidecar_exe }}"
+
+      - name: 打包 sidecar 构件（macOS，保留可执行位）
+        if: runner.os != 'Windows'
+        run: ditto -c -k --keepParent dist/gait-sidecar "dist/gait-sidecar-${{ runner.os }}.zip"
+
+      - name: 打包 sidecar 构件（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/gait-sidecar -DestinationPath "dist/gait-sidecar-${{ runner.os }}.zip"
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: gait-sidecar-${{ runner.os }}
+          path: dist/gait-sidecar-${{ runner.os }}.zip
+          if-no-files-found: error
+
+      - name: 构建渲染进程
+        run: pnpm --filter @gait/terminal-renderer build
+
+      # electron / electron-builder 依赖与 preload.cjs 由 RAY-493 electron-shell-boot 引入（已合入）。
+      # 守卫保留：它让「Electron 外壳不在」表现为跳过而不是一条看不懂的 electron-builder 报错。
+      - name: electron-builder
+        if: hashFiles('apps/terminal/main/preload.cjs') != ''
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: pnpm --filter @gait/terminal-main exec electron-builder --config electron-builder.yml --publish never
+
+      # 真实启动一次未安装的应用：验 asar 里的渲染端、extraResources 里的 sidecar、主进程替换出的
+      # 环境三者接得上。只验构件冒烟证明不了这些。
+      - name: 冒烟 3 —— 启动打包后的应用
+        if: hashFiles('apps/terminal/main/preload.cjs') != ''
+        shell: bash
+        run: uv run --locked python packaging/smoke_app.py apps/terminal/main/release
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: hashFiles('apps/terminal/main/preload.cjs') != ''
+        with:
+          name: installer-${{ runner.os }}
+          path: |
+            apps/terminal/main/release/*.dmg
+            apps/terminal/main/release/*.zip
+            apps/terminal/main/release/*.exe
+          if-no-files-found: error
