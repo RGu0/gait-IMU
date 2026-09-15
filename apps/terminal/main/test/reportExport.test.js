@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -48,7 +50,8 @@ describe("default file name carries no subject identifier", () => {
       now: NOW,
     });
     const { defaultPath } = f.dialog.showSaveDialog.mock.calls[0][1];
-    expect(defaultPath).toBe("/Users/op/Documents/步态报告-20260915-0905-08230031.pdf");
+    // 用 path.join 拼期望值：Windows 上主进程拼出来的是反斜杠。
+    expect(defaultPath).toBe(path.join("/Users/op/Documents", "步态报告-20260915-0905-08230031.pdf"));
     expect(defaultPath).not.toMatch(/2781|张三/);
   });
 });
@@ -133,7 +136,7 @@ describe("registration", () => {
     const result = await handlers[EXPORT_PDF_CHANNEL]({ sender: f.webContents }, { reportId: "abc12345" });
     expect(result.status).toBe("saved");
     expect(f.dialog.showSaveDialog.mock.calls[0][1].defaultPath).toBe(
-      "/Users/op/Documents/步态报告-20260915-0905-abc12345.pdf",
+      path.join("/Users/op/Documents", "步态报告-20260915-0905-abc12345.pdf"),
     );
 
     const printing = { print: vi.fn((_o, cb) => cb(true)) };
