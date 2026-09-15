@@ -6,39 +6,36 @@
 
 import json
 import shutil
-import struct
 from pathlib import Path
 
-import numpy as np
 import pytest
-from wt901.protocol.units import (
-    ACCEL_FULL_SCALE_G,
-    GYRO_FULL_SCALE_DPS,
-    INT16_FULL_SCALE,
-    STANDARD_GRAVITY,
-)
 from wt901.recording import RecordedChunk, Recording, write_recording
 
+from gait.app.replay import frames_from_synthetic
 from gait.app.service import TerminalService
 from gait.contracts import SessionMeta
 from gait.io.session import create_session, new_session_id, new_subject_uuid, raw_path
-from gait.validate.synthetic import NoiseModel, WalkSpec, generate_dual_walk
 
 SECONDS = 20
 
-#: 合成数据加一点器件量级的噪声。恒为 0 的变异系数在真实数据里不存在，
-#: 一个完美的 0 反而像占位符 —— 取值与 `cli/mvp.py` 同量级。
-NOISE = NoiseModel(accel_density=1.5e-3, gyro_density=3.0e-4, seed=3)
+#: 合成数据的噪声种子。噪声模型本身（器件量级的密度）与帧换算都在
+#: `gait.app.replay` 里 —— 预览版的合成设备源与这里用的是**同一份**生成逻辑，
+#: 两处各抄一份迟早会分叉。
+NOISE_SEED = 3
 
 
-def _to_counts(acc: np.ndarray, gyr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """SI → int16 码值。**换算常数只从 wt901 取**，不在测试里另抄一份。"""
-    a = acc / (ACCEL_FULL_SCALE_G * STANDARD_GRAVITY) * INT16_FULL_SCALE
-    g = np.degrees(gyr) / GYRO_FULL_SCALE_DPS * INT16_FULL_SCALE
-    return (
-        np.clip(a, -32768, 32767).astype(np.int16),
-        np.clip(g, -32768, 32767).astype(np.int16),
-    )
+def _write_synthetic(root: Path, session_id: str, seconds: float) -> None:
+    """逐帧一段（`chunk_frames=1`）：到达时刻与帧一一对应，与改造前逐字相同。"""
+    for label, chunks in frames_from_synthetic(seconds, seed=NOISE_SEED, chunk_frames=1).items():
+        write_recording(
+            raw_path(root, session_id, label),
+            Recording(
+                device_id=f"dev-{label}",
+                created_utc="",
+                note="",
+                chunks=tuple(RecordedChunk(t=t, data=data) for t, data in chunks),
+            ),
+        )
 
 
 @pytest.fixture
@@ -66,20 +63,7 @@ def recorded_session(tmp_path: Path) -> tuple[Path, str]:
             protocol_config={"duration_s": SECONDS},
         ),
     )
-    dual = generate_dual_walk(WalkSpec(duration_s=float(SECONDS)), noise=NOISE)
-    for label, (series, _truth) in dual.items():
-        acc, gyr = _to_counts(series.acc, series.gyr)
-        chunks = tuple(
-            RecordedChunk(
-                t=round(index / 200.0, 6),
-                data=b"\x55\x61" + struct.pack("<9h", *acc[index], *gyr[index], 0, 0, 0),
-            )
-            for index in range(len(acc))
-        )
-        write_recording(
-            raw_path(tmp_path, session_id, label),
-            Recording(device_id=f"dev-{label}", created_utc="", note="", chunks=chunks),
-        )
+    _write_synthetic(tmp_path, session_id, float(SECONDS))
     return tmp_path, session_id
 
 
@@ -217,20 +201,7 @@ def _write_session(root: Path, seconds: float) -> str:
             protocol_config={"duration_s": round(seconds)},
         ),
     )
-    dual = generate_dual_walk(WalkSpec(duration_s=seconds), noise=NOISE)
-    for label, (series, _truth) in dual.items():
-        acc, gyr = _to_counts(series.acc, series.gyr)
-        chunks = tuple(
-            RecordedChunk(
-                t=round(index / 200.0, 6),
-                data=b"\x55\x61" + struct.pack("<9h", *acc[index], *gyr[index], 0, 0, 0),
-            )
-            for index in range(len(acc))
-        )
-        write_recording(
-            raw_path(root, session_id, label),
-            Recording(device_id=f"dev-{label}", created_utc="", note="", chunks=chunks),
-        )
+    _write_synthetic(root, session_id, seconds)
     return session_id
 
 

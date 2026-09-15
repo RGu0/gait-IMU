@@ -72,8 +72,12 @@ function startSidecar() {
       const line = buffer.slice(0, index).trim();
       buffer = buffer.slice(index + 1);
       if (!line) continue;
+      const message = JSON.parse(line);
+      // 采集中 sidecar 会主动推事件（RAY-493 事件泵）。本 transport 按「一问一答」
+      // 配对，事件不是任何请求的应答 —— 让它占掉一个等待位，后面每条应答都会错位。
+      if (message.kind === "event") continue;
       const pending = waiting.shift();
-      if (pending) pending.resolve(JSON.parse(line));
+      if (pending) pending.resolve(message);
     }
   });
 
