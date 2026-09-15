@@ -3,3 +3,15 @@ packages:
   - "apps/*"
   - "apps/terminal/*"
   - "packages/*"
+
+# pnpm 10 默认不跑依赖的安装脚本，未列出的一律跳过。
+#
+# electron：旧版本在 postinstall 里下载运行时二进制，不放行则 install 显示成功、
+# `electron .` 却找不到运行时。本仓库 pin 的 Electron 44 已改为第一次运行时才下载（无 postinstall），
+# 这里仍放行，版本回退时不会悄悄变回「装上了却跑不起来」。
+# electron-winstaller：electron-builder 的 Windows Squirrel 目标才用，开发态不需要，
+# 显式忽略，免得每次 install 都提示去 approve。
+onlyBuiltDependencies:
+  - electron
+ignoredBuiltDependencies:
+  - electron-winstaller

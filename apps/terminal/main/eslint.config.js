@@ -22,4 +22,13 @@ export default [
       ],
     },
   },
+  {
+    // preload 必须是 CommonJS（sandbox 下不能是 ESM），见 preload.cjs 的模块文档。
+    files: ["**/*.cjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "commonjs",
+      globals: { require: "readonly" },
+    },
+  },
 ];

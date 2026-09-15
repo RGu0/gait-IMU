@@ -1,12 +1,12 @@
 import React from "react";
 
-export type CheckStatus = "pending" | "running" | "pass" | "fail";
+export type CheckStatus = "pending" | "running" | "pass" | "waived" | "fail";
 
 export interface ChecklistItemProps {
   status?: CheckStatus;
   /** Item name (body size). */
   label: string;
-  /** Right-side hint; on fail, an actionable fix (not a tech detail). */
+  /** Right-side hint; on fail, an actionable fix (not a tech detail); on waived, why it was waived. */
   hint?: string;
   style?: React.CSSProperties;
 }

@@ -9,6 +9,12 @@
  *
  * `request` 送契约信封；`onSidecarState` 订阅进程生死；`onEvent` 收 sidecar 推来的
  * 采集事件。没有第四样。
+ *
+ * ## 为什么是 .cjs
+ *
+ * 本包是 `"type": "module"`，而 `sandbox: true` 的 preload 只能是 CommonJS ——
+ * 扩展名是 `.js` 时 Electron 按 ESM 解析，`require` 不存在，preload 静默失败，
+ * 渲染端看到的就是 `window.gaitSidecar` 为 undefined。
  */
 const { contextBridge, ipcRenderer } = require("electron");
 

@@ -10,7 +10,7 @@ export function ChecklistItem({ status = "pending", label, hint, style, ...rest 
       <StatusIcon status={status} />
       <span style={{ flex: 1, font: "var(--text-body)", color: "var(--text-primary)" }}>{label}</span>
       {hint && (
-        <span style={{ font: "var(--text-secondary-size)", color: status === "fail" ? "var(--danger-fg)" : "var(--text-secondary)", textAlign: "right" }}>
+        <span style={{ font: "var(--text-secondary-size)", color: status === "fail" ? "var(--danger-fg)" : status === "waived" ? "var(--warning-fg)" : "var(--text-secondary)", textAlign: "right" }}>
           {hint}
         </span>
       )}
@@ -31,6 +31,14 @@ function StatusIcon({ status }) {
     return (
       <span {...common} style={{ ...common, borderRadius: "999px", background: "var(--success-bg)", display: "inline-flex", alignItems: "center", justifyContent: "center" }} aria-label="通过">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--success-fg)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+      </span>
+    );
+  }
+  if (status === "waived") {
+    // Waived: the row does not block, but it is NOT a pass — amber triangle, never the green check.
+    return (
+      <span {...common} style={{ ...common, borderRadius: "999px", background: "var(--warning-bg)", display: "inline-flex", alignItems: "center", justifyContent: "center" }} aria-label="已豁免">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4 2.5 20h19L12 4Z" /><path d="M12 10v4M12 17h.01" /></svg>
       </span>
     );
   }
