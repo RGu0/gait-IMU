@@ -1,0 +1,59 @@
+# electron-builder 配置（RAY-250 preview-installers）。构建步骤见 packaging/README.md。
+#
+# 依赖 RAY-493 electron-shell-boot 带来的 electron / electron-builder devDeps、preload.cjs、
+# runtimeConfig.js，以及 main.js 在打包态加载 `<app>/renderer/index.html`。
+appId: com.gait.preview
+productName: GaitIMU Preview
+
+directories:
+  output: release
+  buildResources: build
+
+asar: true
+# 主进程没有原生模块；sidecar 是独立的冻结进程，不经 node-gyp。
+npmRebuild: false
+
+files:
+  - main.js
+  - preload.cjs
+  - sidecarSupervisor.js
+  - sidecarCommand.js
+  - runtimeConfig.js
+  - package.json
+  - from: ../renderer/dist
+    to: renderer
+
+# PyInstaller onedir 产物（packaging/gait-sidecar.spec）。目录名 `sidecar` 与
+# sidecarCommand.js::packagedCommand() 钉在一起，改一处要改两处。
+extraResources:
+  - from: ../../../dist/gait-sidecar
+    to: sidecar
+
+mac:
+  # arch 写在每个 target 里：MacConfiguration 没有顶层 arch 字段，写在 mac 下会被 schema 拒绝。
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  category: public.app-category.medical
+  # ad-hoc 签名：Apple Silicon 要求可执行文件至少有签名；Preview 不做 Developer ID 签名与公证。
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSBluetoothAlwaysUsageDescription: 用于连接步态采集模块（蓝牙 IMU）
+    NSBluetoothPeripheralUsageDescription: 用于连接步态采集模块（蓝牙 IMU）
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
