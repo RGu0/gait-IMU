@@ -31,7 +31,7 @@ const RESTARTING = {
 const NOT_STARTED = { code: "E-QLT-5000", domain: "E-QLT", message: "协议层失败：会话尚未开始", action: "请重新检测。", blocking: true };
 
 /** 真 sidecar 形状的假进程 + 一个可以手动推状态的生命周期。 */
-function rig(overrides = {}, { intercept } = {}) {
+function rig(overrides = {}, { intercept, replayReady = true } = {}) {
   const fake = fakeTransport({
     snapshot: SNAPSHOT,
     listRecords: RECORDS,
@@ -56,7 +56,7 @@ function rig(overrides = {}, { intercept } = {}) {
   const lifecycle = {
     subscribe: (handler) => {
       push = handler;
-      handler({ state: "ready" });
+      if (replayReady) handler({ state: "ready" });
       return () => {};
     },
   };
@@ -127,6 +127,20 @@ describe("采集中 sidecar 重启：本次检测已中断", () => {
       expect(methods()).not.toContain("stopSession");
       // 仍停在中断屏，没有被迟到的收尾改写
       expect(screen.getByRole("alert", { name: WALK_INTERRUPTED.title })).toBeVisible();
+    },
+    20000,
+  );
+
+  it(
+    "订阅晚于启动时的 ready（从没收到过状态）也照样判中断 —— dev Electron 实测的时序",
+    async () => {
+      const { adapter, lifecycle, setState, methods } = rig({}, { replayReady: false });
+      render(<TerminalApp adapter={adapter} lifecycle={lifecycle} />);
+      await walkToRun();
+      setState(RESTARTING);
+      setState({ state: "ready" });
+      await expectInterruptionScreen();
+      expect(methods()).not.toContain("stopSession");
     },
     20000,
   );

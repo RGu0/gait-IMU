@@ -169,7 +169,10 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
       setSidecar(next);
       const previous = lastSidecarState.current;
       lastSidecarState.current = next?.state ?? null;
-      if (next?.state !== "ready" && previous === "ready") {
+      // 不要求先看到过 ready：主进程在 did-finish-load 时补发的那次状态，渲染端的订阅
+      // 常常还没挂上（dev Electron 实测），于是第一次重启时 previous 仍是 null。
+      // 任何非 ready 状态都算进程换代；多记几代无害。
+      if (next?.state && next.state !== "ready") {
         sidecarGenerationRef.current += 1;
         // 当场结束这场检测：倒计时停、不再收 tick、不向重启后的新进程收尾。
         if (walkRef.current) interruptWalk();
