@@ -82,6 +82,7 @@ __all__ = [
     "TapTransport",
     "grade_link",
     "mask_address",
+    "read_battery_with_retry",
 ]
 
 FEET: tuple[str, str] = ("L", "R")
@@ -99,6 +100,10 @@ GOOD_ARRIVAL = 0.95
 FAIR_ARRIVAL = 0.80
 #: 关闭时每台设备的等待上限；`close_quietly` 自身也有超时，这里是整体兜底。
 CLOSE_WAIT_S = 12.0
+#: 电量读数不可用时的重试（WT901 RAY-182）：寄存器偶发回原始值 0 —— flash 写入期间必现、
+#: 不写直接读也有 1/8。flash 写完的恢复实测 299~327 ms，所以间隔取 0.3 s。
+BATTERY_READ_ATTEMPTS = 3
+BATTERY_RETRY_DELAY_S = 0.3
 
 
 def _log(message: str) -> None:
@@ -377,6 +382,45 @@ def mask_address(address: str | None) -> str | None:
 # ── 设备操作（可注入，测试里换成假的）──────────────────────────────────────
 
 
+async def read_battery_with_retry(
+    device: WT901Device,
+    *,
+    read: Callable[[WT901Device], Awaitable[Battery | None]] = read_battery_at_low_rate,
+    attempts: int = BATTERY_READ_ATTEMPTS,
+    delay_s: float = BATTERY_RETRY_DELAY_S,
+) -> Battery | None:
+    """读电量；读不到或读到不可信的原始值就隔一会儿重读。
+
+    ## 为什么要重读，而不是交给自检让操作员「重新检查」
+
+    电量只在**连接时**读一次（高速流期间寄存器读来不及回复，手册 §6）。已连上时点
+    「重新检查设备」不会断开重连，所以这一次读偏了，自检就会一直停在「电量读数无效」
+    直到断开 —— 操作员没有任何能自己做的动作。2026-09-16 真机首次 `--probe` 两脚都是这样。
+
+    成因与 WT901 RAY-182 一致：寄存器偶发回原始值 0，wt901 如实给 `percent=None`
+    （不把它映射成 0%）。那是瞬时的，隔 ~300 ms 再读即恢复。
+
+    返回最后一次的结果：三次都不可信时仍把那份原始值交出去，自检据此给出「读数无效
+    （原始值 N）」—— 比笼统的「读不到」多一条可查的线索。
+    """
+    result: Battery | None = None
+    for attempt in range(1, attempts + 1):
+        result = await read(device)
+        if result is not None and result.is_plausible:
+            return result
+        if attempt < attempts:
+            _log(
+                f"{device.device_id} 电量读数不可用（{_battery_text(result)}），"
+                f"{delay_s:.1f} s 后重读（{attempt}/{attempts}）"
+            )
+            await asyncio.sleep(delay_s)
+    return result
+
+
+def _battery_text(battery: Battery | None) -> str:
+    return "未读到" if battery is None else f"原始值 {battery.raw}"
+
+
 async def _read_firmware(device: WT901Device) -> str:
     try:
         return await asyncio.wait_for(device.telemetry.read_version(), timeout=3.0)
@@ -397,7 +441,7 @@ class DeviceOps:
     )
     transport: Callable[[DiscoveredDevice], Transport] = field(default=BleTransport)
     read_battery: Callable[[WT901Device], Awaitable[Battery | None]] = field(
-        default=read_battery_at_low_rate
+        default=read_battery_with_retry
     )
     resolve_identity: Callable[..., Awaitable[tuple[DeviceIdentity, str | None]]] = field(
         default=resolve_recording_identity
@@ -905,7 +949,12 @@ def _emit_probe(out: Any, source: BleDeviceSource, state: str) -> None:  # pragm
                 "t": round(time.monotonic(), 3),
                 "state": state,
                 "error": source.last_error,
-                "batteries": {k: v.percent if v else None for k, v in batteries.items()},
+                # 原始值一并打出：只打 percent 时「读到原始值 0」与「没读到」都显示成 null，
+                # 2026-09-16 首次真机探测就因此看不出成因。
+                "batteries": {
+                    k: ({"percent": v.percent, "raw": v.raw} if v is not None else None)
+                    for k, v in batteries.items()
+                },
                 "arrival": {k: round(v, 3) for k, v in source.arrival_rates().items()},
                 "links": source.link_grades(),
                 "steps": source.step_counts(),
