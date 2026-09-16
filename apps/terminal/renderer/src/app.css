@@ -978,3 +978,8 @@ body {
   margin: 0 0 var(--space-5, 20px);
   color: var(--color-text-secondary, #5a5a5a);
 }
+
+/* RAY-479 左右模块配对 */
+.binding-wizard .wizard-body { display: grid; gap: var(--space-4); }
+.binding-wizard__busy { margin: 0; color: var(--text-secondary); }
+.wear-color-reminder { margin: 0 0 var(--space-4); font: var(--text-body); }

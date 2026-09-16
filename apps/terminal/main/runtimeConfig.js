@@ -56,6 +56,14 @@ export function sessionRoot(userDataDir) {
 }
 
 /**
+ * 设备级配置目录：左右模块绑定（RAY-479）。与会话目录分开 —— 清理会话数据不该顺手
+ * 把「哪只物理模块是左脚」一起清掉。
+ */
+export function configRoot(userDataDir) {
+  return path.join(userDataDir, "config");
+}
+
+/**
  * sidecar 的业务环境变量。
  *
  * **刻意没有 `GAIT_ACCESS_ROOT`**：预览版不预配置云端，sidecar 因此不建上传线程、
@@ -64,6 +72,8 @@ export function sessionRoot(userDataDir) {
 export function sidecarEnv({ settings, userDataDir }) {
   return {
     GAIT_SESSION_ROOT: sessionRoot(userDataDir),
+    // 演示模式也带上：无害（演示源不要求绑定），而切到真实传感器时不必重启才有绑定可读。
+    GAIT_CONFIG_ROOT: configRoot(userDataDir),
     GAIT_DEVICE_SOURCE: normalizeSettings(settings).deviceSource,
     GAIT_PREVIEW: "1",
     GAIT_PROTOCOL_SECONDS: PREVIEW_PROTOCOL_SECONDS,

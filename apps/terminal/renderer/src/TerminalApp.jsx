@@ -16,6 +16,7 @@ import { CapabilityGap } from "./CapabilityGap.jsx";
 import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
 import { SidecarDownScreen } from "./SidecarDownScreen.jsx";
 import { AppBar } from "./AppBar.jsx";
+import { BindingWizardScreen } from "./BindingWizardScreen.jsx";
 import { PreviewBanner } from "./PreviewBanner.jsx";
 import { ReportErrorScreen } from "./ReportErrorScreen.jsx";
 
@@ -38,6 +39,7 @@ const STAGE = {
   reportPreview: "reportPreview",
   deviceSupport: "deviceSupport",
   reportError: "reportError",
+  binding: "binding",
 };
 
 /** Nav labels are the AppBar's contract; the mapping lives in one place. */
@@ -101,9 +103,11 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
   // 报告预览的缺口（RAY-224）。与 report 分开存：一个「打不开」和一个「还没接通」
   // 在界面上要说不同的话。
   const [reportGap, setReportGap] = useState(null);
-  // 佩戴确认（P-07 最小接线）：`wearing` 是 PRD §13 的佩戴底线，`swapped` 是「一键对调」。
+  // 佩戴确认（P-07 最小接线）：`wearing` 是 PRD §13 的佩戴底线。RAY-479 起没有「一键对调」：
+  // 左右只由配对绑定决定（蓝色模块左脚、橙色模块右脚）。
   const [wearing, setWearing] = useState("unknown");
-  const [swapped, setSwapped] = useState(false);
+  // 配对向导结束后回到哪一屏（RAY-479）：设备页、工作台或自检。
+  const [bindingReturn, setBindingReturn] = useState(STAGE.hub);
   // sidecar 的进程状态。null 表示「没有进程可看护」（mock 路径），
   // 与「进程状态未知」不是一回事，所以不给它一个默认的 ready。
   const [sidecar, setSidecar] = useState(null);
@@ -218,6 +222,21 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
     }
   }
 
+  function openBindingWizard(returnTo) {
+    setBindingReturn(returnTo);
+    setStage(STAGE.binding);
+  }
+
+  /** 向导结束（完成或取消）：回到来处，并让那一屏重读 —— 绑定变了，旧读数不再成立。 */
+  async function closeBindingWizard() {
+    if (bindingReturn === STAGE.deviceSupport) {
+      await navigate("设备与支持");
+      return;
+    }
+    // 回工作台时由「进入工作台即重拉快照」负责刷新；自检屏重新挂载即重跑。
+    setStage(bindingReturn);
+  }
+
   function confirmSubject(chosen) {
     setSubject(chosen);
     setStage(STAGE.profile);
@@ -264,10 +283,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
     setStage(STAGE.running);
   }
 
-  /**
-   * 打开一份报告：缺省用当前会话，records 路径传 record（含 id=sessionId）。
-   * `swapped` 是佩戴确认里的一键对调，决定 sidecar 读哪一侧的录制。
-   */
+  /** 打开一份报告：缺省用当前会话，records 路径传 record（含 id=sessionId）。 */
   async function openReport(record, retryStage = null) {
     let opened;
     try {
@@ -309,6 +325,16 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
               }
             : null
         }
+      />
+    );
+  }
+
+  if (stage === STAGE.binding) {
+    return (
+      <BindingWizardScreen
+        bindFoot={(foot) => adapter.bindFoot(foot)}
+        onDone={closeBindingWizard}
+        onCancel={closeBindingWizard}
       />
     );
   }
@@ -355,6 +381,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
       <PreflightScreen
         runChecks={() => adapter.runPreflight()}
         onReady={() => setStage(STAGE.wear)}
+        onRepairBinding={() => openBindingWizard(STAGE.preflight)}
       />
     );
   }
@@ -366,9 +393,8 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
   if (stage === STAGE.calibration) {
     return (
       <WearConfirmScreen
-        onDone={({ wearing: w, swapped: s }) => {
+        onDone={({ wearing: w }) => {
           setWearing(w);
-          setSwapped(s);
           startWalk();
         }}
         onBack={() => setStage(STAGE.wear)}
@@ -394,7 +420,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
           }
           setResult(sessionResult);
           if (sessionResult?.report?.status === "ready") {
-            await openReport({ swapped, subjectLabel: subject?.maskedId }, STAGE.preflight);
+            await openReport({ subjectLabel: subject?.maskedId }, STAGE.preflight);
           } else {
             setStage(STAGE.result);
           }
@@ -448,10 +474,9 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
           setSubject(null);
           setProfile(null);
           setWearing("unknown");
-          setSwapped(false);
           setStage(STAGE.subject);
         }}
-        onOpenReport={() => openReport({ swapped, subjectLabel: subject?.maskedId }, STAGE.preflight)}
+        onOpenReport={() => openReport({ subjectLabel: subject?.maskedId }, STAGE.preflight)}
         onRetry={() => {
           setResult(null);
           startWalk();
@@ -504,7 +529,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
         support={deviceInfo.support ?? {}}
         onNavigate={navigate}
         onRecheck={handleRecheck}
-        onRepair={() => {}}
+        onRepair={() => openBindingWizard(STAGE.deviceSupport)}
       />
     );
   }
@@ -519,6 +544,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
         recheckError={recheckError}
         onDismissRecheckError={() => setRecheckError(null)}
         onStartNewAssessment={() => setStage(STAGE.subject)}
+        onBind={() => openBindingWizard(STAGE.hub)}
       />
     );
   }
