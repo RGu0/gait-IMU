@@ -400,6 +400,153 @@ def test_main在漂移路径上不崩(tmp_path: Path, monkeypatch: pytest.Monkey
     assert chk.main([]) == 1  # 崩的话这里是异常，不是 1
 
 
+# ------------------------------------------------- 本机克隆过期（RAY-499）
+
+import hashlib
+import subprocess
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _git_upstream(
+    tmp_path: Path,
+    rel: str,
+    worktree_text: str,
+    origin_text: str | None = None,
+    with_remote: bool = True,
+) -> Path:
+    """造一个 **git 检出**的上游。
+
+    给了 `origin_text` 就让工作区停在旧提交、而 `refs/remotes/origin/master` 指向新
+    提交 —— 那正是「本机克隆过期」的形状：一次 fetch 之后没再 fetch，工作区落后。
+    用远程跟踪引用而不是真造一个远端仓库，因为检查读的本来就是前者。
+    """
+    root = tmp_path / "container" / "some-upstream" / "main"
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "-b", "master")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(worktree_text, encoding="utf-8", newline="\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "pinned state")
+    head = _git(root, "rev-parse", "HEAD")
+    remote_head = head
+
+    if origin_text is not None:
+        path.write_text(origin_text, encoding="utf-8", newline="\n")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "upstream moved on")
+        remote_head = _git(root, "rev-parse", "HEAD")
+        _git(root, "checkout", "-q", "-B", "master", head)
+
+    if with_remote:
+        _git(root, "update-ref", "refs/remotes/origin/master", remote_head)
+        _git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+    return root
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_克隆落后时明说不可信而不是报漂移(tmp_path: Path) -> None:
+    """本 Issue 的核心用例。
+
+    声明钉的是 `origin/master` 上的**新**内容（声明是对的），工作区停在旧内容。
+    旧写法会把这说成「上游内容已变」，而照那句提示 `--update` 会把一份正确的声明
+    重钉回旧内容 —— 比漏做核对更坏。
+    """
+    _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
+    pin = _pin({"pkg/thing.py": _entry(_sha("新内容\n"))})
+
+    stale = chk.stale_clones(pin, _repo(tmp_path))
+    assert set(stale) == {"up"}
+    assert "本机克隆过期，本次比对不可信" in stale["up"]
+    assert "1 个提交" in stale["up"]
+
+    drift, _unverified = chk.compare_upstream(pin, _repo(tmp_path), skip_keys=set(stale))
+    assert drift == []
+
+
+def test_克隆过期时main非零退出且不报漂移(tmp_path: Path, monkeypatch, capsys) -> None:
+    """必须走 `main()`：只有它决定退出码，也只有它决定打印哪一段。"""
+    _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
+    pin_path = _write_pin(tmp_path, _pin({"pkg/thing.py": _entry(_sha("新内容\n"))}))
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(chk, "REPO_ROOT", repo)
+    monkeypatch.setattr(chk, "PIN_PATH", pin_path)
+    monkeypatch.setattr(chk, "tracked_files", lambda repo_root=repo: [])
+
+    assert chk.main([]) == 1
+    err = capsys.readouterr().err
+    assert "本机克隆过期，本次比对不可信" in err
+    assert "上游已漂移" not in err
+
+
+def test_克隆当前时照常报真漂移(tmp_path: Path) -> None:
+    """验收标准 1：克隆当前时，这道闸门该报的还是要报。"""
+    _git_upstream(tmp_path, "pkg/thing.py", "改过的内容\n")
+    pin = _pin({"pkg/thing.py": _entry()})
+
+    assert chk.stale_clones(pin, _repo(tmp_path)) == {}
+    drift, _ = chk.compare_upstream(pin, _repo(tmp_path))
+    assert len(drift) == 1
+    assert "内容已变" in drift[0]
+
+
+def test_上游不是git仓库时退回现有行为(tmp_path: Path) -> None:
+    """同级目录未必是 git 检出。查不了就不查，绝不因此崩掉或改变判定。"""
+    _upstream(tmp_path, "pkg/thing.py", "改过的内容\n")
+    pin = _pin({"pkg/thing.py": _entry()})
+
+    assert chk.stale_clones(pin, _repo(tmp_path)) == {}
+    drift, _ = chk.compare_upstream(pin, _repo(tmp_path))
+    assert len(drift) == 1
+
+
+def test_上游没有remote时退回现有行为(tmp_path: Path) -> None:
+    """没有远程跟踪引用就没有「落后多少」可言 —— 无从判断不等于判断为过期。"""
+    _git_upstream(tmp_path, "pkg/thing.py", "改过的内容\n", with_remote=False)
+    pin = _pin({"pkg/thing.py": _entry()})
+
+    assert chk.stale_clones(pin, _repo(tmp_path)) == {}
+    drift, _ = chk.compare_upstream(pin, _repo(tmp_path))
+    assert len(drift) == 1
+
+
+def test_克隆过期时update拒绝重钉(tmp_path: Path, monkeypatch) -> None:
+    """`--update` 是这件事里唯一会造成实际破坏的动作，必须在这种状态下拒绝。"""
+    _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
+    good = _sha("新内容\n")
+    pin = _pin({"pkg/thing.py": _entry(good)})
+    pin_path = _write_pin(tmp_path, pin)
+    monkeypatch.setattr(chk, "PIN_PATH", pin_path)
+
+    assert chk.update(pin, _repo(tmp_path)) == 1
+    reloaded = json.loads(pin_path.read_text(encoding="utf-8"))
+    assert reloaded["upstreams"]["up"]["files"]["pkg/thing.py"]["sha256"] == good
+
+
+def test_update重钉时同步更新bytes(tmp_path: Path, monkeypatch) -> None:
+    """声明里记着 `bytes`，而旧的 `update()` 只重写 `sha256` —— 重钉后那个字段变陈。"""
+    _git_upstream(tmp_path, "pkg/thing.py", "新内容\n")
+    pin = _pin({"pkg/thing.py": _entry()})
+    pin_path = _write_pin(tmp_path, pin)
+    monkeypatch.setattr(chk, "PIN_PATH", pin_path)
+
+    assert chk.update(pin, _repo(tmp_path)) == 0
+    entry = json.loads(pin_path.read_text(encoding="utf-8"))["upstreams"]["up"]["files"]["pkg/thing.py"]
+    assert entry["sha256"] == _sha("新内容\n")
+    assert entry["bytes"] == len("新内容\n".encode())
+
+
 # ----------------------------------------------------------------- 真实仓库
 
 

@@ -23,12 +23,29 @@ runner 上根本不存在。所以本检查分两层，**各自查自己真的�
 | 层 | 查什么 | 何时跑 |
 | -- | -- | -- |
 | 一、声明完整性 | 仓库文件里引用到的每一个上游文件都已在 `upstream_refs.json` 里 | **总是** |
-| 二、内容比对 | 重读上游文件、比 sha256 | 上游在本机时 |
+| 前置、克隆是否过期 | 上游检出是否落后它自己的 `origin/<默认分支>` | 上游是 git 检出时 |
+| 二、内容比对 | 重读上游文件、比 sha256 | 上游在本机、且克隆不过期时 |
 
 第一层只看本仓库自己的内容，所以**在 CI 上也能真的失败** —— 抓的是「新加了一处引用
 却没钉住」，而那个失败**归因正确**：就是这个改动干的。
 
 第二层在上游缺席时**明说哪几条没能核对**，不静静返回 0。
+
+## 那道前置闸为什么是必要的（RAY-499）
+
+第二层读的是上游的**工作区文件**，不是 `origin`。它因此分不清两件相反的事：上游前进了
+（真漂移），还是本机克隆落后了（声明是对的）。而它对两者打印同一句「先读文档再
+`--update`」。
+
+2026-09-15 实测：一个落后 51 个提交的 `feet-force-plate` 克隆同时造出**三个假红**
+（钉住的新内容被报成「已变」）和**一个假绿**（真漂移因旧检出恰好等于钉住值而被静静
+放过）。照提示 `--update` 会把三条**正确**的声明重钉回一个月前的内容 —— 那不是漏做一次
+核对，是主动往声明里写假话。**一条会说反话的红线比没有红线更危险，因为它的消解动作
+看起来像在修。**
+
+所以克隆过期时：不报漂移，明说本次比对不可信，非零退出，且 `--update` **直接拒绝**。
+查不了的情况（上游不是 git 检出、没有远程跟踪引用）退回原行为 —— 无从判断不等于判断为
+过期，后者只会制造一类新的假红。见 `clone_staleness`。
 
 ## 为什么没有「超期未复核即红」的日期时钟
 
@@ -63,8 +80,13 @@ RAY-420 原提案里有这么一条，写实现时判定它是错的：日期时
 
     ./dev node true >/dev/null; uv run python tools/check_upstream_refs.py --update
 
-`--update` 会打印每个文件的新旧摘要。**它不替你做核对** —— 摘要变了意味着引用它的那几
-份文档需要人重读一遍，脚本没有能力判断结论是否还成立。
+`--update` 会打印每个文件的新旧摘要，并同步刷新声明里的 `bytes`（两者出自同一次读、
+都取 LF 归一化后的字节；旧版只写 `sha256`，`bytes` 就地变陈）。
+
+**它不替你做核对** —— 摘要变了意味着引用它的那几份文档需要人重读一遍，脚本没有能力
+判断结论是否还成立。
+
+**本机克隆过期时它会直接拒绝**，因为那正是重钉唯一会造成实际破坏的场合。
 """
 
 from __future__ import annotations
@@ -76,6 +98,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -349,14 +372,140 @@ def undeclared_citations(
     return problems
 
 
+# --------------------------------------------------------- 第二层的前置：克隆是否过期
+
+
+def _git_out(root: Path, *args: str) -> str | None:
+    """跑一条 git，成功返回 stdout，其余一律 None。
+
+    尽力而为：上游不是 git 仓库、git 不在 PATH、仓库坏了 —— 都只意味着**这件事查不了**，
+    不意味着克隆过期。查不了与判定为过期是两回事，混同会制造新的假红。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def remote_default_ref(root: Path) -> str | None:
+    """上游自己的 origin 默认分支的远程跟踪引用。拿不到返回 None。
+
+    先问 `refs/remotes/origin/HEAD` —— 它是 clone 时写下的、上游自己声明的默认分支，
+    比猜名字准。没有它（有些克隆不写）再退到 main / master 两个实际存在的引用。
+    """
+    head = _git_out(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if head:
+        return head
+    for name in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
+        if _git_out(root, "rev-parse", "--verify", "--quiet", name):
+            return name
+    return None
+
+
+def _fetch_age_days(root: Path) -> int | None:
+    """上次 fetch 距今多少天。纯提示，拿不到就不说。"""
+    common = _git_out(root, "rev-parse", "--git-common-dir")
+    if not common:
+        return None
+    base = Path(common)
+    if not base.is_absolute():
+        base = Path(root) / base
+    try:
+        mtime = (base / "FETCH_HEAD").stat().st_mtime
+    except OSError:
+        return None
+    return int((time.time() - mtime) // 86400)
+
+
+def clone_staleness(root: Path) -> str | None:
+    """上游检出落后它自己的 origin 默认分支时返回一句说明，否则 None。
+
+    ## 为什么这一条必须在内容比对**之前**
+
+    第二层读的是上游的**工作区文件**，不是 `origin`。于是它分不清两件相反的事：
+
+    * 上游前进了（真漂移，该重读文档再重钉）；
+    * 本机克隆落后了（声明是对的，重钉会**毁掉**它）。
+
+    而它对两者打印同一句「先读文档再 `--update`」。RAY-499 那次，一个落后 51 个提交的
+    克隆同时造出**三个假红**（钉住的新内容被报成「已变」）和**一个假绿**（真漂移因为
+    旧检出恰好等于钉住值而被静静放过）。照提示 `--update` 会把三条正确的声明重钉回一个
+    月前的内容 —— 那不是漏做一次核对，是主动往声明里写假话。
+
+    所以克隆过期时，本检查**不报漂移**，改为明说这次比对不可信并以非零退出。
+    一条会说反话的红线比没有红线更危险，因为它的消解动作看起来像在修。
+
+    ## 为什么查不了就退回原行为
+
+    同级目录未必是 git 检出，克隆也未必有远程跟踪引用（`--no-checkout`、纯导出的目录）。
+    那些情况下「落后多少」根本没有指称物。**无从判断不等于判断为过期** —— 后者会制造
+    一类新的假红，而这整条改动就是为了消灭假红。
+    """
+    if _git_out(root, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    ref = remote_default_ref(root)
+    if ref is None:
+        return None
+    behind = _git_out(root, "rev-list", "--count", f"HEAD..{ref}")
+    if behind is None or not behind.isdigit() or int(behind) == 0:
+        return None
+
+    note = (
+        f"本机克隆过期，本次比对不可信：工作区落后 {ref.removeprefix('refs/remotes/')} "
+        f"{behind} 个提交"
+    )
+    age = _fetch_age_days(root)
+    if age is not None:
+        note += f"（上次 fetch 距今约 {age} 天）"
+    return note
+
+
+def stale_clones(pin: dict, repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    """{上游 key: 说明}。只针对同级目录型上游 —— 按锁文件钉的那类不读工作区。"""
+    stale: dict[str, str] = {}
+    for key, spec in pin["upstreams"].items():
+        if spec.get("pinned_by") is not None:
+            continue
+        root = upstream_root(key, spec, repo_root)
+        if root is None:
+            continue  # 不在本机，属「未能核对」，由第二层如实报告
+        note = clone_staleness(root)
+        if note:
+            stale[key] = f"{key}（{spec['repo_dir']}）{note}"
+    return stale
+
+
+STALE_ADVICE = (
+    "过期克隆会让这道闸门**反着说话**：钉住的（新）内容被报成「上游已变」，"
+    "而过期之后\n真正发生的漂移因为旧检出恰好等于钉住值被静静放过。"
+    "\n**不要在这种状态下 `--update`** —— 那会把一份正确的声明重钉回旧内容。"
+    "\n先更新克隆再重跑：`git -C <上游> fetch origin && git -C <上游> merge --ff-only`。"
+)
+
+
 # ------------------------------------------------------------------- 第二层：比对
 
 
-def compare_upstream(pin: dict, repo_root: Path = REPO_ROOT) -> tuple[list[str], list[str]]:
-    """(漂移, 未能核对)。未能核对**不是**失败，但必须被打印出来。"""
+def compare_upstream(
+    pin: dict, repo_root: Path = REPO_ROOT, skip_keys: frozenset[str] | set[str] = frozenset()
+) -> tuple[list[str], list[str]]:
+    """(漂移, 未能核对)。未能核对**不是**失败，但必须被打印出来。
+
+    `skip_keys` 里的上游整条跳过 —— 克隆过期时它的漂移与「无漂移」同样不可信，
+    报出来只会让人去修一件没发生的事。
+    """
     drift: list[str] = []
     unverified: list[str] = []
     for key, spec in pin["upstreams"].items():
+        if key in skip_keys:
+            continue
         pinned = spec.get("pinned_by")
         if pinned is not None:
             # 按锁文件钉的上游：**没有「未能核对」这一档**。锁文件在库里，任何机器、
@@ -414,6 +563,15 @@ def recent_commits(root: Path, rel: str, count: int = 3) -> list[str]:
 
 
 def update(pin: dict, repo_root: Path = REPO_ROOT) -> int:
+    stale = stale_clones(pin, repo_root)
+    if stale:
+        # 这是整条改动要挡住的那一个动作。见 clone_staleness 的文档。
+        print("拒绝重钉 —— 本机克隆过期：", file=sys.stderr)
+        for note in stale.values():
+            print(f"  {note}", file=sys.stderr)
+        print(f"\n{STALE_ADVICE}", file=sys.stderr)
+        return 1
+
     changed = 0
     for key, spec in pin["upstreams"].items():
         if spec.get("pinned_by") is not None:
@@ -435,10 +593,16 @@ def update(pin: dict, repo_root: Path = REPO_ROOT) -> int:
             if not path.is_file():
                 print(f"  ! {key}:{rel} 上游已不存在，未更新", file=sys.stderr)
                 continue
-            actual = sha256_of(path)
-            if actual != entry.get("sha256"):
+            # 一次读完算两样：摘要与 `bytes` 必须出自同一次读，且都取 **LF 归一化后**
+            # 的字节。旧版只重写 `sha256`，`bytes` 就地变陈；而若把 `bytes` 记成磁盘
+            # 原样大小，它又会随平台变（CRLF 检出上偏大），重新引入 LF 归一化当初要
+            # 消灭的那种「按平台而非按事实」的差异。
+            data = path.read_bytes().replace(b"\r\n", b"\n")
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != entry.get("sha256") or entry.get("bytes") != len(data):
                 print(f"  {key}:{rel}\n    {entry.get('sha256', '(无)')[:16]}… -> {actual[:16]}…")
                 entry["sha256"] = actual
+                entry["bytes"] = len(data)
                 changed += 1
     PIN_PATH.write_text(
         json.dumps(pin, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -483,7 +647,9 @@ def main(argv: list[str] | None = None) -> int:
     # 于是那条路径一旦真的走到就抛 UnboundLocalError，而那是唯一要紧的路径。
     by_lock = {k: s for k, s in pin["upstreams"].items() if s.get("pinned_by")}
     by_sibling = {k: s for k, s in pin["upstreams"].items() if not s.get("pinned_by")}
-    drift, unverified = compare_upstream(pin, REPO_ROOT)
+    # 过期克隆整条跳过比对：它的「漂移」与「无漂移」同样不可信。见 clone_staleness。
+    stale = stale_clones(pin, REPO_ROOT)
+    drift, unverified = compare_upstream(pin, REPO_ROOT, skip_keys=set(stale))
 
     if problems:
         print("上游引用未声明：", file=sys.stderr)
@@ -515,6 +681,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if stale:
+        print("本机上游克隆过期，这几条没能可信地比对：", file=sys.stderr)
+        for note in stale.values():
+            print(f"  {note}", file=sys.stderr)
+        print(f"\n{STALE_ADVICE}", file=sys.stderr)
+
     total = sum(len(s["files"]) for s in by_sibling.values())
     checked = total - sum(
         len(s["files"]) for k, s in by_sibling.items() if upstream_root(k, s, REPO_ROOT) is None
@@ -524,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
         for line in unverified:
             print(f"  {line}", file=sys.stderr)
 
-    if problems or drift:
+    if problems or drift or stale:
         return 1
 
     locked = "；".join(locked_version(s["pinned_by"], REPO_ROOT)[1] for s in by_lock.values())
