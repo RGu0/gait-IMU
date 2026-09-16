@@ -398,12 +398,22 @@ def remote_default_ref(root: Path) -> str | None:
     """上游自己的 origin 默认分支的远程跟踪引用。拿不到返回 None。
 
     先问 `refs/remotes/origin/HEAD` —— 它是 clone 时写下的、上游自己声明的默认分支，
-    比猜名字准。没有它（有些克隆不写）再退到 main / master 两个实际存在的引用。
+    比猜名字准。没有它（有些克隆不写）再退到 main / master。
+
+    **每个候选都要验证它真的解析得出来。** `origin/HEAD` 是个符号引用，可以指向一个
+    已经不存在的分支（上游改名或删掉默认分支就会这样），而 `symbolic-ref` 照样成功
+    返回那个名字。只信它不验证，会拿到一个 `rev-list` 解析不了的引用名 —— 于是本函数
+    的调用方判定「查不了」并退回原行为，而原行为正是**把过期克隆报成漂移**。旁边明明
+    有一个能用的 `origin/master`。这一条是 PR #146 review 时用探针打出来的。
+
+    验证不了就继续往下找；一个都验证不出来才返回 None。回退不能变成硬猜。
     """
+    candidates = []
     head = _git_out(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     if head:
-        return head
-    for name in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
+        candidates.append(head)
+    candidates += ["refs/remotes/origin/main", "refs/remotes/origin/master"]
+    for name in candidates:
         if _git_out(root, "rev-parse", "--verify", "--quiet", name):
             return name
     return None

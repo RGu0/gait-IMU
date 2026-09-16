@@ -521,6 +521,32 @@ def test_上游没有remote时退回现有行为(tmp_path: Path) -> None:
     assert len(drift) == 1
 
 
+def test_origin_head悬空时回退而不是放弃(tmp_path: Path) -> None:
+    """`origin/HEAD` 可能指向一个已不存在的分支 —— 上游改名或删掉默认分支就会这样。
+
+    只问 `symbolic-ref` 而不验证它指向的东西是否存在，会让守卫**整个失效**：拿到一个
+    解析不了的引用名，`rev-list` 失败，于是「查不了」，于是退回原行为 —— 而原行为正是
+    把过期克隆报成漂移。旁边明明有一个能用的 `origin/master`。
+    """
+    root = _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
+    _git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/没了")
+
+    assert chk.remote_default_ref(root) == "refs/remotes/origin/master"
+    note = chk.clone_staleness(root)
+    assert note is not None
+    assert "1 个提交" in note
+
+
+def test_一个远程跟踪引用都没有时仍退回原行为(tmp_path: Path) -> None:
+    """回退不能变成硬猜：连 master / main 都没有时，仍然是「查不了」。"""
+    root = _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
+    _git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/没了")
+    _git(root, "update-ref", "-d", "refs/remotes/origin/master")
+
+    assert chk.remote_default_ref(root) is None
+    assert chk.clone_staleness(root) is None
+
+
 def test_克隆过期时update拒绝重钉(tmp_path: Path, monkeypatch) -> None:
     """`--update` 是这件事里唯一会造成实际破坏的动作，必须在这种状态下拒绝。"""
     _git_upstream(tmp_path, "pkg/thing.py", "旧内容\n", "新内容\n")
