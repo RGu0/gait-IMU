@@ -54,13 +54,19 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from wt901 import Battery, BleTransport, DiscoveredDevice, Transport, WT901Device, scan
 from wt901.transport.base import DataCallback
 
+from gait.app.bindings import FOOT_COLORS, BindingStore, IdentifyFailure, mask_mac
 from gait.app.sources import LINK_GRADES
-from gait.device.binding import DeviceIdentity
+from gait.device.binding import (
+    BindingError,
+    DeviceIdentity,
+    FootBinding,
+    admit_for_session,
+)
 from gait.device.ble import (
     AppliedConfig,
     close_quietly,
@@ -68,7 +74,11 @@ from gait.device.ble import (
     read_battery_at_low_rate,
     start_streaming,
 )
-from gait.device.identity import PLATFORM_PROVENANCE, resolve_recording_identity
+from gait.device.identity import (
+    MAC_PROVENANCE,
+    PLATFORM_PROVENANCE,
+    resolve_recording_identity,
+)
 
 __all__ = [
     "ARRIVAL_WINDOW_S",
@@ -77,6 +87,7 @@ __all__ = [
     "ArrivalWindow",
     "BleDeviceSource",
     "DeviceOps",
+    "IdentifyFailure",
     "SessionPort",
     "StepCounter",
     "TapTransport",
@@ -104,6 +115,12 @@ CLOSE_WAIT_S = 12.0
 #: 不写直接读也有 1/8。flash 写完的恢复实测 299~327 ms，所以间隔取 0.3 s。
 BATTERY_READ_ATTEMPTS = 3
 BATTERY_RETRY_DELAY_S = 0.3
+#: 配对识别（RAY-479）的整体等待上限：两次扫描 + 逐台连上读 MAC 再断开。sidecar 的
+#: 请求超时是 120 s（`apps/terminal/main/runtimeConfig.js`），这里要留出余量。
+IDENTIFY_WAIT_S = 90.0
+#: 配对识别至少扫这么多次再下结论。「只开了一台」要靠「没扫到第二台」来证明，而
+#: 一次扫描扫不全是常态（见 `_select`）—— 只扫一次就可能把两台里的一台当成唯一。
+IDENTIFY_MIN_SCANS = 2
 
 
 def _log(message: str) -> None:
@@ -490,11 +507,15 @@ class BleDeviceSource:
         ops: DeviceOps | None = None,
         clock: Callable[[], float] = time.monotonic,
         connect_wait_s: float = CONNECT_WAIT_S,
+        bindings: BindingStore | None = None,
     ) -> None:
         self.left = left
         self.right = right
         self.scan_timeout = scan_timeout
         self.session_root = session_root
+        #: 左右绑定（RAY-479）。**有它就只按绑定的 MAC 分左右**，没有绑定就不连；
+        #: 没有它（CLI 探针、离线测试）才退回地址过滤 / 扫描顺序。
+        self.bindings = bindings
         self._ops = ops or DeviceOps()
         self._clock = clock
         self._connect_wait = connect_wait_s
@@ -502,7 +523,7 @@ class BleDeviceSource:
         self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._pending: concurrent.futures.Future[None] | None = None
+        self._pending: concurrent.futures.Future[Any] | None = None
         self._closed = False
 
         self._feet: dict[str, _Foot] = {}
@@ -510,16 +531,22 @@ class BleDeviceSource:
         self._streaming = False
         self._foot_assignment: str | None = None
         self._last_error: str | None = None
+        self._binding_problem: str | None = None
         self._windows = {label: ArrivalWindow(clock=clock) for label in FEET}
         self._steps = {label: StepCounter() for label in FEET}
         self._ports = {label: SessionPort(label) for label in FEET}
 
     # ── 构造 ──
 
+    #: 真实传感器必须先绑定左右才能开正式会话（RAY-479）。service 据此在自检里加一项。
+    binding_required = True
+
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> BleDeviceSource:
         """`GAIT_BLE_LEFT` / `GAIT_BLE_RIGHT`：地址子串（可选）；
-        `GAIT_BLE_SCAN_TIMEOUT`：单次扫描秒数，缺省 5；`GAIT_SESSION_ROOT` 供磁盘余量。
+        `GAIT_BLE_SCAN_TIMEOUT`：单次扫描秒数，缺省 5；`GAIT_SESSION_ROOT` 供磁盘余量；
+        `GAIT_CONFIG_ROOT`：左右绑定所在的设备配置目录 —— 设了就按绑定分左右，
+        地址过滤随之不再参与。
 
         写坏的超时回落到缺省值而不是抛：进程入口在这里抛异常只会退回「设备不可用」，
         而一个打错的数字不值得让操作员连设备都看不到。
@@ -531,11 +558,13 @@ class BleDeviceSource:
         except ValueError:
             timeout = DEFAULT_SCAN_TIMEOUT_S
         root = (env.get("GAIT_SESSION_ROOT") or "").strip()
+        config = (env.get("GAIT_CONFIG_ROOT") or "").strip()
         return cls(
             left=(env.get("GAIT_BLE_LEFT") or "").strip() or None,
             right=(env.get("GAIT_BLE_RIGHT") or "").strip() or None,
             scan_timeout=timeout,
             session_root=Path(root) if root else None,
+            bindings=BindingStore(Path(config)) if config else None,
         )
 
     # ── 生命周期 ──
@@ -554,6 +583,14 @@ class BleDeviceSource:
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    @property
+    def binding_problem(self) -> str | None:
+        """上一次按绑定连接为什么没连成（未绑定、绑定的模块不在场、扫到陌生模块）。
+
+        自检的「左右模块绑定」一项据此把**这一次**的具体情况说出来。
+        """
+        return self._binding_problem
 
     def refresh(self, timeout: float | None = None) -> str:
         """没连上且没在连，就在后台开始连；然后最多等 `timeout` 秒。幂等。
@@ -624,11 +661,17 @@ class BleDeviceSource:
     async def _connect(self) -> None:
         await self._teardown()
         self._last_error = None
+        self._binding_problem = None
         opened: list[_Foot] = []
         try:
-            selected, assignment = await self._select()
-            for label, discovered in zip(FEET, selected, strict=True):
-                opened.append(await self._open_foot(label, discovered))
+            if self.bindings is not None:
+                bound = await self._select_bound(self._usable_binding())
+                opened = [bound[label] for label in FEET]
+                assignment = "binding"
+            else:
+                selected, assignment = await self._select()
+                for label, discovered in zip(FEET, selected, strict=True):
+                    opened.append(await self._open_foot(label, discovered))
             for foot in opened:
                 foot.applied = await self._ops.configure(foot.device)
             # 两台都配完再**一起**写速率开流 —— 见 `configure_streaming` 的 defer_rate。
@@ -699,6 +742,238 @@ class BleDeviceSource:
             )
             _log(f"{problem}（{attempt}/{SCAN_ATTEMPTS}）")
         raise _ConnectError(problem + "。确认模块已按键开机且在范围内。")
+
+    def _usable_binding(self) -> FootBinding:
+        """读绑定；不能用来分左右时抛 `_ConnectError` 并记下原因。
+
+        「不能用」包括：没绑、只绑了一只、文件坏了、绑定用的身份种类或推导与当前不符。
+        这些情况下**不连接**，也不退回扫描顺序 —— 扫描顺序分出来的左右正是绑定要取代的
+        东西（RAY-479 用户拍板：绑定之后左右只看 MAC）。
+        """
+        assert self.bindings is not None
+        try:
+            binding = self.bindings.read()
+        except BindingError as error:
+            self._refuse(f"左右绑定文件读不回来（{error}），需要重新配对。")
+        present = {identity for identity in (binding.left, binding.right) if identity}
+        verdict = admit_for_session(
+            binding, present, current_kind="mac", current_provenance=MAC_PROVENANCE
+        )
+        if not verdict.admitted:
+            self._refuse(" ".join(verdict.problems))
+        return binding
+
+    def _refuse(self, problem: str) -> NoReturn:
+        self._binding_problem = problem
+        raise _ConnectError(problem)
+
+    async def _select_bound(self, binding: FootBinding) -> dict[str, _Foot]:
+        """扫描，逐台连上读设备自报 MAC，按绑定认出左右。
+
+        MAC 是唯一依据：扫描顺序、平台地址、信号强弱都不参与。认出的留着（之后配置
+        开流），认不出的立刻断开。两只都认出就停，不再去碰剩下的模块。
+
+        绑定的模块凑不齐就抛 —— 读数于是停在「未连接」，自检如实阻断，并由
+        `binding_problem` 说出缺的是哪一只、扫到了哪些陌生模块。
+        """
+        wanted = {"L": binding.left, "R": binding.right}
+        found: dict[str, _Foot] = {}
+        #: 已经读过身份的地址 → 身份（读不到 MAC 记 None）。重扫时不重复连它们。
+        seen: dict[str, DeviceIdentity | None] = {}
+        scan_problem: str | None = None
+        try:
+            for attempt in range(1, SCAN_ATTEMPTS + 1):
+                try:
+                    discovered = list(await self._ops.scan(self.scan_timeout))
+                except Exception as error:  # noqa: BLE001 - 蓝牙关着等，重试后照实报
+                    scan_problem = f"扫描失败：{error}"
+                    _log(f"{scan_problem}（{attempt}/{SCAN_ATTEMPTS}）")
+                    continue
+                scan_problem = None
+                for candidate in discovered:
+                    if candidate.address in seen:
+                        continue
+                    try:
+                        foot = await self._open_foot("?", candidate)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:  # noqa: BLE001 - 一台连不上不挡另一台
+                        _log(f"{candidate.address} 连接失败，稍后重试：{error!r}")
+                        continue
+                    identity = None if foot.identity_degraded else foot.identity
+                    seen[candidate.address] = identity
+                    label = next(
+                        (
+                            side
+                            for side in FEET
+                            if side not in found and identity is not None
+                            and wanted[side] == identity
+                        ),
+                        None,
+                    )
+                    if label is None:
+                        await self._close_device(foot)
+                        continue
+                    found[label] = foot
+                    if len(found) == len(FEET):
+                        return found
+                _log(
+                    f"按绑定认出 {sorted(found)}，还缺 "
+                    f"{[side for side in FEET if side not in found]}（{attempt}/{SCAN_ATTEMPTS}）"
+                )
+            missing = [side for side in FEET if side not in found]
+            parts = [
+                f"{FOOT_COLORS[side]}模块 {mask_mac(wanted[side].value if wanted[side] else None)}"
+                " 没有找到"
+                for side in missing
+            ]
+            strangers = sorted(
+                {
+                    mask_mac(identity.value) or "?"
+                    for identity in seen.values()
+                    if identity is not None and identity not in wanted.values()
+                }
+            )
+            if strangers:
+                parts.append(f"扫描到未绑定的模块 {'、'.join(strangers)}")
+            if any(identity is None for identity in seen.values()):
+                parts.append("有模块读不到自报 MAC")
+            if scan_problem:
+                parts.append(scan_problem)
+            self._binding_problem = "在场模块与左右绑定不符：" + "；".join(parts) + "。"
+            raise _ConnectError(self._binding_problem)
+        except BaseException:
+            for foot in found.values():
+                await self._close_device(foot)
+            raise
+
+    # ── 配对识别（RAY-479）──
+
+    def identify_for_binding(
+        self,
+        label: str,
+        *,
+        exclude: DeviceIdentity | None = None,
+        timeout: float = IDENTIFY_WAIT_S,
+    ) -> DeviceIdentity:
+        """找出**唯一**一台开着的模块，读出它自报的 MAC。不写任何东西。
+
+        `exclude` 是已经绑在另一只脚上的身份：配右脚时左脚的蓝色模块还开着是正常的，
+        它不算候选。
+
+        恰好一台才返回；零台、多台、读不到 MAC、连不上都抛 `IdentifyFailure`，文案
+        按颜色说清楚该开哪一台 —— **从不在多台里挑一台**：挑错的那一刻起，此后每一场
+        会话都左右镜像，而每个指标单看都像真的。
+
+        开始前先断开现有连接：连着的模块不广播，扫描就看不见它。
+        """
+        if label not in FEET:
+            raise ValueError(f"脚标必须是 'L' 或 'R'，收到 {label!r}")
+        with self._lock:
+            if self._closed:
+                raise IdentifyFailure("设备源已关闭，无法配对。", "请重启应用后重试。")
+            pending = self._pending
+            if pending is not None and not pending.done():
+                pending.cancel()
+            loop = self._ensure_loop()
+            future = asyncio.run_coroutine_threadsafe(self._identify(label, exclude), loop)
+            # 占住 `_pending`：识别期间 `refresh()` 不会并发地再起一次连接。
+            self._pending = future
+        try:
+            return future.result(timeout)
+        except concurrent.futures.TimeoutError as error:
+            future.cancel()
+            raise IdentifyFailure(
+                f"识别{FOOT_COLORS[label]}模块超时（{timeout:.0f} 秒）。",
+                f"请只打开{FOOT_COLORS[label]}模块、靠近电脑后重试。",
+            ) from error
+        except concurrent.futures.CancelledError as error:
+            raise IdentifyFailure(
+                f"识别{FOOT_COLORS[label]}模块被中断。", "请重试。"
+            ) from error
+
+    async def _identify(self, label: str, exclude: DeviceIdentity | None) -> DeviceIdentity:
+        await self._teardown()
+        with self._lock:
+            self._foot_assignment = None
+        color = FOOT_COLORS[label]
+        other = FOOT_COLORS["R" if label == "L" else "L"]
+        power_only = f"请只打开{color}模块，其余模块先关机，然后重试。"
+
+        union: dict[str, DiscoveredDevice] = {}
+        scans = 0
+        scan_problem: str | None = None
+        for attempt in range(1, SCAN_ATTEMPTS + 1):
+            try:
+                found = await self._ops.scan(self.scan_timeout)
+            except Exception as error:  # noqa: BLE001 - 蓝牙关着等，重试后照实报
+                scan_problem = f"扫描失败：{error}"
+                _log(f"配对{scan_problem}（{attempt}/{SCAN_ATTEMPTS}）")
+                continue
+            scans += 1
+            for candidate in found:
+                union.setdefault(candidate.address, candidate)
+            if union and scans >= IDENTIFY_MIN_SCANS:
+                break
+        if not union:
+            if scan_problem and scans == 0:
+                raise IdentifyFailure(
+                    f"蓝牙扫描失败，无法识别{color}模块（{scan_problem}）。",
+                    "请确认电脑蓝牙已打开、应用有蓝牙权限，然后重试。",
+                )
+            raise IdentifyFailure(
+                f"没有发现模块：请打开{color}模块并靠近电脑。",
+                f"按一下{color}模块的开机键，确认指示灯亮起后点「重试」。",
+            )
+
+        identified: list[DeviceIdentity] = []
+        unreadable: list[str] = []
+        unreachable: list[str] = []
+        excluded = 0
+        for candidate in union.values():
+            try:
+                foot = await self._open_foot(label, candidate)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - 如实计入，不崩
+                _log(f"配对时 {candidate.address} 连接失败：{error!r}")
+                unreachable.append(candidate.address)
+                continue
+            try:
+                if foot.identity_degraded or foot.identity is None:
+                    unreadable.append(candidate.address)
+                elif exclude is not None and foot.identity == exclude:
+                    excluded += 1
+                else:
+                    identified.append(foot.identity)
+            finally:
+                await self._close_device(foot)
+
+        total = len(identified) + len(unreadable) + len(unreachable)
+        if total > 1:
+            raise IdentifyFailure(
+                f"发现多个未绑定模块（{total} 台）：无法确定哪一台是{color}模块。",
+                power_only,
+            )
+        if identified:
+            _log(f"配对：{label} 足识别到 {identified[0].value}")
+            return identified[0]
+        if unreadable:
+            raise IdentifyFailure(
+                f"发现一台模块，但读不到它自报的 MAC，无法确认是{color}模块。",
+                f"请把{color}模块关机再开机、靠近电脑后重试。",
+            )
+        if unreachable:
+            raise IdentifyFailure(
+                f"发现一台模块，但连接失败，无法确认是{color}模块。",
+                f"请把{color}模块靠近电脑后重试；仍不行就关机再开机。",
+            )
+        # 只剩已绑在另一只脚上的那台。
+        assert excluded
+        raise IdentifyFailure(
+            f"只发现已绑定为{other}的模块，没有发现{color}模块。",
+            f"请打开{color}模块并靠近电脑，然后重试。",
+        )
 
     async def _open_foot(self, label: str, discovered: DiscoveredDevice) -> _Foot:
         tap = TapTransport(self._ops.transport(discovered))
@@ -876,6 +1151,7 @@ class BleDeviceSource:
             "source": "ble",
             "hardware": True,
             "foot_assignment": assignment,
+            "binding_problem": self._binding_problem,
             "addresses_masked": {
                 label: mask_address(feet[label].discovered.address) if label in feet else None
                 for label in FEET

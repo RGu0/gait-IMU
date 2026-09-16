@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { UV_CONFIG_FILE_NULL } from "../sidecarCommand.js";
 
 import {
+  configRoot,
   DEFAULT_DEVICE_SOURCE,
   DEVICE_SOURCES,
   loadSettings,
@@ -67,11 +68,20 @@ describe("sidecarEnv", () => {
   it("给出会话目录、设备来源与预览开关", () => {
     expect(sidecarEnv({ settings: { deviceSource: "ble" }, userDataDir })).toEqual({
       GAIT_SESSION_ROOT: path.join(userDataDir, "sessions"),
+      GAIT_CONFIG_ROOT: path.join(userDataDir, "config"),
       GAIT_DEVICE_SOURCE: "ble",
       GAIT_PREVIEW: "1",
       GAIT_PROTOCOL_SECONDS: "60",
       PYTHONUTF8: "1",
     });
+  });
+
+  it("绑定目录是 userData 下独立的 config，不在会话目录里，两种设备来源都带", () => {
+    for (const deviceSource of DEVICE_SOURCES) {
+      const env = sidecarEnv({ settings: { deviceSource }, userDataDir });
+      expect(env.GAIT_CONFIG_ROOT).toBe(configRoot(userDataDir));
+      expect(env.GAIT_CONFIG_ROOT.startsWith(env.GAIT_SESSION_ROOT)).toBe(false);
+    }
   });
 
   it("永远不带 GAIT_ACCESS_ROOT —— 预览版不预配置云端", () => {
@@ -170,6 +180,7 @@ describe("sidecarOptions", () => {
     expect(options.cwd).toBe("/repo");
     expect(options.requestTimeoutMs).toBe(REQUEST_TIMEOUT_MS);
     expect(Object.keys(options.env).sort()).toEqual([
+      "GAIT_CONFIG_ROOT",
       "GAIT_DEVICE_SOURCE",
       "GAIT_PREVIEW",
       "GAIT_PROTOCOL_SECONDS",

@@ -29,6 +29,7 @@ stdout 另一把锁（两个线程写同一个流，行会交错）。
 | `GAIT_PROTOCOL_SECONDS` | 协议时长，取预设 60/120/180 之一 |
 | `GAIT_PREVIEW` | `1` = 预览策略（出厂标定可放行，报告注明） |
 | `GAIT_SESSION_ROOT` / `GAIT_ACCESS_ROOT` / `GAIT_STUB_FEED_HZ` | 见 `service_from_environment` |
+| `GAIT_CONFIG_ROOT` | 设备级配置目录：左右模块绑定（RAY-479）。不设则绑定报 unavailable |
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO
 
+from gait.app.bindings import BindingStore
 from gait.app.protocol import ProtocolError
 from gait.app.replay import (
     ReplayDeviceSource,
@@ -88,6 +90,7 @@ def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalSe
         session_root=session_root,
         uploader=build_uploader(session_root, values.get("GAIT_ACCESS_ROOT")),
         preview=preview,
+        bindings=bindings_from_environment(values),
         **build_operator_auth(values.get("GAIT_ACCESS_ROOT")),
     )
 
@@ -106,6 +109,15 @@ def protocol_config_from_environment(values: Mapping[str, str]) -> ProtocolConfi
     except (ValueError, ConfigError) as error:
         _log(f"GAIT_PROTOCOL_SECONDS={raw!r} 不可用，沿用默认时长：{error}")
         return ProtocolConfig()
+
+
+def bindings_from_environment(values: Mapping[str, str]) -> BindingStore | None:
+    """`GAIT_CONFIG_ROOT` → 绑定存放处。**不设就是 None**，界面如实显示「未配置」。
+
+    与会话根分开（见 `gait.app.bindings` 模块文档）：清理会话数据不该顺手清掉左右绑定。
+    """
+    root = (values.get("GAIT_CONFIG_ROOT") or "").strip()
+    return BindingStore(Path(root)) if root else None
 
 
 def preview_from_environment(values: Mapping[str, str]) -> PreviewPolicy | None:

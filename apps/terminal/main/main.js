@@ -15,6 +15,7 @@ import { registerReportExport } from "./reportExport.js";
 import { SidecarSupervisor, SidecarUnavailable } from "./sidecarSupervisor.js";
 import { resolveSidecarCommand } from "./sidecarCommand.js";
 import {
+  configRoot,
   loadSettings,
   rendererIndex,
   saveSettings,
@@ -60,6 +61,7 @@ function supervisorOptions() {
 
 function startSupervisor() {
   fs.mkdirSync(sessionRoot(app.getPath("userData")), { recursive: true });
+  fs.mkdirSync(configRoot(app.getPath("userData")), { recursive: true });
   const next = new SidecarSupervisor(supervisorOptions());
   next.on("state", (payload) => {
     // 只认当前这一个监管器：切换设备来源时旧的那个还会吐出最后几条状态。
