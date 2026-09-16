@@ -100,8 +100,8 @@
           ]
         },
         "docs/modules/06-cloud-ingestion.md": {
-          "sha256": "db7af1de6b361f07f0fac979f306c99cc9eee7cba2ff29d8b2defdf2e7701817",
-          "bytes": 4486,
+          "sha256": "a6278ac0fbe28028b1ab04ee3ca989884ebaddc8d2591894724572c5cac270f7",
+          "bytes": 5052,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md"
