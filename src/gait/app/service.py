@@ -880,8 +880,8 @@ class TerminalService:
     def _do_bindFoot(self, params: dict[str, Any]) -> Any:
         """配对一只脚：识别**唯一**开着的那台模块，读它自报的 MAC，存为这只脚的绑定。
 
-        先左后右是界面的顺序（用户拍板），这里不强制 —— 重新配对单独一只脚也是合法的
-        修正，`FootBinding.bind` 会把同一台从另一只脚上摘掉。
+        先左后右是界面的顺序（用户拍板）。左脚一步排除不了任何模块，所以那一步必须
+        只开蓝色；右脚一步排除刚绑为左脚的那台。
         """
         foot = params.get("foot")
         if foot not in ("L", "R"):
@@ -911,7 +911,12 @@ class TerminalService:
         except BindingError:
             # 文件坏了：重新配对正是修复它的那条路，`BindingStore.bind` 会记下这件事。
             current = FootBinding()
-        other = current.get("R" if foot == "L" else "L")
+        # 只有右脚排除「当前左脚」：向导总是先左后右重新绑一遍，右脚那一步蓝色模块刚绑
+        # 为左脚、允许开着。左脚**什么都不排除** —— 否则旧绑定左右装反时（左=橙、右=蓝），
+        # 只开蓝色去配左脚会被当成「已是右脚」排除掉，重新配对就永远修不好装反
+        # （PR #148 评审）。蓝色从右脚移到左脚由 `FootBinding.bind` 完成，右脚随之空出，
+        # 直到第二步补上；这次「移动」照实记进绑定记录（`removedFromOtherFoot`）。
+        other = current.left if foot == "R" else None
         try:
             identity = identify(foot, exclude=other)
         except IdentifyFailure as failure:

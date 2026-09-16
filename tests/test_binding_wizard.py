@@ -477,3 +477,76 @@ def test_config_root_environment_is_optional() -> None:
 def test_mask_mac_keeps_only_the_tail() -> None:
     assert mask_mac(BLUE_MAC) == "…:11:11"
     assert mask_mac(None) is None
+
+
+# ── 重新配对必须能修好装反的绑定（PR #148 评审）────────────────────────────
+
+
+def _write_swapped_binding(root: Path) -> None:
+    store = BindingStore(root, clock=_clock)
+    store.bind("L", mac_identity(ORANGE_MAC))
+    store.bind("R", mac_identity(BLUE_MAC))
+
+
+def test_rebinding_fixes_a_swapped_binding(tmp_path: Path) -> None:
+    _write_swapped_binding(tmp_path)
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        # 第一步只开蓝色：它当前绑在右脚，也必须能被认成左脚。
+        left = _call(service, "bindFoot", foot="L")
+        assert left["status"] == "ok", left
+        after_left = left["result"]["binding"]
+        assert after_left["left"]["mac"] == BLUE_MAC
+        assert after_left["right"] is None  # 蓝色从右脚移走，右脚空到第二步
+        assert after_left["complete"] is False
+
+        # 第二步开橙色，蓝色开着也行。
+        world.power(BLUE, ORANGE)
+        right = _call(service, "bindFoot", foot="R")
+        assert right["status"] == "ok", right
+        final = right["result"]["binding"]
+        assert (final["left"]["mac"], final["right"]["mac"]) == (BLUE_MAC, ORANGE_MAC)
+        assert final["complete"] is True
+    finally:
+        source.close()
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / BINDING_LOG_FILENAME).read_text(encoding="utf-8").splitlines()
+    ]
+    move = entries[2]
+    assert move["foot"] == "L" and move["identity"]["value"] == BLUE_MAC
+    assert move["replaced"]["value"] == ORANGE_MAC
+    assert move["removedFromOtherFoot"] is True
+
+
+def test_binding_left_with_both_modules_on_is_ambiguous_even_when_one_is_bound(
+    tmp_path: Path,
+) -> None:
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.power(BLUE, ORANGE)
+        response = _call(service, "bindFoot", foot="L")
+        assert response["status"] == "error"
+        assert response["error"]["code"] == "E-BLE-1031"
+        assert "发现多个未绑定模块" in response["error"]["message"]
+        assert "请只打开蓝色（左脚）模块" in response["error"]["action"]
+        status = _call(service, "bindingStatus")["result"]
+        assert (status["left"]["mac"], status["right"]["mac"]) == (BLUE_MAC, ORANGE_MAC)
+    finally:
+        source.close()
+
+
+def test_binding_right_still_excludes_the_current_left(tmp_path: Path) -> None:
+    _write_swapped_binding(tmp_path)  # 左=橙：右脚一步排除的是**当前**左脚
+    world = _World(ORANGE, BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        response = _call(service, "bindFoot", foot="R")
+        assert response["status"] == "ok", response
+        assert response["result"]["mac"] == BLUE_MAC
+    finally:
+        source.close()
