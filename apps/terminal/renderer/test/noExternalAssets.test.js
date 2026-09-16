@@ -10,6 +10,7 @@
 // 2. fonts.css 引入的每个字体包 CSS 都能在本地解析到，其中 url() 全是相对路径且文件真的存在
 //    —— 否则 Vite 会把它原样留成一个运行时请求。
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -63,7 +64,8 @@ describe("renderer boots without the network", () => {
   });
 
   it("the guard itself catches the regression it exists for", () => {
-    const tmp = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || "/tmp"), "no-remote-"));
+    // os.tmpdir()：Windows runner 上没有 TMPDIR，"/tmp" 会解析成 D:\tmp 而不存在。
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "no-remote-"));
     const bad = path.join(tmp, "fonts.css");
     fs.writeFileSync(
       bad,
