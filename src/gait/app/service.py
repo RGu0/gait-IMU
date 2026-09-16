@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from gait.app import protocol
+from gait.app.bindings import FOOT_COLORS, BindingStore, IdentifyFailure, mask_mac
 from gait.app.errors import TerminalError
 from gait.app.sources import DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
@@ -49,7 +50,13 @@ from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
 from gait.contracts import CONTRACT_VERSION, FootLabel, FootSeries, SessionMeta
-from gait.device.binding import DeviceIdentity
+from gait.device.binding import (
+    AdmissionVerdict,
+    BindingError,
+    DeviceIdentity,
+    FootBinding,
+    admit_for_session,
+)
 from gait.device.capture import SessionCapture
 from gait.device.footseries import frames_to_foot_series, load_session_frames
 from gait.device.identity import MAC_PROVENANCE, platform_identity
@@ -98,6 +105,13 @@ MIN_ARRIVAL_RATE = 0.95
 
 MIN_DISK_FREE_BYTES = 2 * 1024**3
 
+#: 绑定不能用（没绑、只绑一只、文件坏了、身份推导变了）时给操作员的唯一出路。
+#: 颜色是物理外壳的颜色（2026-09-16 用户拍板：左蓝右橙），不是界面识别色。
+REPAIR_ACTION = (
+    "请到「设备与支持」点「重新配对模块」：先只打开蓝色（左脚）模块，"
+    "再只打开橙色（右脚）模块。"
+)
+
 
 @dataclass(frozen=True)
 class PreviewPolicy:
@@ -130,8 +144,12 @@ class TerminalService:
         auth: OperatorAuth | None = None,
         tickets: TicketStore | None = None,
         preview: PreviewPolicy | None = None,
+        bindings: BindingStore | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
+        #: 左右绑定的设备级存放处（RAY-479）。没给就借设备源的那一个（同一个目录，
+        #: 两边都无状态地读盘）；两边都没有就是「本机没配置」，如实报 unavailable。
+        self.bindings = bindings or getattr(self.source, "bindings", None)
         #: `None` = 生产行为。见 `PreviewPolicy`。
         self.preview = preview
         #: 本次会话的受试者。由 `startSession` 定，`_meta_at_start` 取用。
@@ -364,6 +382,9 @@ class TerminalService:
         """P-05 自检。每一项的结论都由真实实现推出来，不是写死的。"""
         self._refresh_source()
         items: list[dict[str, Any]] = []
+        if self._binding_required:
+            # 放第一项：左右没绑定时后面每一项都读不到数（不连接），先说根因。
+            items.append(self._binding_item())
         calibration = self._calibration_verdicts()
         arrival = self.arrival_rates_checked()
         batteries = self.source.read_batteries()
@@ -806,6 +827,170 @@ class TerminalService:
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
 
+    # ── 左右绑定（RAY-479）────────────────────────────────────────────────
+
+    @property
+    def _binding_required(self) -> bool:
+        """真实传感器才需要绑定。演示/回放的左右本来就是数据里写好的。"""
+        return bool(getattr(self.source, "binding_required", False))
+
+    def _do_bindingStatus(self, _: dict[str, Any]) -> dict[str, Any]:
+        return self._binding_status()
+
+    def _binding_status(self) -> dict[str, Any]:
+        """绑定现状。`complete` 说的是「这份绑定能不能用来分左右」，不是「两边都有值」。
+
+        能不能用 = 两只都绑了、身份可移植、种类与推导与当前一致。在不在场是另一件事，
+        归自检（`_binding_item`）。
+        """
+        required = self._binding_required
+        status: dict[str, Any] = {
+            "available": self.bindings is not None,
+            "required": required,
+            "left": None,
+            "right": None,
+            "complete": False,
+            "boundAt": None,
+            "problem": None,
+        }
+        if self.bindings is None:
+            status["problem"] = "本机没有配置左右绑定的存放位置（GAIT_CONFIG_ROOT）。"
+            return status
+        try:
+            binding = self.bindings.read()
+        except BindingError as error:
+            status["problem"] = f"左右绑定文件读不回来（{error}），需要重新配对。"
+            return status
+        bound_at = self.bindings.bound_at(binding)
+        for label, key in (("L", "left"), ("R", "right")):
+            identity = binding.get(label)
+            if identity is not None:
+                status[key] = {
+                    "mac": identity.value,
+                    "masked": mask_mac(identity.value),
+                    "boundAt": bound_at[label],
+                }
+        verdict = _usable(binding)
+        status["complete"] = verdict.admitted
+        status["problem"] = " ".join(verdict.problems) or None
+        times = [at for at in bound_at.values() if at]
+        status["boundAt"] = max(times) if times else None
+        return status
+
+    def _do_bindFoot(self, params: dict[str, Any]) -> Any:
+        """配对一只脚：识别**唯一**开着的那台模块，读它自报的 MAC，存为这只脚的绑定。
+
+        先左后右是界面的顺序（用户拍板）。左脚一步排除不了任何模块，所以那一步必须
+        只开蓝色；右脚一步排除刚绑为左脚的那台。
+        """
+        foot = params.get("foot")
+        if foot not in ("L", "R"):
+            raise protocol.ProtocolError("bindFoot 需要 foot = 'L' 或 'R'")
+        color = FOOT_COLORS[foot]
+        if self.capture is not None or self.session_running:
+            return TerminalError(
+                code="E-BLE-1031",
+                message="检测进行中，不能重新配对模块。",
+                action="请先结束本次检测，再到「设备与支持」重新配对。",
+            )
+        identify = getattr(self.source, "identify_for_binding", None)
+        if not callable(identify):
+            return TerminalError(
+                code="E-BLE-1030",
+                message="当前不是真实传感器模式，没有可配对的模块。",
+                action="演示模式无需绑定；如需使用真实传感器，请在菜单「预览」中切换后再配对。",
+            )
+        if self.bindings is None:
+            return TerminalError(
+                code="E-BLE-1030",
+                message="本机没有配置左右绑定的存放位置，配对结果无法保存。",
+                action="请联系服务方检查终端配置（GAIT_CONFIG_ROOT）。",
+            )
+        try:
+            current = self.bindings.read()
+        except BindingError:
+            # 文件坏了：重新配对正是修复它的那条路，`BindingStore.bind` 会记下这件事。
+            current = FootBinding()
+        # 只有右脚排除「当前左脚」：向导总是先左后右重新绑一遍，右脚那一步蓝色模块刚绑
+        # 为左脚、允许开着。左脚**什么都不排除** —— 否则旧绑定左右装反时（左=橙、右=蓝），
+        # 只开蓝色去配左脚会被当成「已是右脚」排除掉，重新配对就永远修不好装反
+        # （PR #148 评审）。蓝色从右脚移到左脚由 `FootBinding.bind` 完成，右脚随之空出，
+        # 直到第二步补上；这次「移动」照实记进绑定记录（`removedFromOtherFoot`）。
+        other = current.left if foot == "R" else None
+        try:
+            identity = identify(foot, exclude=other)
+        except IdentifyFailure as failure:
+            return TerminalError(
+                code="E-BLE-1031", message=failure.message, action=failure.action
+            )
+        try:
+            self.bindings.bind(foot, identity)
+        except (OSError, BindingError) as error:
+            return TerminalError(
+                code="E-BLE-1030",
+                message=f"已识别{color}模块，但保存绑定失败：{error}",
+                action="请确认磁盘可写后重试；仍不行请联系服务方。",
+            )
+        return {
+            "foot": foot,
+            "mac": identity.value,
+            "masked": mask_mac(identity.value),
+            "binding": self._binding_status(),
+        }
+
+    def _binding_item(self) -> dict[str, Any]:
+        """自检的「左右模块绑定」一项。只在真实传感器模式下出现。"""
+        label = "左右模块绑定"
+        status = self._binding_status()
+        if not status["complete"]:
+            return self._item(
+                "binding",
+                label,
+                False,
+                pass_hint="",
+                fail=TerminalError(
+                    code="E-BLE-1030",
+                    message=status["problem"] or "左右模块尚未绑定。",
+                    action=REPAIR_ACTION,
+                ),
+            )
+        assert self.bindings is not None
+        binding = self.bindings.read()
+        present: set[DeviceIdentity] = set()
+        for reading in self.source.device_readings().values():
+            try:
+                present.add(
+                    DeviceIdentity(
+                        kind=reading["kind"],
+                        value=reading["value"],
+                        provenance=reading.get("provenance") or MAC_PROVENANCE,
+                    )
+                )
+            except (KeyError, BindingError):
+                continue
+        verdict = admit_for_session(
+            binding, present, current_kind="mac", current_provenance=MAC_PROVENANCE
+        )
+        detail = getattr(self.source, "binding_problem", None)
+        return self._item(
+            "binding",
+            label,
+            verdict.admitted,
+            pass_hint=(
+                f"蓝色（左脚）{status['left']['masked']} · "
+                f"橙色（右脚）{status['right']['masked']}"
+            ),
+            fail=TerminalError(
+                code="E-BLE-1030",
+                # `_item` 无论通过与否都先构造失败文案，所以通过时这里也得是非空句子。
+                message=detail or " ".join(verdict.problems) or "在场模块与左右绑定不符。",
+                action=(
+                    "请打开蓝色（左脚）与橙色（右脚）模块、靠近电脑后重新检查；"
+                    "若换过模块，请到「设备与支持」点「重新配对模块」。"
+                ),
+            ),
+        )
+
     # ── 显式缺口 ──────────────────────────────────────────────────────────
 
     def _do_runCalibration(self, _: dict[str, Any]) -> Any:
@@ -1143,6 +1328,8 @@ class TerminalService:
             # 界面据此在顶栏标出「演示数据 / 预览版」—— 不标就与真机运行长得一样。
             "source": self.source.provenance().get("source"),
             "preview": self.preview is not None,
+            # 工作台据此决定「开始新的检测」还是「绑定左右模块」（RAY-479）。
+            "binding": self._binding_status(),
         }
 
     def _upload_summary(self) -> dict[str, Any]:
@@ -1188,6 +1375,14 @@ class TerminalService:
             "hint": pass_hint if passed else None,
             "error": None if passed else fail.snapshot(),
         }
+
+
+def _usable(binding: FootBinding) -> AdmissionVerdict:
+    """这份绑定本身能不能用来分左右 —— 在场与否不在这里判（传入的在场集合就是它自己）。"""
+    present = {identity for identity in (binding.left, binding.right) if identity}
+    return admit_for_session(
+        binding, present, current_kind="mac", current_provenance=MAC_PROVENANCE
+    )
 
 
 def _capture_snapshot(status: Any) -> dict[str, Any] | None:

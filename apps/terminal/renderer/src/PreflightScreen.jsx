@@ -60,7 +60,7 @@ function SafetyItem({ item, checked, onToggle }) {
   );
 }
 
-export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_MS }) {
+export function PreflightScreen({ runChecks, onReady, onRepairBinding, dwellMs = ALL_GREEN_DWELL_MS }) {
   const [ticked, setTicked] = useState({});
   const [checks, setChecks] = useState(null);
   const [running, setRunning] = useState(false);
@@ -119,6 +119,8 @@ export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_
   const allPassed = Boolean(checks?.length) && checks.every(clears);
   const waived = checks?.filter((check) => check.status === "waived") ?? [];
   const blocked = checks?.filter((check) => check.status === "fail") ?? [];
+  // RAY-479：左右没绑定时「重新检查」永远过不去，要给一条直接去配对的路。
+  const bindingBlocked = Boolean(onRepairBinding) && blocked.some((check) => check.id === "binding");
 
   useEffect(() => {
     if (!allPassed) return undefined;
@@ -133,9 +135,16 @@ export function PreflightScreen({ runChecks, onReady, dwellMs = ALL_GREEN_DWELL_
       lead="先与现场核对以下三项，逐条勾选。"
       actions={
         blocked.length ? (
-          <Button size="lg" onClick={start} loading={running} loadingText="正在重新检查…">
-            重新检查
-          </Button>
+          <>
+            {bindingBlocked ? (
+              <Button variant="secondary" size="lg" onClick={onRepairBinding}>
+                绑定左右模块
+              </Button>
+            ) : null}
+            <Button size="lg" onClick={start} loading={running} loadingText="正在重新检查…">
+              重新检查
+            </Button>
+          </>
         ) : null
       }
     >

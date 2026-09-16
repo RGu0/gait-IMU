@@ -84,6 +84,20 @@ function copiedSnapshot() {
   return Object.freeze(snapshot);
 }
 
+const mockBinding = {
+  available: true,
+  required: false,
+  complete: true,
+  boundAt: "2026-08-23T06:31:00+00:00",
+  problem: null,
+  left: { mac: "F1:0A:3C:9A:4C:01", masked: "…:4C:01", boundAt: "2026-08-23T06:31:00+00:00" },
+  right: { mac: "F1:0A:3C:9A:51:02", masked: "…:51:02", boundAt: "2026-08-23T06:31:00+00:00" },
+};
+
+function copiedBinding() {
+  return JSON.parse(JSON.stringify(mockBinding));
+}
+
 let quickCreateCounter = 0;
 
 /**
@@ -351,6 +365,20 @@ export const mockTerminalAdapter = Object.freeze({
 
   async deviceSupport() {
     return { devices: DEVICES, support: SUPPORT };
+  },
+
+  /**
+   * 浏览器演示没有真模块：演示模式本来就不需要绑定（`required: false`），这里给一份
+   * 已完成的绑定，好让配对向导能被手工走一遍。每一步都成功 —— 失败路径由单元测试覆盖。
+   */
+  async bindingStatus() {
+    return copiedBinding();
+  },
+
+  async bindFoot(foot) {
+    if (foot !== "L" && foot !== "R") throw new Error("foot 必须是 L 或 R");
+    const side = foot === "L" ? "left" : "right";
+    return { foot, mac: mockBinding[side].mac, masked: mockBinding[side].masked, binding: copiedBinding() };
   },
 
   /**
