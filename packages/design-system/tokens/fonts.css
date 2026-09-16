@@ -3,5 +3,15 @@
    · Source Han Sans SC → Noto Sans SC (the open-source release of the same
      Adobe/Google typeface family; visually identical).
    · Inter → Inter (unchanged).
-   Served from Google Fonts. Swap for licensed local binaries in production. */
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap");
+
+   LOCAL DIVERGENCE (RAY-493 preview-rc2-fixes) — push back to the Claude Design source:
+   the design source @imports the Google Fonts CSS API. In the packaged Electron app that
+   render-blocking request held the first paint for 1–57 s, and offline institutions
+   may never get it. Fonts are now bundled from @fontsource-variable (pinned exact
+   versions, OFL-1.1, woff2 split by unicode-range, font-display: swap), so the app
+   makes zero external requests. Their family names carry a " Variable" suffix;
+   typography.css lists them ahead of the plain names.
+   Never reintroduce an http(s) font/style URL here: renderer test
+   `noExternalAssets.test.js` fails the build. */
+@import "@fontsource-variable/noto-sans-sc/wght.css";
+@import "@fontsource-variable/inter/wght.css";

@@ -1,10 +1,11 @@
 /* Steady Health — Typography
    UI: Noto Sans SC (Source Han Sans SC). Numerals: Inter w/ tabular-nums.
+   The "… Variable" faces are the bundled copies from tokens/fonts.css.
    Screen minimum 14px; 12px only in printed report footer. */
 :root {
-  --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  --font-num: "Inter", var(--font-ui); /* numerals; enable tabular-nums */
-  --font-print: "Noto Sans SC", "Source Han Sans SC", sans-serif;
+  --font-ui: "Noto Sans SC Variable", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-num: "Inter Variable", "Inter", var(--font-ui); /* numerals; enable tabular-nums */
+  --font-print: "Noto Sans SC Variable", "Noto Sans SC", "Source Han Sans SC", sans-serif;
 
   /* shorthand font tokens (weight size/line-height family) */
   --text-display: 600 32px/40px var(--font-ui);
