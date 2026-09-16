@@ -579,3 +579,72 @@ def test_preflight_reports_the_missing_foot_when_refresh_cannot_reconnect_it():
         assert by_id["link-r"]["error"]["code"] == "E-BLE-1001"
     finally:
         source.close()
+
+
+# ── 电量重读（WT901 RAY-182：寄存器偶发回原始值 0）─────────────────────────────
+
+
+class _ScriptedBattery:
+    """按脚本依次交出读数，记下被调了几次。"""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = 0
+
+    async def __call__(self, _device):
+        self.calls += 1
+        return self.results.pop(0)
+
+
+class _NamedDevice:
+    device_id = "AA:00:00:00:00:09"
+
+
+def test_battery_retry_recovers_from_a_transient_zero_read():
+    from wt901 import Battery
+
+    from gait.app.blesource import read_battery_with_retry
+
+    read = _ScriptedBattery(Battery(raw=0, percent=None), Battery(raw=411, percent=100))
+    got = asyncio.run(read_battery_with_retry(_NamedDevice(), read=read, delay_s=0))
+    assert got == Battery(raw=411, percent=100)
+    assert read.calls == 2
+
+
+def test_battery_retry_recovers_from_a_missing_read():
+    from wt901 import Battery
+
+    from gait.app.blesource import read_battery_with_retry
+
+    read = _ScriptedBattery(None, None, Battery(raw=409, percent=100))
+    got = asyncio.run(read_battery_with_retry(_NamedDevice(), read=read, delay_s=0))
+    assert got.percent == 100
+    assert read.calls == 3
+
+
+def test_battery_retry_stops_at_the_first_plausible_read():
+    from wt901 import Battery
+
+    from gait.app.blesource import read_battery_with_retry
+
+    read = _ScriptedBattery(Battery(raw=419, percent=100), Battery(raw=0, percent=None))
+    asyncio.run(read_battery_with_retry(_NamedDevice(), read=read, delay_s=0))
+    assert read.calls == 1
+
+
+def test_battery_retry_gives_up_and_returns_the_last_raw_value():
+    """三次都不可信时交出最后那份原始值：自检据此说「读数无效（原始值 0）」而不是笼统的读不到。"""
+    from wt901 import Battery
+
+    from gait.app.blesource import BATTERY_READ_ATTEMPTS, read_battery_with_retry
+
+    read = _ScriptedBattery(*[Battery(raw=0, percent=None)] * BATTERY_READ_ATTEMPTS)
+    got = asyncio.run(read_battery_with_retry(_NamedDevice(), read=read, delay_s=0))
+    assert got == Battery(raw=0, percent=None)
+    assert read.calls == BATTERY_READ_ATTEMPTS
+
+
+def test_device_ops_reads_battery_with_retry_by_default():
+    from gait.app.blesource import DeviceOps, read_battery_with_retry
+
+    assert DeviceOps().read_battery is read_battery_with_retry
