@@ -43,7 +43,7 @@ describe("P-07 — the left/right confirmation is a gate", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     expect(primary()).toBeEnabled();
     fireEvent.click(primary());
-    expect(onDone).toHaveBeenCalledWith({ wearing: "pass", swapped: false });
+    expect(onDone).toHaveBeenCalledWith({ wearing: "pass" });
   });
 
   it("explains why the primary action is not available yet", () => {
@@ -56,55 +56,31 @@ describe("P-07 — the left/right confirmation is a gate", () => {
   });
 });
 
-describe("P-07 — swapping invalidates the confirmation", () => {
-  it("clears an existing confirmation when the sides are swapped", () => {
-    const onDone = vi.fn();
-    renderScreen({ onDone });
-
-    fireEvent.click(screen.getByRole("checkbox"));
-    expect(primary()).toBeEnabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "对调左右" }));
-
-    // 确认的对象是**当前显示的那份归属**。先确认 A 再对调成 B，那份确认就不再
-    // 针对屏幕上的东西了 —— 而这恰好是最需要闸的一步：操作员发现戴反并纠正。
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
-    expect(primary()).toBeDisabled();
-    fireEvent.click(primary());
-    expect(onDone).not.toHaveBeenCalled();
-  });
-
-  it("clears it again when the swap is undone", () => {
+describe("P-07 — no left/right swap (RAY-479)", () => {
+  it("offers no swap control: sides come only from the colour binding", () => {
     renderScreen();
-    fireEvent.click(screen.getByRole("button", { name: "对调左右" }));
-    fireEvent.click(screen.getByRole("checkbox"));
-    expect(primary()).toBeEnabled();
-
-    // 「恢复左右」同样改变归属，不是"退回一个已确认过的状态"。
-    fireEvent.click(screen.getByRole("button", { name: "恢复左右" }));
-    expect(primary()).toBeDisabled();
+    // 用户拍板：左右只由配对绑定决定。任何能在一场里翻转左右的按钮都不该存在。
+    expect(screen.queryByRole("button", { name: /对调|恢复左右/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "返回佩戴引导",
+      "确认无误，开始检测",
+    ]);
   });
 
-  it("carries the swap through once re-confirmed", () => {
-    const onDone = vi.fn();
-    renderScreen({ onDone });
-
-    fireEvent.click(screen.getByRole("button", { name: "对调左右" }));
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(primary());
-    expect(onDone).toHaveBeenCalledWith({ wearing: "pass", swapped: true });
-  });
-
-  it("shows which module feeds which ankle, and updates it on swap", () => {
+  it("shows the physical shell colour reminder", () => {
     const { container } = renderScreen();
-    // 闸要拦住的是"没核对"，而可核对的信息只有这两行；它们不对，闸就没有意义。
-    expect(screen.getByText("← 左侧模块")).toBeVisible();
-    expect(screen.getByText("← 右侧模块")).toBeVisible();
-
-    fireEvent.click(screen.getByRole("button", { name: "对调左右" }));
+    expect(screen.getByLabelText("佩戴颜色提醒")).toHaveTextContent("蓝色模块戴左脚、橙色模块戴右脚");
     // 按 .wear-points 取，不按 role —— 向导头部的步骤条也是 listitem。
     const rows = container.querySelectorAll(".wear-points li");
-    expect(rows[0]).toHaveTextContent("受试者左踝← 右侧模块");
-    expect(rows[1]).toHaveTextContent("受试者右踝← 左侧模块");
+    expect(rows[0]).toHaveTextContent("受试者左踝← 蓝色模块");
+    expect(rows[1]).toHaveTextContent("受试者右踝← 橙色模块");
+  });
+
+  it("never sends a swapped flag", () => {
+    const onDone = vi.fn();
+    renderScreen({ onDone });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(primary());
+    expect(onDone.mock.calls[0][0]).not.toHaveProperty("swapped");
   });
 });

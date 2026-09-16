@@ -7,7 +7,8 @@ import { AppBar } from "./AppBar.jsx";
  *
  * Two things the spec is firm about:
  *
- * · **Re-pairing asks twice and is written to the audit log.** Re-pairing
+ * · **Re-pairing asks twice and is written to the audit log** (RAY-479: the sidecar
+ *   appends every bind to `device-binding-log.jsonl` under GAIT_CONFIG_ROOT). Re-pairing
  *   silently rebinds which physical module is "left"; if it happens by a
  *   mis-tap, every subsequent session is mirrored and each individual metric
  *   still looks plausible. A confirmation is cheap next to that.
@@ -90,7 +91,7 @@ export function DeviceSupportScreen({ devices, support, onRecheck, onRepair, onN
         }}
         onCancel={() => setConfirmingRepair(false)}
       >
-        重新配对会重新绑定左右模块，操作将被记录。请确认两个模块都在手边并已开机。
+        重新配对会依次绑定蓝色（左脚）和橙色（右脚）模块，操作将被记录。请把两个模块都放在手边，先全部关机，按向导提示逐个打开。
       </Dialog>
     </div>
   );

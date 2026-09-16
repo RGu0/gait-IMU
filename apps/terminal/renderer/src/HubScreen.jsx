@@ -23,6 +23,7 @@ export function HubScreen({
   rechecking = false,
   recheckError = null,
   onDismissRecheckError,
+  onBind,
 }) {
   const { deviceSummary, uploadSummary = {}, recentRecords = [] } = snapshot;
   const issues = deviceSummary.issues ?? [];
@@ -30,7 +31,10 @@ export function HubScreen({
   const uploadTracked = uploadSummary.tracked !== false;
   const pending = Number.isFinite(uploadSummary.pending) ? uploadSummary.pending : 0;
   const hasBattery = Number.isFinite(deviceSummary.leftBattery) && Number.isFinite(deviceSummary.rightBattery);
-  const needsAttention = !deviceSummary.ready;
+  // RAY-479：真实传感器模式下左右没绑定，就连不上模块 —— 此时电量、连接之类的提示都是
+  // 这一件事的后果，先说根因、给出唯一的出路，而不是让操作员去反复「重新检查」。
+  const needsBinding = Boolean(snapshot.binding?.required && !snapshot.binding?.complete);
+  const needsAttention = needsBinding || !deviceSummary.ready;
 
   return (
     <div className="hub-page">
@@ -52,7 +56,14 @@ export function HubScreen({
           </Banner>
         ) : null}
 
-        {needsAttention ? issues.map((issue) => (
+        {needsBinding ? (
+          <Banner tone="warning" title="左右模块尚未绑定">
+            真实传感器需要先绑定左右：蓝色模块戴左脚、橙色模块戴右脚。
+            {snapshot.binding?.problem ? ` ${snapshot.binding.problem}` : ""}
+          </Banner>
+        ) : null}
+
+        {needsAttention && !needsBinding ? issues.map((issue) => (
           <Banner key={issue} tone="warning" title="设备需要检查">{issue}</Banner>
         )) : null}
 
@@ -94,7 +105,9 @@ export function HubScreen({
         </section>
 
         <div className="hub-action">
-          {needsAttention ? (
+          {needsBinding ? (
+            <Button size="lg" onClick={onBind}>绑定左右模块</Button>
+          ) : needsAttention ? (
             <Button size="lg" onClick={onRecheck} loading={rechecking} loadingText="正在重新检查…">
               重新检查设备
             </Button>

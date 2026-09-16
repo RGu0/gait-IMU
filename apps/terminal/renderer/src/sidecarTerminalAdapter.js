@@ -294,6 +294,10 @@ export function createSidecarAdapter(
     listRecords,
     deviceSupport: async () => toDeviceSupportView(await call("deviceSupport")),
 
+    // RAY-479：左右模块配对。bindFoot 一次只识别一只脚（"L" 蓝色 / "R" 橙色）的模块。
+    bindingStatus: () => call("bindingStatus"),
+    bindFoot: (foot) => call("bindFoot", { foot }),
+
     // 真实后端：三态电量准入、到达率、出厂标定、磁盘
     runPreflight: () => call("runPreflight"),
 
@@ -317,9 +321,10 @@ export function createSidecarAdapter(
     lookupSubject: (enteredId) => call("lookupSubject", { enteredId }),
 
     // RAY-345：报告已接通。record 来自 listRecords（含 id=sessionId）；缺省时
-    // sidecar 用当前会话（startSession 之后）。swapped 是佩戴确认里的一键对调。
+    // sidecar 用当前会话（startSession 之后）。RAY-479 起左右只由配对绑定决定，
+    // 不再有「一键对调」，所以不发 swapped（旧调用方传了也不转发）。
     reportFor: (record) => {
-      const params = { sessionId: record?.id, swapped: record?.swapped ?? false };
+      const params = { sessionId: record?.id };
       if (record?.subjectLabel) params.subjectLabel = record.subjectLabel;
       return call("reportFor", params);
     },

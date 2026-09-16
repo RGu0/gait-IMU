@@ -10,8 +10,12 @@ import { WizardShell } from "./WizardShell.jsx";
  * 底线 —— 一旦左右戴反，后续所有左右对比指标都会静默地错，而那不是报错，是一份
  * 看着正常的错误报告。
  *
- * 「一键对调」是软件层面的：操作员说「戴反了」，这里就把左右数据归属对调，不需要
- * 让受试者重新佩戴。对调是数据标签的纠正，不是物理动作。
+ * ## 没有「对调」（RAY-479，2026-09-16 用户拍板）
+ *
+ * 这里曾有一个「一键对调」：戴反了就在软件里把左右数据归属换过来。它被删掉了。左右
+ * 现在只由配对时绑定的模块决定 —— **蓝色模块是左脚、橙色模块是右脚** —— 于是「戴反」
+ * 只剩一种纠正方式：让受试者按颜色重新戴。一个能在任何一场里随手翻转左右的按钮，
+ * 会让绑定这件事失去意义，而翻错时每个指标单看都像真的。
  *
  * ## 这一屏是闸，不是确认屏
  *
@@ -22,33 +26,20 @@ import { WizardShell } from "./WizardShell.jsx";
  *
  * P-06 也有一条勾选，但它问的是凭印象的"没戴反吧"，**发生在左右归属被摆出来之前**。
  * 真正能核对的信息只在本屏，闸也就必须在本屏。
- *
- * ## 对调会作废已有的确认
- *
- * 确认的对象是**当前显示的那一份归属**。先确认 A、再对调成 B，那份确认就不再针对
- * 屏幕上的东西了 —— 于是 `toggleSwap` 把 `confirmed` 清掉，操作员必须照新归属重看
- * 一遍。少这一行，闸会在最需要它的那一步（操作员发现戴反并纠正）失效。
  */
 
+/** 物理外壳颜色的提醒。颜色是外壳的，不是屏幕上的左右识别色。 */
+export const COLOR_REMINDER = "蓝色模块戴左脚、橙色模块戴右脚";
+
 export function WearConfirmScreen({ onDone, onBack }) {
-  const [swapped, setSwapped] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
-
-  // 左踝/右踝分别由哪个模块供数。swapped 时对调。
-  const leftModule = swapped ? "右" : "左";
-  const rightModule = swapped ? "左" : "右";
-
-  function toggleSwap() {
-    setSwapped((current) => !current);
-    setConfirmed(false);
-  }
 
   function finish() {
     // 未确认不出 pass。主按钮此刻本就是禁用的，这一行是为了让将来任何
     // "顺手把 disabled 去掉"的改动无法静默地把恒真值放出去 —— 闸的语义
     // 写在这里，而不是只写在按钮的可用性上。
     if (!confirmed) return;
-    onDone({ wearing: "pass", swapped });
+    onDone({ wearing: "pass" });
   }
 
   return (
@@ -56,13 +47,10 @@ export function WearConfirmScreen({ onDone, onBack }) {
       step={5}
       width="wide"
       title="确认左右"
-      lead="数据左右归属的最后一道人工确认。若左右戴反了，点「对调左右」即可，无需重新佩戴。"
+      lead="数据左右归属的最后一道人工确认。左右由配对时绑定的模块决定；若戴反了，请按颜色让受试者重新佩戴。"
       actions={
         <>
           <Button variant="secondary" onClick={onBack}>返回佩戴引导</Button>
-          <Button variant="secondary" onClick={toggleSwap}>
-            {swapped ? "恢复左右" : "对调左右"}
-          </Button>
           <Button size="lg" disabled={!confirmed} onClick={finish}>
             确认无误，开始检测
           </Button>
@@ -71,16 +59,19 @@ export function WearConfirmScreen({ onDone, onBack }) {
     >
       <div className="two-column">
         <div className="two-column__text">
+          <p className="wear-color-reminder" aria-label="佩戴颜色提醒">
+            <strong>{COLOR_REMINDER}</strong>
+          </p>
           <ul className="wear-points">
             <li>
               <SideBadge side="left" size={20} />
               <strong>受试者左踝</strong>
-              <span>← {leftModule}侧模块</span>
+              <span>← 蓝色模块</span>
             </li>
             <li>
               <SideBadge side="right" size={20} />
               <strong>受试者右踝</strong>
-              <span>← {rightModule}侧模块</span>
+              <span>← 橙色模块</span>
             </li>
           </ul>
 
@@ -90,7 +81,7 @@ export function WearConfirmScreen({ onDone, onBack }) {
               checked={confirmed}
               onChange={(event) => setConfirmed(event.target.checked)}
             />
-            <span>已逐一核对：上面的左右归属与受试者实际佩戴一致。</span>
+            <span>已逐一核对：蓝色模块在受试者左踝、橙色模块在受试者右踝。</span>
           </label>
 
           {!confirmed ? (
