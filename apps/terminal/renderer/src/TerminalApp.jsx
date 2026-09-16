@@ -64,6 +64,23 @@ const LIVE_DEFAULTS = Object.freeze({
 export const SNAPSHOT_RETRY_MS = 1000;
 
 /**
+ * 采集中 sidecar 进程没了（RAY-493 preview-rc2-fixes，装机 A5 §6-1）。
+ *
+ * 会话活在**那个**进程里。主进程重启出来的是一个新进程，它没有这场会话：之前界面
+ * 回到采集页接着倒计时（步数冻结），走满后向新进程发 stopSession，拿回「会话尚未开始」
+ * —— 让受试者白走五十秒，再给一句与事实相反的话。
+ *
+ * 这不是 sidecar 的错误应答（没有码、没有域，同 SidecarDownScreen 的理由），是渲染端
+ * 自己亲眼看见的事：生命周期在这场检测进行中离开过 ready。所以文案在这里。
+ * 磁盘上那场会话停在 `walking`，检测记录里显示「未正常结束」（RAY-496）。
+ */
+export const WALK_INTERRUPTED = Object.freeze({
+  title: "检测已中断",
+  message: "采集服务中断，本次检测已中断。",
+  action: "数据已尽可能保存；请回到工作台重新检测。",
+});
+
+/**
  * `lifecycle` 是可选的：它由主进程提供（`window.gaitSidecar.onSidecarState`）。
  * 走 mock 时没有进程可看护，因此不传 —— 而不是造一个永远 ready 的假生命周期。
  *
@@ -112,6 +129,10 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
   // lifecycle 每回到 ready 一次就重拉一次快照：sidecar 重启后旧快照已不可信。
   const [snapshotEpoch, setSnapshotEpoch] = useState(0);
   const lastSidecarState = useRef(null);
+  // 进行中的这场检测（startSession 成功到出结果/报告或操作员停止）。它记着开始时的
+  // sidecar 代数：代数变了，说明这期间进程没过，会话已随旧进程一起没了。
+  const walkRef = useRef(null);
+  const sidecarGenerationRef = useRef(0);
   // 收尾开始后 sidecar 仍会继续推 remainingSeconds: 0 的 tick，直到 stopSession 落地。
   // 那些 tick 不再属于这一场，也不能让收尾被触发第二次。
   const finishingRef = useRef(false);
@@ -148,6 +169,11 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
       setSidecar(next);
       const previous = lastSidecarState.current;
       lastSidecarState.current = next?.state ?? null;
+      if (next?.state !== "ready" && previous === "ready") {
+        sidecarGenerationRef.current += 1;
+        // 当场结束这场检测：倒计时停、不再收 tick、不向重启后的新进程收尾。
+        if (walkRef.current) interruptWalk();
+      }
       if (next?.state === "ready" && previous !== null && previous !== "ready") {
         setSnapshotEpoch((epoch) => epoch + 1);
       }
@@ -246,11 +272,33 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
     setStage(STAGE.reportError);
   }
 
+  /** 这场检测是否已随 sidecar 进程一起没了。 */
+  function walkLost(walk) {
+    return walk !== walkRef.current || walk.generation !== sidecarGenerationRef.current;
+  }
+
+  /**
+   * 结束当前检测并显示中断屏。「重新检测」回到自检、保留受检者（同报告失败的重试）。
+   * finishingRef 置真：已在路上的收尾在下一个 await 之后看见它就停手。
+   */
+  function interruptWalk() {
+    walkRef.current = null;
+    finishingRef.current = true;
+    setLive(null);
+    setResult(null);
+    failed(
+      { message: WALK_INTERRUPTED.message, action: WALK_INTERRUPTED.action },
+      STAGE.preflight,
+      WALK_INTERRUPTED.title,
+    );
+  }
+
   /**
    * 真 sidecar 的 startSession 是异步的。以前这里把 Promise 直接塞进 live，
    * TestRunScreen 在 `live.steps.left` 上当场崩。
    */
   async function startWalk() {
+    const generation = sidecarGenerationRef.current;
     let started;
     try {
       started = await adapter.startSession(subject);
@@ -258,6 +306,12 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
       failed(error, STAGE.preflight, "检测未能开始");
       return;
     }
+    if (generation !== sidecarGenerationRef.current) {
+      // 开始的应答回来前进程已经换过：这场会话不在当前进程里。
+      interruptWalk();
+      return;
+    }
+    walkRef.current = { generation };
     finishingRef.current = false;
     const totalSeconds = started?.totalSeconds ?? started?.remainingSeconds ?? snapshot?.protocolSeconds ?? 0;
     setLive({ ...LIVE_DEFAULTS, ...started, totalSeconds });
@@ -384,14 +438,26 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
           // 先收尾落盘，再判定、再生成报告 —— 顺序反了报告读到的是未排空的录制。
           if (finishingRef.current) return;
           finishingRef.current = true;
+          const walk = walkRef.current;
+          // 收尾途中进程没了：请求会以 SidecarDown 失败，或者（重启够快时）被新进程以
+          // 「会话尚未开始」拒绝。两种都不是这场检测的真相，交给中断屏。
+          const lost = (error) => (walk && walkLost(walk)) || error?.name === "SidecarDown";
           let sessionResult;
           try {
             await adapter.stopSession();
+            if (walk && walkLost(walk)) return;
             sessionResult = await adapter.sessionResult({ wearing });
           } catch (error) {
+            if (lost(error)) {
+              if (walkRef.current === walk) interruptWalk();
+              return;
+            }
             failed(error, STAGE.preflight);
             return;
           }
+          if (walk && walkLost(walk)) return;
+          // 结果已从旧进程拿到：会话收尾完成，此后的报告读取不再属于「检测中」。
+          walkRef.current = null;
           setResult(sessionResult);
           if (sessionResult?.report?.status === "ready") {
             await openReport({ swapped, subjectLabel: subject?.maskedId }, STAGE.preflight);
@@ -404,6 +470,8 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
           // 已中止的会话再 stop 会被拒 —— 那个拒绝不影响回工作台。
           if (finishingRef.current) return;
           finishingRef.current = true;
+          // 操作员已决定结束：此后进程再出事也只是回工作台，不再报中断。
+          walkRef.current = null;
           try {
             await adapter.stopSession?.();
           } catch {
