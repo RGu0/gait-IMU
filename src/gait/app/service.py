@@ -67,6 +67,7 @@ from gait.device.orchestration import (
     summarize_session,
 )
 from gait.io.session import (
+    META_FILENAME,
     create_session,
     list_sessions,
     new_session_id,
@@ -786,7 +787,12 @@ class TerminalService:
             return []
         records = []
         for session_id in list_sessions(self.session_root):
-            meta = read_meta(session_directory(self.session_root, session_id))
+            directory = session_directory(self.session_root, session_id)
+            if not (directory / META_FILENAME).is_file():
+                # 建目录后、写 meta 前就失败的会话（旧版 create_session 会留下它）：
+                # 没有可列的内容，跳过，别让一条残骸弄坏整张检测记录。
+                continue
+            meta = read_meta(directory)
             complete = meta.integrity_report.get("complete")
             provenance = meta.extra.get("provenance") or {}
             records.append(
