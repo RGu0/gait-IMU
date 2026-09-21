@@ -1152,7 +1152,10 @@ class BleDeviceSource:
             "hardware": True,
             "foot_assignment": assignment,
             "binding_problem": self._binding_problem,
-            "addresses_masked": {
+            # 不叫 `addresses_masked`：FR-02 检查按子串拦含 `address` 的键（见
+            # `_device_records` 里 `platform_handle` 的注释）。真机 RC 曾因此写不进
+            # meta，检测「未能开始」。
+            "handles_masked": {
                 label: mask_address(feet[label].discovered.address) if label in feet else None
                 for label in FEET
             },
