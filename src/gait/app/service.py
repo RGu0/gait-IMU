@@ -106,6 +106,9 @@ MIN_ARRIVAL_RATE = 0.95
 
 MIN_DISK_FREE_BYTES = 2 * 1024**3
 
+#: 真设备源正在连接时，工作台「设备需要检查」处唯一的一条说明（RAY-503）。
+CONNECTING_NOTICE = "正在连接左右模块…"
+
 #: 绑定不能用（没绑、只绑一只、文件坏了、身份推导变了）时给操作员的唯一出路。
 #: 颜色是物理外壳的颜色（2026-09-16 用户拍板：左蓝右橙），不是界面识别色。
 REPAIR_ACTION = (
@@ -286,7 +289,21 @@ class TerminalService:
         return self._snapshot()
 
     def _do_snapshot(self, _: dict[str, Any]) -> dict[str, Any]:
+        self._start_connecting_if_idle()
         return self._snapshot()
+
+    def _start_connecting_if_idle(self) -> None:
+        """从没尝试过连接的真设备源：读工作台快照时就在后台开始连（RAY-503）。
+
+        不等结果（`timeout=0`）：快照请求不能被一次蓝牙扫描卡住，连接进展由渲染端
+        按 `deviceSummary.state` 轮询。只在 `idle` 时起 —— `failed` 之后不自动重试，
+        否则工作台开着就会无休止地后台扫描；那一步归「重新检查设备」。采集中不碰。
+        """
+        if self.session_running or getattr(self.source, "state", None) != "idle":
+            return
+        refresh = getattr(self.source, "refresh", None)
+        if callable(refresh):
+            refresh(timeout=0)
 
     def _do_recheckDevices(self, _: dict[str, Any]) -> dict[str, Any]:
         self._refresh_source()
@@ -1320,13 +1337,23 @@ class TerminalService:
 
     def _snapshot(self) -> dict[str, Any]:
         verdict = preflight_battery(self.source.read_batteries())
+        device_summary: dict[str, Any] = {
+            "ready": verdict.admitted,
+            "issues": list(verdict.problems),
+        }
+        # 真设备源才有连接状态（RAY-503）。工作台在 `connecting` 时轮询快照；连接中
+        # 电量自然还读不到，这时报「电量读不到 —— 换电池解决不了」是把「正在连」
+        # 说成了故障。
+        state = getattr(self.source, "state", None)
+        if isinstance(state, str):
+            device_summary["state"] = state
+            if state == "connecting":
+                device_summary["ready"] = False
+                device_summary["issues"] = [CONNECTING_NOTICE]
         return {
             "operator": self.operator,
             "protocolSeconds": self.config.duration_s,
-            "deviceSummary": {
-                "ready": verdict.admitted,
-                "issues": list(verdict.problems),
-            },
+            "deviceSummary": device_summary,
             # P-01 顶部的「数据已同步 / 待上传」。数字来自真实队列，不是常量 ——
             # 一个永远显示 0 的待传数会让积压这件事永远不被发现。
             "uploadSummary": self._upload_summary(),
