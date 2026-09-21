@@ -295,3 +295,14 @@ def test_corrupt_json_and_missing_file_report_differently(tmp_path):
     (directory / META_FILENAME).write_text("{ not json", encoding="utf-8")
     with pytest.raises(SessionFormatError, match="不是合法 JSON"):
         read_meta(directory)
+
+
+def test_refused_meta_leaves_no_session_directory(tmp_path):
+    """FR-02 拒绝发生在建目录之前：不留下没有 meta.json 的空会话目录。
+
+    真机 RC 上曾留下一个，检测记录读它的 meta 时失败。
+    """
+    meta = make_meta(extra={"contact": {"phone": "138"}})
+    with pytest.raises(SessionFormatError, match="FR-02"):
+        create_session(tmp_path, meta)
+    assert list(tmp_path.iterdir()) == []
