@@ -119,6 +119,23 @@ def _identity_offences(payload: Any, path: str = "") -> list[str]:
     return found
 
 
+def _checked_payload(meta: SessionMeta) -> dict[str, Any]:
+    """`meta` 的字段字典；类型、session_id 或 FR-02 不过关即拒绝。"""
+    if not isinstance(meta, SessionMeta):
+        raise SessionFormatError(f"meta 必须是 SessionMeta，收到 {type(meta).__name__}")
+    _check_session_id(meta.session_id)
+
+    payload = {f.name: getattr(meta, f.name) for f in fields(meta)}
+    offences = _identity_offences(payload)
+    if offences:
+        raise SessionFormatError(
+            f"元数据里出现疑似身份明文的键：{offences}。"
+            "FR-02：身份字段仅存云端加密库，本地会话文件只含 subject_uuid。"
+            "（此检查针对疏忽，不针对刻意绕过 —— 见模块文档。）"
+        )
+    return payload
+
+
 def session_directory(root: Path, session_id: str) -> Path:
     """一个会话的目录。布局定义见《05 数据格式规范》。"""
     return Path(root) / _check_session_id(session_id)
@@ -137,6 +154,9 @@ def create_session(root: Path, meta: SessionMeta) -> Path:
     目录必须**不存在**：一个已存在的会话目录意味着 id 相撞或重复采集，两者都不该
     被静默覆盖 —— 覆盖会毁掉一份已经采到的数据，而那是不可再生的。
     """
+    # 先验再建目录：验不过时不留下没有 meta.json 的空会话目录 —— 那种目录会让
+    # 列会话的调用方（检测记录）读 meta 时失败。
+    _checked_payload(meta)
     directory = session_directory(root, meta.session_id)
     if directory.exists():
         raise SessionFormatError(
@@ -154,18 +174,7 @@ def write_meta(directory: Path, meta: SessionMeta) -> Path:
     FR-02 检查在写盘**之前**：一旦落盘，身份明文就已经存在于本地磁盘上了，事后
     删除也无法保证没有被同步、备份或打包上传。
     """
-    if not isinstance(meta, SessionMeta):
-        raise SessionFormatError(f"meta 必须是 SessionMeta，收到 {type(meta).__name__}")
-    _check_session_id(meta.session_id)
-
-    payload = {f.name: getattr(meta, f.name) for f in fields(meta)}
-    offences = _identity_offences(payload)
-    if offences:
-        raise SessionFormatError(
-            f"元数据里出现疑似身份明文的键：{offences}。"
-            "FR-02：身份字段仅存云端加密库，本地会话文件只含 subject_uuid。"
-            "（此检查针对疏忽，不针对刻意绕过 —— 见模块文档。）"
-        )
+    payload = _checked_payload(meta)
 
     directory = Path(directory)
     if not directory.is_dir():

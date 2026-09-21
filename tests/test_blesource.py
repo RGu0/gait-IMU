@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -447,6 +448,24 @@ class TestConnectOrchestration:
         assert sorted(world.closed) == sorted(world.transports)
         assert source.state == "closed"
         assert source.read_batteries() == {"L": None, "R": None}
+
+    def test_connected_provenance_passes_the_fr02_meta_check(self, tmp_path):
+        """连上后的 provenance 原样进 `meta.extra`，必须过 `write_meta` 的 FR-02 键名检查。
+
+        真机 RC 上它曾因 `addresses_masked` 含子串 `address` 被拒，检测当场「未能开始」；
+        未连接时各脚为 None，旧测试只看过那种形状，所以没拦住。
+        """
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        source = BleDeviceSource(ops=world.ops())
+        try:
+            assert source.refresh(timeout=5) == "connected"
+            provenance = source.provenance()
+            assert provenance["handles_masked"] == {"L": "…:00:01", "R": "…:00:02"}
+            meta = replace(_meta(new_session_id()), extra={"provenance": provenance})
+            directory = create_session(tmp_path, meta)
+            assert (directory / "meta.json").is_file()
+        finally:
+            source.close()
 
     def test_explicit_filters_assign_feet(self):
         world = _FakeWorld(["AA:00:00:00:00:01", "BB:00:00:00:00:02"])

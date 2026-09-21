@@ -132,3 +132,12 @@ def test_a_session_from_before_this_change_reads_as_unknown_not_as_zero(tmp_path
     assert record["elapsedSeconds"] is None
     assert record["validSeconds"] is None
     assert record["abortReason"] is None
+
+
+def test_list_records_skips_a_directory_without_meta(tmp_path) -> None:
+    """建了目录却没写成 meta 的残骸不弄坏整张检测记录（真机 RC 上旧版留下过一个）。"""
+    session_id = _session(tmp_path, stop_at=60.0)
+    (tmp_path / "20260921T075528Z-dd9dba80" / "raw").mkdir(parents=True)
+    service = TerminalService(source=StubDeviceSource(), session_root=tmp_path)
+    response = service.handle({"id": "l", "method": "listRecords"})
+    assert [item["id"] for item in response["result"]] == [session_id]
