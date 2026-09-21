@@ -65,6 +65,9 @@ const LIVE_DEFAULTS = Object.freeze({
 
 export const SNAPSHOT_RETRY_MS = 1000;
 
+// 真设备源在后台连接时（`deviceSummary.state === "connecting"`）工作台重拉快照的间隔（RAY-503）。
+export const DEVICE_POLL_MS = 2000;
+
 /**
  * 采集中 sidecar 进程没了（RAY-493 preview-rc2-fixes，装机 A5 §6-1）。
  *
@@ -89,7 +92,13 @@ export const WALK_INTERRUPTED = Object.freeze({
  * `preview` 为真时每一屏顶部都有「预览版」条（真 sidecar 路径）；mock 路径由 main.jsx
  * 自己的演示数据条负责，这里不重复。
  */
-export function TerminalApp({ adapter, lifecycle, preview = false, snapshotRetryMs = SNAPSHOT_RETRY_MS }) {
+export function TerminalApp({
+  adapter,
+  lifecycle,
+  preview = false,
+  snapshotRetryMs = SNAPSHOT_RETRY_MS,
+  devicePollMs = DEVICE_POLL_MS,
+}) {
   // 预览条要知道数据来源（`snapshot.source`）；快照归工作台，条只借它的 source 一读。
   const [source, setSource] = useState(undefined);
   return (
@@ -99,6 +108,7 @@ export function TerminalApp({ adapter, lifecycle, preview = false, snapshotRetry
         adapter={adapter}
         lifecycle={lifecycle}
         snapshotRetryMs={snapshotRetryMs}
+        devicePollMs={devicePollMs}
         preview={preview}
         onSnapshot={(snap) => setSource(snap?.source)}
       />
@@ -106,7 +116,7 @@ export function TerminalApp({ adapter, lifecycle, preview = false, snapshotRetry
   );
 }
 
-function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapshot }) {
+function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePollMs, onSnapshot }) {
   const [snapshot, setSnapshot] = useState(null);
   // 最小 MVP 无登录（P-00 暂不考虑）：冷启动直接进工作台。
   const [stage, setStage] = useState(STAGE.hub);
@@ -216,6 +226,28 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, onSnapsh
     wasHubRef.current = isHub;
     if (entering) setSnapshotEpoch((epoch) => epoch + 1);
   }, [isHub]);
+
+  // 真设备源正在后台连接：留在工作台就隔一会儿重拉快照，连上（或失败）即停（RAY-503）。
+  // 在此之前快照只在进入工作台时拉一次，模块在后台连上后界面一直停在「电量读不到」。
+  // 失败不轮询 —— 那一步归「重新检查设备」，否则工作台开着就会无休止地后台扫描。
+  const connecting = isHub && snapshot?.deviceSummary?.state === "connecting";
+  useEffect(() => {
+    if (!connecting) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const snap = await adapter.snapshot();
+        if (!cancelled) setSnapshot(snap);
+      } catch {
+        // 拉不到就让快照保持 connecting，下面这个 effect 不会重跑；换 epoch 让主拉取接手重试。
+        if (!cancelled) setSnapshotEpoch((epoch) => epoch + 1);
+      }
+    }, devicePollMs);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [connecting, snapshot, adapter, devicePollMs]);
 
   const onSnapshotRef = useRef(onSnapshot);
   onSnapshotRef.current = onSnapshot;
