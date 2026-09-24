@@ -53,6 +53,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -486,6 +487,8 @@ class _Foot:
     identity_degraded: str | None = None
     firmware: str = "unknown"
     applied: AppliedConfig | None = None
+    #: 本次两台都连上并开流的时刻（UTC ISO）。设备页「本次 HH:MM 连接」（RAY-530）。
+    connected_at: str | None = None
 
 
 class _ConnectError(RuntimeError):
@@ -708,6 +711,9 @@ class BleDeviceSource:
             return
         # 积压线：开流前在队列里排着的样本按上一轮的速率产出，不进到达率（同 v3prime）。
         started_at = self._clock()
+        connected_at = datetime.now(UTC).isoformat(timespec="seconds")
+        for foot in opened:
+            foot.connected_at = connected_at
         with self._lock:
             for label, foot in zip(FEET, opened, strict=True):
                 self._feet[label] = foot
@@ -1175,20 +1181,37 @@ class BleDeviceSource:
             return 0
 
     def module_info(self) -> list[dict[str, Any]]:
-        """掩码的是**平台地址**，不是设备自报 MAC —— 后者的字节排布尚未经外部证实，
-        不该摆上界面让人去对照（见 `device/identity.py`）。"""
+        """设备页摘要。地址掩码优先用设备自报 MAC 的尾号（RAY-530）。
+
+        原先只给平台地址：MAC 字节序当时未经外部证实。RAY-479 起左右绑定以 MAC 为
+        唯一依据，配对向导与自检也都显示 MAC 尾号 —— 设备页再显示平台句柄，操作员就
+        没法把同一台模块在两个页面上对上。读不到 MAC（身份降级）时退回平台地址。
+        """
         batteries = self.read_batteries()
         with self._lock:
-            return [
-                {
+            modules = []
+            for label in FEET:
+                foot = self._feet.get(label) if self._connected(label) else None
+                module: dict[str, Any] = {
                     "side": "left" if label == "L" else "right",
-                    "maskedAddress": mask_address(
-                        self._feet[label].discovered.address if label in self._feet else None
-                    ),
+                    "maskedAddress": None,
                     "batteryPercent": batteries[label].percent if batteries[label] else None,
                 }
-                for label in FEET
-            ]
+                if foot is not None:
+                    by_mac = (
+                        foot.identity is not None
+                        and not foot.identity_degraded
+                        and foot.identity.kind == "mac"
+                    )
+                    module["maskedAddress"] = (
+                        mask_mac(foot.identity.value)
+                        if by_mac
+                        else mask_address(foot.discovered.address)
+                    )
+                    module["firmware"] = foot.firmware if foot.firmware != "unknown" else None
+                    module["connectedAt"] = foot.connected_at
+                modules.append(module)
+            return modules
 
     def transports(self) -> dict[str, Transport]:
         """两条 `SessionPort`，每次同一实例 —— 包括重连之后。"""

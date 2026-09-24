@@ -161,6 +161,8 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
   async function navigate(label) {
     const next = NAV_STAGE[label];
     if (!next) return;
+    // 上一页的「重新检查失败」不该跟到别的页上（工作台与设备页共用这份状态）。
+    setRecheckError(null);
     // 已在工作台时再点「工作台」不会触发进入工作台的重拉，这里补一次。
     if (next === STAGE.hub && stage === STAGE.hub) setSnapshotEpoch((epoch) => epoch + 1);
     try {
@@ -266,13 +268,16 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     });
   }, [stage, adapter]);
 
+  // 工作台与设备页共用同一个「重新检查」：先让 sidecar 重查，再按所在页面重拉该页的数据。
+  // 设备页原先也调这个、却只重拉工作台快照 —— 点了页面毫无变化（RAY-530）。
   async function handleRecheck() {
     if (recheckingRef.current) return;
     recheckingRef.current = true;
     setRechecking(true);
     try {
       await adapter.recheckDevices();
-      setSnapshot(await adapter.snapshot());
+      if (stage === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
+      else setSnapshot(await adapter.snapshot());
       setRecheckError(null);
     } catch (error) {
       // 保留上一份快照，但要告诉操作员这次没查成、原因是什么、接下来能做什么。
@@ -632,6 +637,9 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         support={deviceInfo.support ?? {}}
         onNavigate={navigate}
         onRecheck={handleRecheck}
+        rechecking={rechecking}
+        recheckError={recheckError}
+        onDismissRecheckError={() => setRecheckError(null)}
         onRepair={() => openBindingWizard(STAGE.deviceSupport)}
       />
     );

@@ -515,6 +515,21 @@ class TestConnectOrchestration:
         finally:
             source.close()
 
+    def test_module_info_shows_the_mac_tail_firmware_and_connection_time(self):
+        """RAY-530：设备页地址与配对向导、自检同一口径（MAC 尾号），并带固件与连接时间。"""
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        source = BleDeviceSource(ops=world.ops())
+        try:
+            assert source.refresh(timeout=5) == "connected"
+            left, right = source.module_info()
+            assert left["maskedAddress"] == "…:00:01" and right["maskedAddress"] == "…:00:02"
+            assert left["firmware"] == "1.4.2"
+            assert left["connectedAt"] and left["connectedAt"] == right["connectedAt"]
+        finally:
+            source.close()
+        assert [m["maskedAddress"] for m in source.module_info()] == [None, None]
+        assert "firmware" not in source.module_info()[0]
+
     def test_explicit_filters_assign_feet(self):
         world = _FakeWorld(["AA:00:00:00:00:01", "BB:00:00:00:00:02"])
         source = BleDeviceSource(left="bb:00", right="AA:00", ops=world.ops())

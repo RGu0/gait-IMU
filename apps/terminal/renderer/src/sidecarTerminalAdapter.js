@@ -176,12 +176,22 @@ function toUploadSummary(summary) {
   };
 }
 
+/** 「本次 HH:MM 连接」：sidecar 给 UTC ISO，这里按本机时区显示（RAY-530）。 */
+export function connectedLabel(iso) {
+  const at = iso ? new Date(iso) : null;
+  if (!at || Number.isNaN(at.getTime())) return NOT_RECORDED;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `本次 ${pad(at.getHours())}:${pad(at.getMinutes())} 连接`;
+}
+
 function toModuleView(module) {
   return {
     ...module,
+    maskedAddress: module?.maskedAddress ?? "未连接",
     firmware: module?.firmware ?? NOT_RECORDED,
-    lastConnected: module?.lastConnected ?? NOT_RECORDED,
+    lastConnected: module?.lastConnected ?? connectedLabel(module?.connectedAt),
     factoryCalibrated: Boolean(module?.factoryCalibrated),
+    factoryCalibrationWaived: Boolean(module?.factoryCalibrationWaived),
   };
 }
 
