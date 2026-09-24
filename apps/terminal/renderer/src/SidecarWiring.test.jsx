@@ -42,6 +42,24 @@ function sidecar(overrides = {}, { events } = {}) {
   return { adapter, calls: fake.calls };
 }
 
+/**
+ * sidecar 推送事件的桥。渲染端在采集页的 passive effect 里才订阅，而 `findBy*` 在 DOM
+ * 命中后就返回，不等 effect —— CI 上两者先后不定，抢先 emit 的事件会被静默丢掉
+ * （RAY-531）。所以首个 emit 之前先 `await bridge.subscribed()`。
+ */
+function sessionEvents() {
+  let handler = null;
+  return {
+    events: (h) => {
+      handler = h;
+      return () => { if (handler === h) handler = null; };
+    },
+    // 没人订阅时照真 sidecar 的样子丢掉：收尾之后它仍会推 tick。
+    emit: (event) => handler?.(event),
+    subscribed: () => waitFor(() => expect(handler).not.toBeNull()),
+  };
+}
+
 const click = (name) => fireEvent.click(screen.getByRole("button", { name }));
 const tickAll = () => screen.getAllByRole("checkbox").forEach((box) => fireEvent.click(box));
 
@@ -150,13 +168,13 @@ describe("真 sidecar 形状上的检测流程", () => {
   it(
     "异步 startSession 进入采集页并带上受检者；报告被拒时给出错误屏，可回工作台",
     async () => {
-      let emit = () => {};
       let seq = 2;
-      const events = (handler) => { emit = handler; return () => { emit = () => {}; }; };
+      const { events, emit, subscribed } = sessionEvents();
       // 真实的 180 秒会话：结束靠 sidecar 的 tick 说剩余 0，而不是本地计时器走完。
       const { adapter, calls } = sidecar({}, { events });
       render(<TerminalApp adapter={adapter} />);
       const sidebar = await walkToRun();
+      await subscribed();
 
       const start = calls.find((c) => c.method === "startSession");
       expect(start.params.subjectUuid).toBe(CREATE_SUBJECT.subjectUuid);
@@ -214,11 +232,11 @@ describe("真 sidecar 形状上的检测流程", () => {
   }, 10000);
 
   it("sidecar 中止后收尾被拒也照样回工作台", async () => {
-    let emit = () => {};
-    const events = (handler) => { emit = handler; return () => {}; };
+    const { events, emit, subscribed } = sessionEvents();
     const { adapter } = sidecar({ stopSession: fail(REPORT_NO_CYCLES) }, { events });
     render(<TerminalApp adapter={adapter} />);
     await walkToRun();
+    await subscribed();
     const aborted = { code: "E-BLE-1020", domain: "E-BLE", message: "原始数据写盘失败，测试已安全停止。", action: "请检查磁盘剩余空间后重新检测。", blocking: true };
     act(() => emit({ kind: "event", v: "1.0", topic: "session.aborted", seq: 5, payload: { error: aborted } }));
     // Windows runner 上默认 1 s 等不到（中止 → stopSession 被拒 → 重渲染），放宽等待。
