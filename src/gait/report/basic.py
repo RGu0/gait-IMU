@@ -590,14 +590,7 @@ def build_report(
         # 有效时长同理：没人量过就说「未记录」。走 `assemble_report` 那条路的调用方
         # 手里只有一个 `ChainResult`，它不含有效时长 —— 编一个 0 秒出来会把一场
         # 正常的检测写成一场没采到东西的检测。
-        {
-            "label": "有效时长",
-            "value": (
-                f"{valid_seconds:.0f} 秒（{valid_seconds / duration_s:.0%}）"
-                if valid_seconds is not None
-                else "未记录"
-            ),
-        },
+        {"label": "有效时长", "value": _valid_time_text(valid_seconds, duration_s)},
         {"label": "有效步数", "value": str(len(usable))},
         # 转身次数拿不到时说「未记录」，不写 0 —— 0 是一个断言，未记录不是。
         # PRD §12 ⑦ 把它列在「测试条件」里，PRD §13 又把它列进 v1 输出指标 ——
@@ -638,3 +631,19 @@ def build_report(
         # PRD §13：grade 汇总规则版本化，进报告页脚。
         "qualityFooter": footer.snapshot(),
     }
+
+
+def _valid_time_text(valid_seconds: float | None, duration_s: int) -> str:
+    """「有效时长」一栏。没人量过就说「未记录」，不编 0 秒。
+
+    走满时结束的「请站定 3 秒」计入有效时长（05 数据格式规范 v1.10 §3.3），于是会
+    超过配置时长。用户 2026-09-24 拍板**加注、不截断**（RAY-536）：数值照实写，
+    括号里说明多出来的那几秒是什么 —— 多出多少就写多少，不硬编码 3。
+    """
+    if valid_seconds is None:
+        return "未记录"
+    text = f"{valid_seconds:.0f} 秒（{valid_seconds / duration_s:.0%}"
+    if valid_seconds > duration_s:
+        extra = max(1, round(valid_seconds - duration_s))
+        text += f"，含结束站定 {extra} 秒"
+    return text + "）"

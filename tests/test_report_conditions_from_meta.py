@@ -93,3 +93,19 @@ def test_another_walk_in_the_process_does_not_leak_into_an_old_report(tmp_path) 
 
     conditions, _ = _conditions(service, old)
     assert conditions["有效时长"] == "30 秒（50%）"
+
+
+def test_a_full_walk_notes_the_closing_stand_instead_of_truncating(tmp_path) -> None:
+    """RAY-536：走满时有效时长含结束站定，超过配置时长。用户拍板：加注、不截断。"""
+    session_id = _walk(tmp_path, stop_at=63.03, duration_s=60)
+    conditions, _ = _conditions(TerminalService(session_root=tmp_path), session_id)
+    assert conditions["有效时长"] == "63 秒（105%，含结束站定 3 秒）"
+
+
+def test_the_stand_note_only_appears_when_valid_time_exceeds_the_configuration() -> None:
+    from gait.report.basic import _valid_time_text
+
+    assert _valid_time_text(45.0, 60) == "45 秒（75%）"
+    assert _valid_time_text(60.0, 60) == "60 秒（100%）"
+    assert _valid_time_text(60.2, 60) == "60 秒（100%，含结束站定 1 秒）"
+    assert _valid_time_text(None, 60) == "未记录"
