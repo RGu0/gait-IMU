@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -306,13 +307,22 @@ class TerminalService:
             refresh(timeout=0)
 
     def _do_recheckDevices(self, _: dict[str, Any]) -> dict[str, Any]:
-        self._refresh_source()
+        # 操作员主动点的「重新检查」：连着也要真的重读一遍电量（RAY-537）。
+        self._refresh_source(reread_batteries=True)
         return self._snapshot()
 
-    def _refresh_source(self) -> None:
-        """让设备源重读一次（可选能力）。真设备要重新扫描/读电量；stub 没有这一步。"""
+    def _refresh_source(self, *, reread_batteries: bool = False) -> None:
+        """让设备源重读一次（可选能力）。真设备要重新扫描/读电量；stub 没有这一步。
+
+        `reread_batteries` 只传给声明了这个参数的设备源 —— 自检（`runPreflight`）不传：
+        降速重读会压低到达率，干扰自检的到达率测量。
+        """
         refresh = getattr(self.source, "refresh", None)
-        if callable(refresh):
+        if not callable(refresh):
+            return
+        if reread_batteries and "reread_batteries" in inspect.signature(refresh).parameters:
+            refresh(reread_batteries=True)
+        else:
             refresh()
 
     def _modules_with_calibration(self) -> list[dict[str, Any]]:

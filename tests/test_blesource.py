@@ -530,6 +530,35 @@ class TestConnectOrchestration:
         assert [m["maskedAddress"] for m in source.module_info()] == [None, None]
         assert "firmware" not in source.module_info()[0]
 
+    def test_an_explicit_recheck_rereads_valid_batteries_too(self):
+        """RAY-537：读数有效时「重新检查」曾什么都不做，页面只闪一下，电量停在连接那一刻。"""
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        calls: dict[str, int] = {}
+
+        async def battery(device):
+            calls[device.device_id] = calls.get(device.device_id, 0) + 1
+            return Battery(raw=411 - calls[device.device_id], percent=100 - calls[device.device_id])
+
+        source = BleDeviceSource(ops=replace(world.ops(), read_battery=battery))
+        try:
+            assert source.refresh(timeout=5) == "connected"
+            assert set(calls.values()) == {1}
+            assert source.refresh(timeout=5) == "connected"  # 自动路径：有效就不重读
+            assert set(calls.values()) == {1}
+
+            started = len(world.started)
+            assert source.refresh(timeout=5, reread_batteries=True) == "connected"
+            assert set(calls.values()) == {2}  # 两台都重读
+            assert {b.percent for b in source.read_batteries().values()} == {98}
+            assert sorted(world.started[started:]) == sorted(world.transports)  # 各恢复开流一次
+            assert world.closed == []  # 不断开
+
+            source.begin_stream()  # 录制中：带参数也不重读
+            assert source.refresh(timeout=5, reread_batteries=True) == "connected"
+            assert set(calls.values()) == {2}
+        finally:
+            source.close()
+
     def test_explicit_filters_assign_feet(self):
         world = _FakeWorld(["AA:00:00:00:00:01", "BB:00:00:00:00:02"])
         source = BleDeviceSource(left="bb:00", right="AA:00", ops=world.ops())

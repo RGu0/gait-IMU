@@ -601,10 +601,14 @@ class BleDeviceSource:
         """
         return self._binding_problem
 
-    def refresh(self, timeout: float | None = None) -> str:
+    def refresh(self, timeout: float | None = None, *, reread_batteries: bool = False) -> str:
         """没连上且没在连，就在后台开始连；然后最多等 `timeout` 秒。幂等。
 
         返回 `state`。等超时不是错误：连接继续在 BLE 循环里跑，下次调用看结果。
+
+        `reread_batteries=True`：操作员主动点「重新检查」时用（RAY-537）。已连上时**两台
+        都**原地重读电量 —— 否则读数有效时这一下什么都不做，页面只闪一下，电量停在
+        连接那一刻。自动自检不传它：降速重读会压低到达率，干扰自检量到达率。
         """
         with self._lock:
             if self._closed:
@@ -613,9 +617,11 @@ class BleDeviceSource:
                 if self._all_connected():
                     # 已连上时电量不会自己再读（开流后寄存器读来不及回复）。读数无效时
                     # 在这里原地重读，否则「重新检查设备」对它毫无作用（RAY-518）。
-                    if self._recording or not self._batteries_need_reread():
+                    if self._recording or not (
+                        reread_batteries or self._batteries_need_reread()
+                    ):
                         return "connected"
-                    work = self._reread_batteries()
+                    work = self._reread_batteries(everyone=reread_batteries)
                 else:
                     work = self._connect()
                 loop = self._ensure_loop()
@@ -1067,8 +1073,9 @@ class BleDeviceSource:
             foot.battery is None or not foot.battery.is_plausible for foot in self._feet.values()
         )
 
-    async def _reread_batteries(self) -> None:
-        """已连上、电量读数不可信的脚：降速重读电量，再恢复正式开流配置（RAY-518）。
+    async def _reread_batteries(self, *, everyone: bool = False) -> None:
+        """已连上、电量读数不可信的脚（`everyone` 时两只都）：降速重读电量，再恢复
+        正式开流配置（RAY-518；`everyone` 见 RAY-537）。
 
         不断开：断开后刚断的模块不会立刻重新广播，重连反而更慢更不稳。重读期间这只脚
         的到达率会短暂下降，恢复开流后一秒内回到正常。
@@ -1077,7 +1084,7 @@ class BleDeviceSource:
             feet = [
                 (label, foot)
                 for label, foot in self._feet.items()
-                if foot.battery is None or not foot.battery.is_plausible
+                if everyone or foot.battery is None or not foot.battery.is_plausible
             ]
         for label, foot in feet:
             battery = await self._ops.read_battery(foot.device)

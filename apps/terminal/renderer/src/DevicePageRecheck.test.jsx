@@ -77,6 +77,23 @@ describe("设备页「重新检查」（RAY-530）", () => {
     expect(screen.getByRole("heading", { name: "设备与支持" })).toBeVisible();
   });
 
+  it("数据没变也显示「已重新检查（HH:MM:SS）」；失败时不显示（RAY-537）", async () => {
+    const same = [module("left", { batteryPercent: 100 }), module("right", { batteryPercent: 100 })];
+    const { adapter, release } = sidecar({ before: same, after: same });
+    await openDevicePage(adapter);
+    expect(screen.queryByText(/已重新检查/)).toBeNull();
+    release();
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
+    const status = await screen.findByText(/^已重新检查（\d{2}:\d{2}:\d{2}）$/, {}, WAIT);
+    expect(status).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    await screen.findByRole("heading", { name: "工作台" });
+    fireEvent.click(screen.getByRole("button", { name: "设备与支持" }));
+    await screen.findByRole("heading", { name: "设备与支持" });
+    expect(screen.queryByText(/已重新检查/)).toBeNull();
+  });
+
   it("重查失败时在本页提示，离开本页提示不跟过去", async () => {
     const { adapter, release } = sidecar({
       recheck: fail({ code: "E-BLE-1001", domain: "E-BLE", message: "模块未连接", action: "请确认模块已开机。", blocking: true }),
@@ -88,6 +105,7 @@ describe("设备页「重新检查」（RAY-530）", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
     const banner = await screen.findByLabelText("重新检查设备失败", {}, WAIT);
     expect(within(banner).getByText(/模块未连接/)).toBeVisible();
+    expect(screen.queryByText(/已重新检查/)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "工作台" }));
     await screen.findByRole("heading", { name: "工作台" });
