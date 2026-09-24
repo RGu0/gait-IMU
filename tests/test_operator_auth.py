@@ -550,3 +550,16 @@ def test_快照不读密钥库() -> None:
     for _ in range(3):
         _snapshot(svc)
     assert secrets.reads == after_start
+
+
+class BrokenSecretStore(InMemorySecretStore):
+    def get_secret(self, key: str) -> str | None:
+        raise RuntimeError("钥匙串被锁")
+
+
+def test_冷启动读不了密钥库也起得来且落在P00() -> None:
+    """恢复票据是 sidecar 启动路径上第一次碰密钥库。它抛出去，sidecar 就整个起不来。"""
+    svc = service(auth_client=FakeAuth(ticket()), secrets=BrokenSecretStore())
+    snap = _snapshot(svc)
+    assert snap["loginRequired"] is True
+    assert snap["operator"] is None

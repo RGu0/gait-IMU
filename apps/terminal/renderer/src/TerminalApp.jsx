@@ -69,17 +69,6 @@ export const SNAPSHOT_RETRY_MS = 1000;
 // 真设备源在后台连接时（`deviceSummary.state === "connecting"`）工作台重拉快照的间隔（RAY-503）。
 export const DEVICE_POLL_MS = 2000;
 
-/**
- * 采集中 sidecar 进程没了（RAY-493 preview-rc2-fixes，装机 A5 §6-1）。
- *
- * 会话活在**那个**进程里。主进程重启出来的是一个新进程，它没有这场会话：之前界面
- * 回到采集页接着倒计时（步数冻结），走满后向新进程发 stopSession，拿回「会话尚未开始」
- * —— 让受试者白走五十秒，再给一句与事实相反的话。
- *
- * 这不是 sidecar 的错误应答（没有码、没有域，同 SidecarDownScreen 的理由），是渲染端
- * 自己亲眼看见的事：生命周期在这场检测进行中离开过 ready。所以文案在这里。
- * 磁盘上那场会话停在 `walking`，检测记录里显示「未正常结束」（RAY-496）。
- */
 /** 票据过期（sidecar 的登录闸，RAY-323 R1）。收到它就回 P-00，而不是停在错误屏上。 */
 export const TICKET_EXPIRED_CODE = "E-NET-6044";
 
@@ -94,6 +83,17 @@ export function loginFailureMessage(error) {
   return `${message}${action}${code}`.trim() || "登录失败。";
 }
 
+/**
+ * 采集中 sidecar 进程没了（RAY-493 preview-rc2-fixes，装机 A5 §6-1）。
+ *
+ * 会话活在**那个**进程里。主进程重启出来的是一个新进程，它没有这场会话：之前界面
+ * 回到采集页接着倒计时（步数冻结），走满后向新进程发 stopSession，拿回「会话尚未开始」
+ * —— 让受试者白走五十秒，再给一句与事实相反的话。
+ *
+ * 这不是 sidecar 的错误应答（没有码、没有域，同 SidecarDownScreen 的理由），是渲染端
+ * 自己亲眼看见的事：生命周期在这场检测进行中离开过 ready。所以文案在这里。
+ * 磁盘上那场会话停在 `walking`，检测记录里显示「未正常结束」（RAY-496）。
+ */
 export const WALK_INTERRUPTED = Object.freeze({
   title: "检测已中断",
   message: "采集服务中断，本次检测已中断。",

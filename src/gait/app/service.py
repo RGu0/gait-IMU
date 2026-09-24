@@ -193,9 +193,16 @@ class TerminalService:
         #: 只在这里读一次密钥库，**不**在每次快照时读：工作台连接中会每两秒拉一次快照，
         #: 而过期由 `startSession` 的闸判（它本来就要读）。代价是快照里的操作员可能比
         #: 票据多活一会儿 —— 那一刻开检测会拿到 `E-NET-6044`，渲染端据此回 P-00。
+        #:
+        #: 恢复失败（密钥库读不了）就当没有票据：界面落在 P-00，问题在登录那一步以它自己
+        #: 的错误出现。这是 sidecar 启动路径上**第一次**碰密钥库 —— 之前只在开检测时
+        #: 读 —— 让它在这里抛出去，整个 sidecar 就起不来，连工作台都没有。
         self.operator: dict[str, Any] | None = None
         if self.tickets is not None:
-            restored = self.tickets.load()
+            try:
+                restored = self.tickets.load()
+            except Exception:  # noqa: BLE001 - 各密钥库后端的异常类型不一（同 KeyringSecretStore）
+                restored = None
             self.operator = restored.snapshot() if restored is not None else None
         self.capture: SessionCapture | None = None
         self.session_id: str | None = None
