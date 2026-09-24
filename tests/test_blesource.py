@@ -467,6 +467,54 @@ class TestConnectOrchestration:
         finally:
             source.close()
 
+    def test_an_invalid_battery_is_reread_in_place_without_disconnecting(self):
+        """RAY-518：已连上时「重新检查」曾对无效电量毫无作用，操作员只能干等断连。"""
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        calls: dict[str, int] = {}
+
+        async def battery(device):
+            calls[device.device_id] = calls.get(device.device_id, 0) + 1
+            if calls[device.device_id] == 1:
+                return Battery(raw=0, percent=None)
+            return Battery(raw=411, percent=100)
+
+        source = BleDeviceSource(ops=replace(world.ops(), read_battery=battery))
+        try:
+            assert source.refresh(timeout=5) == "connected"
+            assert {b.percent for b in source.read_batteries().values()} == {None}
+            started = len(world.started)
+
+            assert source.refresh(timeout=5) == "connected"
+            assert {b.percent for b in source.read_batteries().values()} == {100}
+            assert world.closed == []  # 原地重读，不断开
+            assert sorted(world.started[started:]) == sorted(world.transports)  # 恢复开流
+            assert set(calls.values()) == {2}
+
+            assert source.refresh(timeout=5) == "connected"  # 已有效：不再重读
+            assert set(calls.values()) == {2}
+        finally:
+            source.close()
+
+    def test_no_battery_reread_while_a_session_is_recording(self):
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        calls: dict[str, int] = {}
+
+        async def battery(device):
+            calls[device.device_id] = calls.get(device.device_id, 0) + 1
+            return Battery(raw=0, percent=None)
+
+        source = BleDeviceSource(ops=replace(world.ops(), read_battery=battery))
+        try:
+            assert source.refresh(timeout=5) == "connected"
+            source.begin_stream()
+            assert source.refresh(timeout=5) == "connected"
+            assert set(calls.values()) == {1}
+            source.end_stream()
+            assert source.refresh(timeout=5) == "connected"
+            assert set(calls.values()) == {2}
+        finally:
+            source.close()
+
     def test_explicit_filters_assign_feet(self):
         world = _FakeWorld(["AA:00:00:00:00:01", "BB:00:00:00:00:02"])
         source = BleDeviceSource(left="bb:00", right="AA:00", ops=world.ops())
