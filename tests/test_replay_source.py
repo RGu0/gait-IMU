@@ -102,9 +102,36 @@ def test_a_recorded_session_replays_into_a_new_one(tmp_path, synthetic_chunks) -
     chunks = frames_from_session(tmp_path / "a" / original)
     assert set(chunks) == {"L", "R"}
     again = ReplayDeviceSource(chunks=chunks, label="replay", speed=50.0)
-    service, _, report = _walk_and_report(tmp_path / "b", again)
+    service, replayed, report = _walk_and_report(tmp_path / "b", again)
+    # 回放成一份新会话，字节就该逐段原样；只比「算得出报告」拦不住乱序（RAY-538）。
+    copied = frames_from_session(tmp_path / "b" / replayed)
+    assert {label: [data for _, data in items] for label, items in copied.items()} == {
+        label: [data for _, data in items] for label, items in chunks.items()
+    }
     assert report["metrics"]
     assert service.handle({"id": "s", "method": "snapshot"})["result"]["source"] == "replay"
+
+
+def test_chunks_sharing_an_arrival_time_replay_in_recorded_order() -> None:
+    """RAY-538：同一时刻的多段按录制顺序推，不按载荷字节排。
+
+    Windows + Python 3.12 的 `time.monotonic()` 粒度约 15.6 ms，录下来的到达时刻
+    大片并列。时间线曾是 `sorted((t, label, data))`，并列时落到 `data` 上 —— 回放出
+    的是原会话的一个排列，`check-windows` 上间歇 `E-QLT-5003`。载荷这里特意逆序给，
+    按字节排就一定与录制顺序相反。
+    """
+    chunks = {
+        "L": [(0.0, b"\x03"), (0.0, b"\x02"), (0.0, b"\x01"), (0.5, b"\x00")],
+        "R": [(0.0, b"\x09"), (0.0, b"\x08"), (0.5, b"\x07")],
+    }
+    source = ReplayDeviceSource(chunks=chunks, label="replay", speed=1e9)
+    received: dict[str, list[bytes]] = {"L": [], "R": []}
+    for label, transport in source.transports().items():
+        transport.on_data(received[label].append)
+    source.begin_stream()
+    _wait_until_fed(source)
+    source.end_stream()
+    assert received == {label: [data for _, data in items] for label, items in chunks.items()}
 
 
 def test_step_counts_are_cosmetic_and_bounded(synthetic_chunks) -> None:

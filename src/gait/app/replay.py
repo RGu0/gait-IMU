@@ -168,10 +168,17 @@ class ReplayDeviceSource(StubDeviceSource):
 
         def pump() -> None:
             self._ready.wait()
+            # 只按 `(t, label)` 排，靠排序的稳定性保住每只脚的录制顺序（RAY-538）。
+            # 并列的 t 很常见：Windows + Python 3.12 的 monotonic 粒度约 15.6 ms，
+            # 一个刻度里能录下十几段。键里带上 `data` 时，并列段按载荷字节重排，
+            # 回放出的是原会话的一个排列 —— 步态被打乱，报告有时还算得出来。
             timeline = sorted(
-                (t, label, data)
-                for label, items in self.chunks.items()
-                for t, data in items
+                (
+                    (t, label, data)
+                    for label, items in self.chunks.items()
+                    for t, data in items
+                ),
+                key=lambda item: (item[0], item[1]),
             )
             self._stream_seconds = timeline[-1][0] if timeline else 0.0
             start = self.clock()
