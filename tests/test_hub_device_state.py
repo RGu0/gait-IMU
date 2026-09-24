@@ -84,3 +84,30 @@ def test_no_connection_is_started_while_a_walk_is_running() -> None:
 def test_sources_without_a_connection_state_keep_the_old_shape() -> None:
     summary = _snapshot(TerminalService(source=StubDeviceSource()))["deviceSummary"]
     assert "state" not in summary and summary["ready"] is True
+
+
+
+@dataclass
+class _RereadingSource(StubDeviceSource):
+    """声明了 `reread_batteries` 的设备源：记下每次 refresh 的参数。"""
+
+    calls: list[bool] = field(default_factory=list)
+
+    def refresh(self, timeout: float | None = None, *, reread_batteries: bool = False) -> str:
+        self.calls.append(reread_batteries)
+        return "connected"
+
+
+def test_an_operator_recheck_forces_a_battery_reread_but_preflight_does_not() -> None:
+    """RAY-537：主动「重新检查」要真的重读；自检不强制（降速会干扰到达率测量）。"""
+    source = _RereadingSource()
+    service = TerminalService(source=source)
+    service.handle({"id": "r", "method": "recheckDevices"})
+    service.handle({"id": "p", "method": "runPreflight"})
+    assert source.calls == [True, False]
+
+
+def test_sources_without_the_parameter_still_recheck() -> None:
+    source = _ConnectingSource(state="failed")
+    TerminalService(source=source).handle({"id": "r", "method": "recheckDevices"})
+    assert source.refresh_calls == [None]

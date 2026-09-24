@@ -18,6 +18,11 @@ import { AppBar } from "./AppBar.jsx";
  *   pressed by someone who was told to "try things".
  */
 
+function checkedTime(at) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+}
+
 /** 出厂标定一栏的三种状态。预览放行与自检的 `waived`、报告注记同一口径（RAY-530）。 */
 function calibrationPill(module) {
   if (module.factoryCalibrated) return { tone: "success", icon: "check", label: "出厂标定已匹配" };
@@ -53,6 +58,7 @@ export function DeviceSupportScreen({
   onNavigate,
   rechecking = false,
   recheckError = null,
+  checkedAt = null,
   onDismissRecheckError,
 }) {
   const [confirmingRepair, setConfirmingRepair] = useState(false);
@@ -90,6 +96,11 @@ export function DeviceSupportScreen({
           </Button>
           <Button variant="secondary" onClick={() => setConfirmingRepair(true)}>重新配对模块</Button>
         </div>
+        {checkedAt && !rechecking ? (
+          <p className="device-checked" role="status">
+            已重新检查（{checkedTime(checkedAt)}）
+          </p>
+        ) : null}
 
         <section className="support-info" aria-label="支持信息">
           <h2>支持</h2>

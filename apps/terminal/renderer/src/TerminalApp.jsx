@@ -154,6 +154,8 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
   const [rechecking, setRechecking] = useState(false);
   const recheckingRef = useRef(false);
   const [recheckError, setRecheckError] = useState(null);
+  // 设备页最近一次重新检查成功的时刻（RAY-537）：数据没变时也看得出检查做过了。
+  const [deviceCheckedAt, setDeviceCheckedAt] = useState(null);
   // 每次回到工作台都重拉快照（RAY-493 B1）：走完、停止、从报告/错误屏/顶栏回来时，
   // sidecar 已经多了会话，旧快照里的待上传数与最近记录都过期了。
   const wasHubRef = useRef(true);
@@ -163,6 +165,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     if (!next) return;
     // 上一页的「重新检查失败」不该跟到别的页上（工作台与设备页共用这份状态）。
     setRecheckError(null);
+    setDeviceCheckedAt(null);
     // 已在工作台时再点「工作台」不会触发进入工作台的重拉，这里补一次。
     if (next === STAGE.hub && stage === STAGE.hub) setSnapshotEpoch((epoch) => epoch + 1);
     try {
@@ -276,8 +279,12 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     setRechecking(true);
     try {
       await adapter.recheckDevices();
-      if (stage === STAGE.deviceSupport) setDeviceInfo(await adapter.deviceSupport());
-      else setSnapshot(await adapter.snapshot());
+      if (stage === STAGE.deviceSupport) {
+        setDeviceInfo(await adapter.deviceSupport());
+        setDeviceCheckedAt(new Date());
+      } else {
+        setSnapshot(await adapter.snapshot());
+      }
       setRecheckError(null);
     } catch (error) {
       // 保留上一份快照，但要告诉操作员这次没查成、原因是什么、接下来能做什么。
@@ -639,6 +646,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onRecheck={handleRecheck}
         rechecking={rechecking}
         recheckError={recheckError}
+        checkedAt={deviceCheckedAt}
         onDismissRecheckError={() => setRecheckError(null)}
         onRepair={() => openBindingWizard(STAGE.deviceSupport)}
       />
