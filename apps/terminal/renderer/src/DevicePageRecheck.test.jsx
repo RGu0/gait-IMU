@@ -23,13 +23,21 @@ const module = (side, overrides = {}) => ({
   ...overrides,
 });
 
+/**
+ * `recheckDevices` 挂住，直到测试调 `release()` —— 「进行中不能重复触发」必须在
+ * 真的还在进行中时断言。用定时器放行在慢的 Windows runner 上会先跑完（RAY-530 CI）。
+ */
 function sidecar({ recheck = SNAPSHOT, before, after }) {
   let rechecked = false;
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
   const fake = fakeTransport({
     snapshot: SNAPSHOT,
     listRecords: RECORDS,
     recheckDevices: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await held;
       rechecked = true;
       return recheck;
     },
@@ -37,7 +45,7 @@ function sidecar({ recheck = SNAPSHOT, before, after }) {
   });
   const adapter = createSidecarAdapter(fake.transport, { now: () => 100 });
   const methods = () => fake.calls.map((call) => call.method);
-  return { adapter, methods };
+  return { adapter, methods, release: () => release() };
 }
 
 async function openDevicePage(adapter) {
@@ -49,7 +57,7 @@ async function openDevicePage(adapter) {
 
 describe("设备页「重新检查」（RAY-530）", () => {
   it("重查后重拉本页数据，进行中有加载态且不能重复触发", async () => {
-    const { adapter, methods } = sidecar({
+    const { adapter, methods, release } = sidecar({
       before: [module("left"), module("right")],
       after: [module("left", { batteryPercent: 100 }), module("right", { batteryPercent: 100 })],
     });
@@ -59,6 +67,7 @@ describe("设备页「重新检查」（RAY-530）", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
     const busy = await screen.findByRole("button", { name: /正在重新检查/ });
     fireEvent.click(busy);
+    release();
 
     await waitFor(() => expect(screen.queryByText("电量未读取")).toBeNull(), WAIT);
     expect(screen.getAllByText("100%")).toHaveLength(2);
@@ -69,12 +78,13 @@ describe("设备页「重新检查」（RAY-530）", () => {
   });
 
   it("重查失败时在本页提示，离开本页提示不跟过去", async () => {
-    const { adapter } = sidecar({
+    const { adapter, release } = sidecar({
       recheck: fail({ code: "E-BLE-1001", domain: "E-BLE", message: "模块未连接", action: "请确认模块已开机。", blocking: true }),
       before: [module("left"), module("right")],
       after: [module("left"), module("right")],
     });
     await openDevicePage(adapter);
+    release();
     fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
     const banner = await screen.findByLabelText("重新检查设备失败", {}, WAIT);
     expect(within(banner).getByText(/模块未连接/)).toBeVisible();
