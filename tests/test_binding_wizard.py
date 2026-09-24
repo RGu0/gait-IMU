@@ -365,7 +365,8 @@ def test_a_missing_bound_module_blocks_and_says_which_one(tmp_path: Path) -> Non
         assert source.refresh(timeout=5) == "failed"
         assert source.read_batteries() == {"L": None, "R": None}
         assert set(world.opened) >= {BLUE[0], STRANGER[0]}
-        assert BLUE[0] in world.closed  # 已认出的左脚也断开：不能单脚开流
+        # 已认出的左脚留着给下一次连接沿用，但只连着、不开流，读数仍是未连接（RAY-518）。
+        assert source._held["L"].identity == mac_identity(BLUE_MAC)
 
         items = {item["id"]: item for item in _call(service, "runPreflight")["result"]}
         binding = items["binding"]
@@ -550,3 +551,98 @@ def test_binding_right_still_excludes_the_current_left(tmp_path: Path) -> None:
         assert response["result"]["mac"] == BLUE_MAC
     finally:
         source.close()
+
+
+# ── 连接失败后保留已认出的模块（RAY-518）──────────────────────────────────────
+#
+# 真机日志：每一轮缺的都是上一轮认出、失败后被关掉的那一只 —— 刚断开的模块不会立刻
+# 重新广播。所以凑不齐时把认出的那只留着，下一次连接直接沿用。
+
+
+def _drop(source: BleDeviceSource, label: str) -> None:
+    """模拟保留着的那只链路断了。"""
+    import asyncio
+
+    foot = source._held[label]
+    asyncio.run_coroutine_threadsafe(foot.device.close(), source._loop).result(2)
+
+
+def test_a_recognised_module_is_kept_and_reused_by_the_next_attempt(tmp_path: Path) -> None:
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.opened.clear()
+        world.closed.clear()
+
+        world.power(ORANGE)  # 这一轮只扫到橙色
+        assert source.refresh(timeout=5) == "failed"
+        assert world.opened == [ORANGE[0]]
+        assert world.closed == []  # 认出的橙色没被关掉
+        assert source.read_batteries() == {"L": None, "R": None}  # 只连着、不开流
+
+        world.power(BLUE)  # 橙色仍连着（不再广播），这一轮只扫到蓝色
+        assert source.refresh(timeout=5) == "connected"
+        assert world.opened == [ORANGE[0], BLUE[0]]  # 橙色全程只打开一次
+        assert source.device_readings()["R"]["value"] == ORANGE_MAC
+        assert source.device_readings()["L"]["value"] == BLUE_MAC
+    finally:
+        source.close()
+
+
+def test_a_kept_module_whose_link_dropped_is_closed_and_rescanned(tmp_path: Path) -> None:
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.power(ORANGE)
+        assert source.refresh(timeout=5) == "failed"
+        _drop(source, "R")
+        world.opened.clear()
+        world.closed.clear()
+
+        world.power(BLUE, ORANGE)
+        assert source.refresh(timeout=5) == "connected"
+        assert ORANGE[0] in world.closed  # 断了的那份被收掉
+        assert sorted(world.opened) == sorted([BLUE[0], ORANGE[0]])  # 橙色重新扫到、重新打开
+    finally:
+        source.close()
+
+
+def test_a_kept_module_no_longer_in_the_binding_is_released(tmp_path: Path) -> None:
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.power(ORANGE)
+        assert source.refresh(timeout=5) == "failed"
+        # 另一处把右脚改绑成了别的模块（不经本进程的配对向导）。
+        BindingStore(tmp_path, clock=_clock).bind("R", mac_identity(STRANGER_MAC))
+        world.closed.clear()
+
+        world.power(BLUE, STRANGER)
+        assert source.refresh(timeout=5) == "connected"
+        assert ORANGE[0] in world.closed
+        assert source.device_readings()["R"]["value"] == STRANGER_MAC
+    finally:
+        source.close()
+
+
+def test_pairing_and_close_release_the_kept_module(tmp_path: Path) -> None:
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.power(ORANGE)
+        assert source.refresh(timeout=5) == "failed"
+        world.closed.clear()
+        world.power(BLUE)
+        assert _call(service, "bindFoot", foot="L")["status"] == "ok"
+        assert ORANGE[0] in world.closed and source._held == {}
+
+        world.power(ORANGE)
+        assert source.refresh(timeout=5) == "failed"
+        world.closed.clear()
+    finally:
+        source.close()
+    assert ORANGE[0] in world.closed and source._held == {}

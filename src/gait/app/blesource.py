@@ -113,8 +113,8 @@ FAIR_ARRIVAL = 0.80
 CLOSE_WAIT_S = 12.0
 #: 电量读数不可用时的重试（WT901 RAY-182）：寄存器偶发回原始值 0 —— flash 写入期间必现、
 #: 不写直接读也有 1/8。flash 写完的恢复实测 299~327 ms，所以间隔取 0.3 s。
-BATTERY_READ_ATTEMPTS = 3
-BATTERY_RETRY_DELAY_S = 0.3
+BATTERY_READ_ATTEMPTS = 5
+BATTERY_RETRY_DELAY_S = 0.5
 #: 配对识别（RAY-479）的整体等待上限：两次扫描 + 逐台连上读 MAC 再断开。sidecar 的
 #: 请求超时是 120 s（`apps/terminal/main/runtimeConfig.js`），这里要留出余量。
 IDENTIFY_WAIT_S = 90.0
@@ -410,9 +410,10 @@ async def read_battery_with_retry(
 
     ## 为什么要重读，而不是交给自检让操作员「重新检查」
 
-    电量只在**连接时**读一次（高速流期间寄存器读来不及回复，手册 §6）。已连上时点
-    「重新检查设备」不会断开重连，所以这一次读偏了，自检就会一直停在「电量读数无效」
-    直到断开 —— 操作员没有任何能自己做的动作。2026-09-16 真机首次 `--probe` 两脚都是这样。
+    电量只在**连接时**读一次（高速流期间寄存器读来不及回复，手册 §6）。这一次读偏了，
+    自检就停在「电量读数无效」。2026-09-16 真机首次 `--probe` 两脚都是这样。重读三次仍
+    全无效的情况 2026-09-23 在真机上也出现过（两脚），所以次数与间隔加到 5 × 0.5 s，
+    且已连上时「重新检查设备」会原地再走一遍本函数（`_reread_batteries`，RAY-518）。
 
     成因与 WT901 RAY-182 一致：寄存器偶发回原始值 0，wt901 如实给 `percent=None`
     （不把它映射成 0%）。那是瞬时的，隔 ~300 ms 再读即恢复。
@@ -527,6 +528,11 @@ class BleDeviceSource:
         self._closed = False
 
         self._feet: dict[str, _Foot] = {}
+        #: 按绑定连接失败时已经认出、仍连着的模块（RAY-518）。下一次连接直接沿用：
+        #: 刚断开的模块不会立刻重新广播，关掉它等于让下一轮扫描一定缺这一只。
+        self._held: dict[str, _Foot] = {}
+        #: 会话录制进行中（`begin_stream` 到 `end_stream`）：此时不原地重读电量。
+        self._recording = False
         self._consumers: list[asyncio.Task[None]] = []
         self._streaming = False
         self._foot_assignment: str | None = None
@@ -600,11 +606,17 @@ class BleDeviceSource:
         with self._lock:
             if self._closed:
                 return "closed"
-            if self._all_connected():
-                return "connected"
             if self._pending is None or self._pending.done():
+                if self._all_connected():
+                    # 已连上时电量不会自己再读（开流后寄存器读来不及回复）。读数无效时
+                    # 在这里原地重读，否则「重新检查设备」对它毫无作用（RAY-518）。
+                    if self._recording or not self._batteries_need_reread():
+                        return "connected"
+                    work = self._reread_batteries()
+                else:
+                    work = self._connect()
                 loop = self._ensure_loop()
-                self._pending = asyncio.run_coroutine_threadsafe(self._connect(), loop)
+                self._pending = asyncio.run_coroutine_threadsafe(work, loop)
             pending = self._pending
         with contextlib.suppress(Exception, concurrent.futures.CancelledError):
             pending.result(self._connect_wait if timeout is None else timeout)
@@ -659,7 +671,7 @@ class BleDeviceSource:
     # ── 连接编排（在 BLE 循环里跑）──
 
     async def _connect(self) -> None:
-        await self._teardown()
+        await self._teardown(release_held=False)
         self._last_error = None
         self._binding_problem = None
         opened: list[_Foot] = []
@@ -781,6 +793,16 @@ class BleDeviceSource:
         #: 已经读过身份的地址 → 身份（读不到 MAC 记 None）。重扫时不重复连它们。
         seen: dict[str, DeviceIdentity | None] = {}
         scan_problem: str | None = None
+        held, self._held = self._held, {}
+        for side, foot in held.items():
+            if foot.device.is_connected and foot.identity is not None and wanted[side] == foot.identity:
+                found[side] = foot
+                seen[foot.discovered.address] = foot.identity
+                _log(f"沿用上一次已认出的{FOOT_COLORS[side]}模块 {mask_mac(foot.identity.value)}")
+            else:
+                await self._close_device(foot)
+        if len(found) == len(FEET):
+            return found
         try:
             for attempt in range(1, SCAN_ATTEMPTS + 1):
                 try:
@@ -842,6 +864,12 @@ class BleDeviceSource:
                 parts.append(scan_problem)
             self._binding_problem = "在场模块与左右绑定不符：" + "；".join(parts) + "。"
             raise _ConnectError(self._binding_problem)
+        except _ConnectError:
+            # 凑不齐时不关已认出的那只，留给下一次连接沿用（RAY-518）。真机上关掉它，
+            # 下一轮扫描就一定缺这一只 —— 左右交替缺，要点好几次「重新检查」才连上。
+            # 它只连着、不开流，读数仍是「未连接」，自检照样阻断。
+            self._held = found
+            raise
         except BaseException:
             for foot in found.values():
                 await self._close_device(foot)
@@ -1008,7 +1036,8 @@ class BleDeviceSource:
         except Exception as error:  # noqa: BLE001 - 消费者死了读数归零，不崩
             _log(f"{label} 足样本消费中止：{error!r}")
 
-    async def _teardown(self) -> None:
+    async def _teardown(self, *, release_held: bool = True) -> None:
+        """断开并停流。`release_held=False` 只给 `_connect` 用：保留上一次认出的模块。"""
         consumers, self._consumers = self._consumers, []
         for task in consumers:
             task.cancel()
@@ -1022,6 +1051,40 @@ class BleDeviceSource:
                 port.bind(None)
         for foot in feet:
             await self._close_device(foot)
+        if release_held:
+            held, self._held = self._held, {}
+            for foot in held.values():
+                await self._close_device(foot)
+
+    def _batteries_need_reread(self) -> bool:
+        return any(
+            foot.battery is None or not foot.battery.is_plausible for foot in self._feet.values()
+        )
+
+    async def _reread_batteries(self) -> None:
+        """已连上、电量读数不可信的脚：降速重读电量，再恢复正式开流配置（RAY-518）。
+
+        不断开：断开后刚断的模块不会立刻重新广播，重连反而更慢更不稳。重读期间这只脚
+        的到达率会短暂下降，恢复开流后一秒内回到正常。
+        """
+        with self._lock:
+            feet = [
+                (label, foot)
+                for label, foot in self._feet.items()
+                if foot.battery is None or not foot.battery.is_plausible
+            ]
+        for label, foot in feet:
+            battery = await self._ops.read_battery(foot.device)
+            applied = foot.applied
+            if applied is not None:
+                try:
+                    applied = await self._ops.start(foot.device, applied)
+                except Exception as error:  # noqa: BLE001 - 恢复不了就如实记下，链路分档会显示
+                    _log(f"{label} 足电量重读后恢复开流失败：{error!r}")
+            with self._lock:
+                foot.battery = battery
+                foot.applied = applied
+            _log(f"{label} 足电量重读：{_battery_text(battery)}")
 
     async def _close_device(self, foot: _Foot) -> None:
         problem = await self._ops.close(foot.device)
@@ -1138,10 +1201,12 @@ class BleDeviceSource:
         """
         for counter in self._steps.values():
             counter.reset()
+        self._recording = True
 
     def end_stream(self) -> None:
-        """空操作。会话录制的结束由 `SessionPort.disconnect()` 划定；链路保持，
-        设备页之后仍需要读数。"""
+        """会话录制的结束由 `SessionPort.disconnect()` 划定；链路保持，
+        设备页之后仍需要读数。这里只解除「录制中不重读电量」的限制。"""
+        self._recording = False
 
     def provenance(self) -> dict[str, Any]:
         with self._lock:
