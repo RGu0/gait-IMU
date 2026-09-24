@@ -183,3 +183,17 @@ def test_optional_refresh_and_close_are_called() -> None:
     service.close()
     assert _Lifecycle.refreshed == 2
     assert _Lifecycle.closed == 1
+
+
+def test_device_page_says_the_calibration_was_waived_not_missing() -> None:
+    """RAY-530：设备页曾在预览放行下仍显示红色「缺少出厂标定」，与自检的 waived 矛盾。"""
+
+    def modules(service: TerminalService) -> list[dict]:
+        return service.handle({"id": "d", "method": "deviceSupport"})["result"]["modules"]
+
+    for module in modules(_preview(source=StubDeviceSource())):
+        assert module["factoryCalibrated"] is False
+        assert module["factoryCalibrationWaived"] is True
+    for module in modules(TerminalService(source=StubDeviceSource())):
+        assert module["factoryCalibrated"] is False
+        assert module["factoryCalibrationWaived"] is False

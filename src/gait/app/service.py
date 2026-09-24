@@ -326,7 +326,11 @@ class TerminalService:
         for module in modules:
             label = "L" if module.get("side") == "left" else "R"
             verdict = verdicts.get(label)
-            module["factoryCalibrated"] = bool(verdict and verdict.admitted)
+            admitted = bool(verdict and verdict.admitted)
+            module["factoryCalibrated"] = admitted
+            # 预览策略放行的未匹配（RAY-530）：设备页据此显示「预览放行」而不是红色「缺少」，
+            # 与自检的 `waived`、报告注记同一口径。
+            module["factoryCalibrationWaived"] = (not admitted) and self._waives_factory_calibration
         return modules
 
     def _device_records(self) -> dict[str, Any]:
@@ -1054,7 +1058,8 @@ class TerminalService:
                 message="这次检测没有可用的步态周期，无法生成报告。",
                 action="请确认会话有效性判定的结果；会话级无效不生成报告。",
             )
-        walk = self.walk
+        meta = self._requested_meta(params)
+        protocol = meta.protocol_config if meta is not None else {}
         return build_report(
             cycles,
             report_id=str(
@@ -1068,11 +1073,14 @@ class TerminalService:
             ),
             organization=(self.operator or {}).get("organization", "本机构"),
             subject_label=str(params.get("subjectLabel") or "未提供"),
-            assessed_at=datetime.now(UTC).date().isoformat(),
-            duration_s=self.config.duration_s,
+            assessed_at=_local_date(meta.created_at if meta is not None else None),
+            duration_s=_int_or(protocol.get("duration_s"), self.config.duration_s),
             algo_version=f"gait-contract-{CONTRACT_VERSION}",
             protocol_version=str(self.config.version),
-            valid_seconds=walk.valid_seconds if walk else 0.0,
+            # 从**那一次**会话的 meta 读（RAY-532）。原先取进程里的 `self.walk`：重开
+            # 历史报告时它是 None，于是写成「0 秒（0%）」；进程里另有一次步行时又会
+            # 张冠李戴。读不到就传 None，报告写「未记录」—— 不编一个 0 秒出来。
+            valid_seconds=_float_or_none(protocol.get("valid_seconds")),
             turns=params.get("turns"),
             annotations_text=self._report_annotations(params),
         )
@@ -1104,6 +1112,16 @@ class TerminalService:
 
     _PREVIEW_WAIVER_NOTE = "预览版：出厂标定参数未匹配，按预览策略放行；数值不作为评估依据。"
     _DEMO_DATA_NOTE = "演示数据（合成/回放），非实测。"
+
+    def _requested_meta(self, params: dict[str, Any]) -> SessionMeta | None:
+        """所请求那次会话的落盘元数据；没有会话目录或读不回来时为 None。"""
+        session_id = params.get("sessionId") or self.session_id
+        if not session_id or self.session_root is None:
+            return None
+        try:
+            return read_meta(session_directory(self.session_root, str(session_id)))
+        except (OSError, ValueError):
+            return None
 
     def _session_annotations(self, params: dict[str, Any]) -> list[str]:
         """从**落盘的元数据**读出的标注：预览放行、演示数据。
@@ -1453,3 +1471,27 @@ class _Unimplemented:
 
     def __init__(self, capability: str) -> None:
         self.capability = capability
+
+
+def _local_date(created_at: str | None) -> str:
+    """会话建立时刻换算成本机时区的日期（RAY-532）。
+
+    报告上的「检测日期」是操作员所在地的日期：本地 9-23 22:23 做的检测按 UTC 会落到
+    9-24。读不到就退回当天（本机时区）。
+    """
+    if created_at:
+        try:
+            return datetime.fromisoformat(created_at).astimezone().date().isoformat()
+        except ValueError:
+            pass
+    return datetime.now().astimezone().date().isoformat()
+
+
+def _int_or(value: Any, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
