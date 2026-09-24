@@ -42,7 +42,8 @@ it("opens directly at the ready hub without a login step", async () => {
   expect(
     await screen.findByRole("button", { name: "开始新的检测" }),
   ).toBeVisible();
-  // 最小 MVP 无登录（P-00 暂不考虑）：不出现任何登录表单。
+  // 快照没有 `loginRequired`（未配置云端访问的终端，RAY-323 R2）：不出现任何登录表单。
+  // 配了云端时的 P-00 见 LoginStage.test.jsx。
   expect(screen.queryByLabelText("机构账号")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("登录密码")).not.toBeInTheDocument();
 });

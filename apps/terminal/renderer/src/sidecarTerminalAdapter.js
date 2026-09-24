@@ -299,6 +299,7 @@ export function createSidecarAdapter(
     describe: () => call("describe"),
     snapshot,
     login: ({ organization, password }) => call("login", { organization, password }),
+    logout: () => call("logout"),
     recheckDevices: () => call("recheckDevices"),
     createSubject: async () => toSubjectView(await call("createSubject")),
     listRecords,

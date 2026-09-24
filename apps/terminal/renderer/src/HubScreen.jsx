@@ -15,6 +15,11 @@ function recordStatus(status) {
   });
 }
 
+/** 顶栏上显示谁在操作（R1-3 换班要看得出是谁登着）。显示名缺席时退回账号 ID。 */
+function operatorName(operator) {
+  return operator?.displayName || operator?.operatorId || "";
+}
+
 export function HubScreen({
   snapshot,
   onRecheck,
@@ -24,6 +29,7 @@ export function HubScreen({
   recheckError = null,
   onDismissRecheckError,
   onBind,
+  onLogout = null,
 }) {
   const { deviceSummary, uploadSummary = {}, recentRecords = [] } = snapshot;
   const issues = deviceSummary.issues ?? [];
@@ -38,7 +44,11 @@ export function HubScreen({
 
   return (
     <div className="hub-page">
-      <AppBar current="工作台" onNavigate={onNavigate} />
+      <AppBar
+        current="工作台"
+        onNavigate={onNavigate}
+        session={onLogout ? { name: operatorName(snapshot.operator), onLogout } : null}
+      />
       <main className="hub-content">
         <section className="hub-heading" aria-labelledby="hub-title">
           <div>

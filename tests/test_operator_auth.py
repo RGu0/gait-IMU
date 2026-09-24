@@ -466,3 +466,87 @@ def test_登出后票据失效且回到P00() -> None:
     # 换班后第二个人未登录，开不了会话 —— 否则他做的会话会归到第一个人名下。
     blocked = svc.handle({"id": 3, "method": "startSession", "params": {"now": 0.0}})
     assert blocked["error"]["code"] == "E-NET-6044"
+
+
+# ── 登录页何时出现（R2） ────────────────────────────────────────────────────
+
+
+def _snapshot(svc: TerminalService) -> dict[str, Any]:
+    return svc.handle({"id": "s", "method": "snapshot", "params": {}})["result"]
+
+
+def test_未预配置终端快照说不用登录() -> None:
+    """R2：未配置的终端冷启动直接进工作台 —— 没有登录页，也没有「登出」。"""
+    snap = _snapshot(service())
+    assert snap["loginRequired"] is False
+    assert snap["operator"] is None
+
+
+def test_预配置终端快照说要登录() -> None:
+    snap = _snapshot(service(auth_client=FakeAuth(ticket()), secrets=InMemorySecretStore()))
+    assert snap["loginRequired"] is True
+    assert snap["operator"] is None  # 没有票据 → 界面停在 P-00
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: service(), id="未预配置"),
+        pytest.param(
+            lambda: service(auth_client=FakeAuth(ticket()), secrets=InMemorySecretStore()),
+            id="预配置无票据",
+        ),
+        pytest.param(lambda: service(secrets=InMemorySecretStore()), id="断网（无认证客户端）"),
+    ],
+)
+def test_快照的loginRequired与登录闸同源(build: Any) -> None:
+    """**本条防的是 R2 之前那个死胡同**：快照说「不用登录」而闸仍在，界面就进了工作台，
+    每次开检测都拿到 `E-NET-6044`「请重新登录」，却无处可登。
+
+    所以不分别断言两边，而是断言它们**相等**：没有票据时，快照要登录 ⇔ 开检测被闸住。
+    """
+    svc = build()
+    required = _snapshot(svc)["loginRequired"]
+    reply = svc.handle({"id": 1, "method": "startSession", "params": {"now": 0.0}})
+    gated = reply.get("error", {}).get("code") == "E-NET-6044"
+    assert required is gated
+
+
+def test_冷启动从密钥库恢复未过期票据() -> None:
+    """R1-3「一次登录管一周」：应用重启不能等于票据作废。"""
+    secrets = InMemorySecretStore()
+    TicketStore(secrets, clock=lambda: NOW).save(ticket())
+    svc = service(auth_client=FakeAuth(ticket()), secrets=secrets)
+    snap = _snapshot(svc)
+    assert snap["operator"] is not None and snap["operator"]["operatorId"] == "op-77"
+    assert OPERATOR_TOKEN not in json.dumps(snap, ensure_ascii=False)
+
+
+def test_冷启动时票据已过期就回P00() -> None:
+    secrets = InMemorySecretStore()
+    TicketStore(secrets, clock=lambda: NOW).save(ticket(expires_at=NOW - timedelta(seconds=1)))
+    svc = service(auth_client=FakeAuth(ticket()), secrets=secrets)
+    assert _snapshot(svc)["operator"] is None
+    assert TICKET_SECRET_KEY not in secrets.values
+
+
+class CountingSecretStore(InMemorySecretStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def get_secret(self, key: str) -> str | None:
+        self.reads += 1
+        return super().get_secret(key)
+
+
+def test_快照不读密钥库() -> None:
+    """工作台连接中每两秒拉一次快照；每次都读系统密钥库，就是每两秒一次钥匙串访问。
+    票据只在冷启动恢复一次，过期由 `startSession` 的闸判。"""
+    secrets = CountingSecretStore()
+    TicketStore(secrets, clock=lambda: NOW).save(ticket())
+    svc = service(auth_client=FakeAuth(ticket()), secrets=secrets)
+    after_start = secrets.reads
+    for _ in range(3):
+        _snapshot(svc)
+    assert secrets.reads == after_start
