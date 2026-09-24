@@ -326,7 +326,11 @@ class TerminalService:
         for module in modules:
             label = "L" if module.get("side") == "left" else "R"
             verdict = verdicts.get(label)
-            module["factoryCalibrated"] = bool(verdict and verdict.admitted)
+            admitted = bool(verdict and verdict.admitted)
+            module["factoryCalibrated"] = admitted
+            # 预览策略放行的未匹配（RAY-530）：设备页据此显示「预览放行」而不是红色「缺少」，
+            # 与自检的 `waived`、报告注记同一口径。
+            module["factoryCalibrationWaived"] = (not admitted) and self._waives_factory_calibration
         return modules
 
     def _device_records(self) -> dict[str, Any]:

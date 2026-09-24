@@ -646,3 +646,19 @@ def test_pairing_and_close_release_the_kept_module(tmp_path: Path) -> None:
     finally:
         source.close()
     assert ORANGE[0] in world.closed and source._held == {}
+
+
+def test_device_page_address_is_the_bound_mac_tail_not_the_platform_handle(tmp_path: Path) -> None:
+    """RAY-530：设备页曾显示 CoreBluetooth 句柄尾号，与自检「左右模块绑定」的 MAC 尾号对不上。"""
+    world = _World(BLUE)
+    service, source = _service(world, tmp_path)
+    try:
+        _bind_both(service, world)
+        world.power(BLUE, ORANGE)
+        assert source.refresh(timeout=5) == "connected"
+        addresses = [m["maskedAddress"] for m in _call(service, "deviceSupport")["result"]["modules"]]
+        assert addresses == [mask_mac(BLUE_MAC), mask_mac(ORANGE_MAC)]
+        hint = {i["id"]: i for i in _call(service, "runPreflight")["result"]}["binding"]["hint"]
+        assert all(address in hint for address in addresses)  # 两页同一口径
+    finally:
+        source.close()

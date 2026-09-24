@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BatteryPair, Button, Dialog, SideBadge, StatusPill } from "@gait/design-system";
+import { Banner, BatteryPair, Button, Dialog, SideBadge, StatusPill } from "@gait/design-system";
 import { AppBar } from "./AppBar.jsx";
 
 /**
@@ -18,17 +18,22 @@ import { AppBar } from "./AppBar.jsx";
  *   pressed by someone who was told to "try things".
  */
 
+/** 出厂标定一栏的三种状态。预览放行与自检的 `waived`、报告注记同一口径（RAY-530）。 */
+function calibrationPill(module) {
+  if (module.factoryCalibrated) return { tone: "success", icon: "check", label: "出厂标定已匹配" };
+  if (module.factoryCalibrationWaived) return { tone: "warning", icon: "warning", label: "未匹配（预览放行）" };
+  return { tone: "danger", icon: "x", label: "缺少出厂标定" };
+}
+
 function ModuleCard({ module }) {
+  const pill = calibrationPill(module);
   return (
     <article className="module-card">
       <header>
         <SideBadge side={module.side} size={24} />
         <span>{module.side === "left" ? "左侧模块" : "右侧模块"}</span>
-        <StatusPill
-          tone={module.factoryCalibrated ? "success" : "danger"}
-          icon={module.factoryCalibrated ? "check" : "x"}
-        >
-          {module.factoryCalibrated ? "出厂标定已匹配" : "缺少出厂标定"}
+        <StatusPill tone={pill.tone} icon={pill.icon}>
+          {pill.label}
         </StatusPill>
       </header>
       <dl className="review-list">
@@ -40,7 +45,16 @@ function ModuleCard({ module }) {
   );
 }
 
-export function DeviceSupportScreen({ devices, support, onRecheck, onRepair, onNavigate }) {
+export function DeviceSupportScreen({
+  devices,
+  support,
+  onRecheck,
+  onRepair,
+  onNavigate,
+  rechecking = false,
+  recheckError = null,
+  onDismissRecheckError,
+}) {
   const [confirmingRepair, setConfirmingRepair] = useState(false);
 
   return (
@@ -48,6 +62,12 @@ export function DeviceSupportScreen({ devices, support, onRecheck, onRepair, onN
       <AppBar current="设备与支持" onNavigate={onNavigate} />
       <main className="page-body">
         <h1>设备与支持</h1>
+
+        {recheckError ? (
+          <Banner tone="warning" aria-label="重新检查设备失败" onClose={onDismissRecheckError}>
+            {recheckError}
+          </Banner>
+        ) : null}
 
         <section className="module-grid" aria-label="采集模块">
           {(devices.modules ?? []).map((module) => (
@@ -65,7 +85,9 @@ export function DeviceSupportScreen({ devices, support, onRecheck, onRepair, onN
         </section>
 
         <div className="device-actions">
-          <Button variant="secondary" onClick={onRecheck}>重新检查</Button>
+          <Button variant="secondary" onClick={onRecheck} loading={rechecking} loadingText="正在重新检查…">
+            重新检查
+          </Button>
           <Button variant="secondary" onClick={() => setConfirmingRepair(true)}>重新配对模块</Button>
         </div>
 
