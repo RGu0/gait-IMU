@@ -112,7 +112,7 @@
     "operator-auth": {
       "implemented": true,
       "issue": "RAY-323",
-      "summary": "机构操作员账号登录已接通（gait/cloud/operator.py）：终端凭据在 Authorization 头、操作员账号口令在请求体，两者同时出示（FR-01 的两套凭据不混）。R1 拍板的三条：①首次必须联网真验，之后凭未过期票据可断网开工；②票据 7 天，换班靠 logout；③操作员身份不进会话元数据（服务端审计）。票据进 SecretStore 不落配置文件，token 不出 IPC。预配置过的终端在 startSession 前设登录闸；未预配置终端不设闸（没有可验的东西）。**线格式按《待确认卷》§1.2，尚待服务方确认**"
+      "summary": "机构操作员账号登录已接通（gait/cloud/operator.py）：终端凭据在 Authorization 头、操作员账号口令在请求体，两者同时出示（FR-01 的两套凭据不混）。R1 拍板的三条：①首次必须联网真验，之后凭未过期票据可断网开工；②票据 7 天，换班靠 logout；③操作员身份不进会话元数据（服务端审计）。票据进 SecretStore 不落配置文件，token 不出 IPC。预配置过的终端在 startSession 前设登录闸；未预配置终端不设闸（没有可验的东西）。R2：snapshot 带 loginRequired（与登录闸同一判据），渲染端据此决定冷启动进 P-00 还是工作台；为 false 时既无登录页也无登出。冷启动从密钥库恢复未过期票据，operator 随之非空。**线格式按《待确认卷》§1.2，尚待服务方确认**"
     },
     "upload-transport": {
       "implemented": true,

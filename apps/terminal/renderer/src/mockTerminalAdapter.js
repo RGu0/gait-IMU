@@ -265,6 +265,11 @@ export const mockTerminalAdapter = Object.freeze({
     return copiedSnapshot();
   },
 
+  async logout() {
+    fixture.operator = null;
+    return copiedSnapshot();
+  },
+
   async recheckDevices() {
     fixture.deviceSummary.ready = true;
     fixture.deviceSummary.issues = [];

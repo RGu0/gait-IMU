@@ -5,6 +5,7 @@ import { DeviceSupportScreen } from "./DeviceSupportScreen.jsx";
 import { RecordsScreen } from "./RecordsScreen.jsx";
 import { ReportPreviewScreen } from "./ReportPreviewScreen.jsx";
 import { HubScreen } from "./HubScreen.jsx";
+import { LoginScreen } from "./LoginScreen.jsx";
 import { PreflightScreen } from "./PreflightScreen.jsx";
 import { ProfileScreen } from "./ProfileScreen.jsx";
 import { ResultScreen } from "./ResultScreen.jsx";
@@ -68,6 +69,20 @@ export const SNAPSHOT_RETRY_MS = 1000;
 // 真设备源在后台连接时（`deviceSummary.state === "connecting"`）工作台重拉快照的间隔（RAY-503）。
 export const DEVICE_POLL_MS = 2000;
 
+/** 票据过期（sidecar 的登录闸，RAY-323 R1）。收到它就回 P-00，而不是停在错误屏上。 */
+export const TICKET_EXPIRED_CODE = "E-NET-6044";
+
+/**
+ * P-00 上显示的失败说明：sidecar 给的现象 + 动作 + 码，渲染端只排版不改写（RAY-323 验收
+ * 第四条）。`SidecarDown` 没有码，文案在 `notice` 里（同 ReportErrorScreen 的取法）。
+ */
+export function loginFailureMessage(error) {
+  const message = error?.notice?.message ?? error?.message ?? "";
+  const action = error?.notice?.action ?? error?.action ?? "";
+  const code = error?.code ? `（错误码 ${error.code}）` : "";
+  return `${message}${action}${code}`.trim() || "登录失败。";
+}
+
 /**
  * 采集中 sidecar 进程没了（RAY-493 preview-rc2-fixes，装机 A5 §6-1）。
  *
@@ -118,8 +133,13 @@ export function TerminalApp({
 
 function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePollMs, onSnapshot }) {
   const [snapshot, setSnapshot] = useState(null);
-  // 最小 MVP 无登录（P-00 暂不考虑）：冷启动直接进工作台。
+  // 冷启动的 stage 是工作台；要不要先过 P-00 由下面的 `needsLogin` 决定（RAY-323 R2），
+  // 不是一个 stage —— 见 `needsLogin` 的注释。
   const [stage, setStage] = useState(STAGE.hub);
+  // P-00 的表单与失败说明。失败说明也用来承接「票据过期被闸回来」的那一次。
+  const [credentials, setCredentials] = useState({ organization: "", password: "" });
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
   const [subject, setSubject] = useState(null);
   const [profile, setProfile] = useState(null);
   const [live, setLive] = useState(null);
@@ -202,7 +222,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     });
   }, [lifecycle]);
 
-  // 冷启动直接进工作台（无登录）：快照在挂载时拉取，失败就隔一会儿再拉，直到拿到为止。
+  // 快照在挂载时拉取，失败就隔一会儿再拉，直到拿到为止。
   // 原先失败一次就放弃，而占位屏上没有任何按钮 —— sidecar 起得比窗口慢一点，
   // 界面就永远停在「正在连接采集服务…」。
   useEffect(() => {
@@ -295,6 +315,60 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     }
   }
 
+  /**
+   * P-00 登录。空字段在这里挡（表单校验没有错误码，不归 sidecar —— 见 `_do_login`）；
+   * 其余失败原样显示 sidecar 的现象 + 动作 + 码。成功后重拉快照：`login` 回的是 sidecar
+   * 的原始快照，视图形状（最近记录、上传摘要）由 `adapter.snapshot()` 负责。
+   */
+  async function handleLogin(event) {
+    event?.preventDefault?.();
+    if (loggingIn) return;
+    if (!credentials.organization.trim() || !credentials.password) {
+      setLoginError("请输入机构账号和登录密码。");
+      return;
+    }
+    setLoggingIn(true);
+    try {
+      await adapter.login(credentials);
+      setCredentials({ organization: credentials.organization, password: "" });
+      setLoginError("");
+      setSnapshot(await adapter.snapshot());
+      setStage(STAGE.hub);
+    } catch (error) {
+      setCredentials((current) => ({ ...current, password: "" }));
+      setLoginError(loginFailureMessage(error));
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  /** 换班（R1-3）：清票据回 P-00。上一位操作员的受检者不能留给下一位。 */
+  async function handleLogout() {
+    try {
+      await adapter.logout();
+    } catch {
+      // sidecar 的 logout 没有失败路径；会失败只能是进程不在了，那由 SidecarDownScreen
+      // 接管。票据没清掉就不能在界面上装作已登出 —— 所以这里什么都不改。
+      return;
+    }
+    setSubject(null);
+    setProfile(null);
+    setCredentials({ organization: "", password: "" });
+    setLoginError("");
+    setSnapshot((current) => (current ? { ...current, operator: null } : current));
+    setStage(STAGE.hub);
+  }
+
+  /**
+   * sidecar 的登录闸拒绝了开检测（票据过期或已被清掉）。回 P-00 并说明原因 ——
+   * 停在「检测未能开始」错误屏上，就是 R2 之前那个死胡同：提示去登录，却无处可登。
+   */
+  function backToLogin(error) {
+    setLoginError(loginFailureMessage(error));
+    setSnapshot((current) => (current ? { ...current, operator: null } : current));
+    setStage(STAGE.hub);
+  }
+
   function openBindingWizard(returnTo) {
     setBindingReturn(returnTo);
     setStage(STAGE.binding);
@@ -369,6 +443,10 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     try {
       started = await adapter.startSession(subject);
     } catch (error) {
+      if (error?.code === TICKET_EXPIRED_CODE) {
+        backToLogin(error);
+        return;
+      }
       failed(error, STAGE.preflight, "检测未能开始");
       return;
     }
@@ -405,6 +483,26 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
       <SidecarDownScreen
         notice={sidecar.notice ?? { message: "采集服务正在启动。", action: "请稍候。", recoverable: true }}
         onRetry={() => setStage(STAGE.hub)}
+      />
+    );
+  }
+
+  // 要登录的终端、当前没有操作员：只有 P-00（RAY-323 R2）。
+  //
+  // 这是一道门而不是一个 stage：「未登录进不了工作台」是不变量，写成门就不必在每一个
+  // 回工作台的地方记得先查一遍。判据只读 sidecar 的 `loginRequired` —— 它与 sidecar
+  // 的登录闸同源；渲染端自己猜（看环境、试一次 login）就会与闸分头漂移。未预配置的
+  // 终端（预览版）`loginRequired` 为 false，这道门永远不开，与 RAY-345 的「无登录」一致。
+  const needsLogin = Boolean(snapshot?.loginRequired && !snapshot?.operator);
+  if (needsLogin) {
+    return (
+      <LoginScreen
+        credentials={credentials}
+        error={loginError}
+        loading={loggingIn}
+        deviceReady={Boolean(snapshot.deviceSummary?.ready)}
+        onChange={(field, value) => setCredentials((current) => ({ ...current, [field]: value }))}
+        onSubmit={handleLogin}
       />
     );
   }
@@ -664,11 +762,13 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onDismissRecheckError={() => setRecheckError(null)}
         onStartNewAssessment={() => setStage(STAGE.subject)}
         onBind={() => openBindingWizard(STAGE.hub)}
+        onLogout={snapshot.loginRequired ? handleLogout : null}
       />
     );
   }
 
-  // 冷启动的极短间隙：快照还没回来。给一个诚实的占位，而不是空屏或假登录页。
+  // 冷启动的极短间隙：快照还没回来。给一个诚实的占位，而不是空屏或假登录页 ——
+  // 要不要登录得等快照说了才知道。
   return <div className="app-boot" role="status">正在连接采集服务…</div>;
 }
 

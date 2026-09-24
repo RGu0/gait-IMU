@@ -187,7 +187,23 @@ class TerminalService:
             if uploader is not None
             else None
         )
+        #: 冷启动时从密钥库恢复（R1-3「一次登录管一周」）。不恢复的话，一张 7 天票据
+        #: 只要应用重启过一次就等于作废 —— 票据还在，界面却回到 P-00 要人重登。
+        #:
+        #: 只在这里读一次密钥库，**不**在每次快照时读：工作台连接中会每两秒拉一次快照，
+        #: 而过期由 `startSession` 的闸判（它本来就要读）。代价是快照里的操作员可能比
+        #: 票据多活一会儿 —— 那一刻开检测会拿到 `E-NET-6044`，渲染端据此回 P-00。
+        #:
+        #: 恢复失败（密钥库读不了）就当没有票据：界面落在 P-00，问题在登录那一步以它自己
+        #: 的错误出现。这是 sidecar 启动路径上**第一次**碰密钥库 —— 之前只在开检测时
+        #: 读 —— 让它在这里抛出去，整个 sidecar 就起不来，连工作台都没有。
         self.operator: dict[str, Any] | None = None
+        if self.tickets is not None:
+            try:
+                restored = self.tickets.load()
+            except Exception:  # noqa: BLE001 - 各密钥库后端的异常类型不一（同 KeyringSecretStore）
+                restored = None
+            self.operator = restored.snapshot() if restored is not None else None
         self.capture: SessionCapture | None = None
         self.session_id: str | None = None
         self.loop = TransportLoop()
@@ -217,6 +233,21 @@ class TerminalService:
         #: 而 P-08 的倒计时要在**走的过程中**回答「还剩多久」。这里自己记开走时刻，
         #: 而不是去读 TimedWalk 的私有字段 —— 读私有等于把它的内部当公开接口。
         self._walk_started_at: float | None = None
+
+    @property
+    def login_required(self) -> bool:
+        """本终端是否要先登录才能开检测（RAY-323 R2）。
+
+        **`startSession` 的闸与快照里的 `loginRequired` 读的是这同一个判据**，不是各写
+        一遍。两者一旦分头漂移 —— 快照说「不用登录」而闸仍在 —— 界面就会直接进工作台，
+        每次开检测都拿到 `E-NET-6044`「请重新登录」，却无处可登。那个死胡同在 R2 之前
+        是真实存在的（渲染端无登录、sidecar 有闸），只是预览版恰好不预配置才没露出来。
+
+        判据是 `tickets is not None`，不是 `auth is not None`：闸管的是「有没有票据可验」。
+        认证客户端缺席而票据库在，是测试里模拟断网的方式（见 `test_operator_auth`），
+        那时照样要凭票开工。
+        """
+        return self.tickets is not None
 
     # ── 分发 ──────────────────────────────────────────────────────────────
 
@@ -548,10 +579,10 @@ class TerminalService:
         闸放在这里而不是只放在渲染进程：渲染端的门是给人看的，sidecar 的门才是
         真的 —— 而 RAY-248 已经记过一次「渲染端只 catch 异常就穿过了缺口」的教训。
 
-        `tickets is None` 时不设闸，理由见 `__init__` 里那段注释：未预配置终端没有
-        可验的东西。
+        `login_required` 为假时不设闸，理由见 `__init__` 里那段注释：未预配置终端没有
+        可验的东西。判据与快照的 `loginRequired` 是同一个（见 `login_required`）。
         """
-        if self.tickets is not None and self.tickets.load() is None:
+        if self.login_required and self.tickets.load() is None:
             self.operator = None
             return operator_auth.ticket_expired()
         now = float(params.get("now", 0.0))
@@ -1380,6 +1411,9 @@ class TerminalService:
                 device_summary["issues"] = [CONNECTING_NOTICE]
         return {
             "operator": self.operator,
+            # 渲染端据此决定冷启动进 P-00 还是工作台（RAY-323 R2）。与登录闸同源，
+            # 见 `login_required`。未预配置终端为 false：没有登录可言，也没有「登出」。
+            "loginRequired": self.login_required,
             "protocolSeconds": self.config.duration_s,
             "deviceSummary": device_summary,
             # P-01 顶部的「数据已同步 / 待上传」。数字来自真实队列，不是常量 ——

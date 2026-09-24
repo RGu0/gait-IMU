@@ -983,3 +983,15 @@ body {
 .binding-wizard .wizard-body { display: grid; gap: var(--space-4); }
 .binding-wizard__busy { margin: 0; color: var(--text-secondary); }
 .wear-color-reminder { margin: 0 0 var(--space-4); font: var(--text-body); }
+
+/* 顶栏右端：当前操作员 + 登出（RAY-323 R2，仅要登录的终端才有）。 */
+.app-bar__session {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.app-bar__operator {
+  color: var(--text-secondary);
+  font: var(--text-body);
+}
