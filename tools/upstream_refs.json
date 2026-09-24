@@ -69,9 +69,16 @@
             ".project-context/documents/云端服务接口约定_待确认卷.md"
           ]
         },
+        "cloud/api/postgres.py": {
+          "sha256": "84ed1056613978d279440dd6b376b07c3891b6cc41cc508a7558185f584505ea",
+          "bytes": 55890,
+          "cited_by": [
+            ".project-context/documents/云端服务接口约定_抄录卷.md"
+          ]
+        },
         "cloud/ingestion/service.py": {
-          "sha256": "390ab00cc3d9c02a67e39637e23002f9f39d76e35424f92eacd4d555d2070acb",
-          "bytes": 8557,
+          "sha256": "5b9cb9fa87345beaaf06f2c34d2b6c2103cf8fd90a676679988404e4e8e41474",
+          "bytes": 8560,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md"
           ]
@@ -84,8 +91,8 @@
           ]
         },
         "client/sync/persistent_upload.py": {
-          "sha256": "4509556a11ca2b60ec996f769981a754b3639d19ccf38c2a16a58041e9268460",
-          "bytes": 30089,
+          "sha256": "1b5ac402a2ada835f1fd1481c6b852eaf59d37125409b9c911a9652f778c59c3",
+          "bytes": 30076,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             "src/gait/cloud/upload.py",
@@ -93,15 +100,15 @@
           ]
         },
         "client/cloud/access_store.py": {
-          "sha256": "973224157c2a89aa00c4dbaf9ee11b7c90b94a9edf8469759f0c2c694c971473",
-          "bytes": 10273,
+          "sha256": "a9183a775938d78d3d878290551800626ec613009a89c4d86d6eece60c0d4beb",
+          "bytes": 10112,
           "cited_by": [
             "src/gait/cloud/tenancy.py"
           ]
         },
         "docs/modules/06-cloud-ingestion.md": {
-          "sha256": "a6278ac0fbe28028b1ab04ee3ca989884ebaddc8d2591894724572c5cac270f7",
-          "bytes": 5052,
+          "sha256": "595b634b793b413390264a5d89ef433bc7905112edfd0255cc2f2653eaad0876",
+          "bytes": 5601,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md"
