@@ -26,8 +26,11 @@
   /* Where this product concentrates its expressiveness, in place of the heat
      scale. Series are told apart by STROKE STYLE as well as color so the A4
      report survives grayscale printing. */
-  --viz-gait-left: #2569BC;                 /* solid stroke */
-  --viz-gait-right: #17A2C4;                /* dashed stroke, 6 4 */
+  /* Series colors follow the physical modules (see --side-* in colors.css) at
+     the darker center-ring shade: a 2px line in the shell color itself is too
+     faint on the light canvas. */
+  --viz-gait-left: #0F65AD;                 /* = --side-left-edge, solid stroke */
+  --viz-gait-right: #D3571E;                /* = --side-right-edge, dashed stroke, 6 4 */
   --viz-gait-turn: rgba(15, 23, 42, 0.10);  /* 45° hatch over turn segments */
   --viz-gait-dim: 0.45;  /* @kind other */  /* low-quality segment opacity */
   --viz-gait-dash: 6 4;  /* @kind other */  /* right-series dash pattern */

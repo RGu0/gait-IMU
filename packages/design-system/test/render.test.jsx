@@ -18,6 +18,7 @@ import {
   Field,
   LinkStatus,
   MetricTile,
+  ModuleFigure,
   RhythmStrip,
   SideBadge,
   StatusPill,
@@ -60,21 +61,28 @@ function componentSources() {
   return out;
 }
 
-describe("SideBadge — which foot, on three independent channels", () => {
+describe("SideBadge — which foot, as the module the operator is holding", () => {
   // Wearing the modules on the wrong ankles cannot be compensated for by the
   // algorithm (RAY-260 proved the position method cannot even detect it), so
   // the redundancy here is the cheapest place to prevent a wasted session.
-  it("carries the side as glyph AND shape AND color", () => {
+  it("carries the side as glyph AND module color", () => {
     const left = html(<SideBadge side="left" />);
     const right = html(<SideBadge side="right" />);
 
     expect(left).toContain("左");
-    expect(left).toMatch(/border-radius:6px/); // rounded square
     expect(left).toContain("var(--side-left)");
+    expect(left).toContain("var(--side-left-fg)");
 
     expect(right).toContain("右");
-    expect(right).toMatch(/border-radius:999px/); // circle
     expect(right).toContain("var(--side-right)");
+    expect(right).toContain("var(--side-right-fg)");
+  });
+
+  it("has the module's shape on both sides, so shape teaches no false cue", () => {
+    // The two physical modules are the same rounded rectangle (RAY-542). A
+    // square-vs-circle difference on screen has no counterpart in the hand.
+    const radius = (markup) => /border-radius:([^;"]+)/.exec(markup)?.[1];
+    expect(radius(html(<SideBadge side="left" />))).toBe(radius(html(<SideBadge side="right" />)));
   });
 
   it("still distinguishes the sides with every color removed", () => {
@@ -82,6 +90,67 @@ describe("SideBadge — which foot, on three independent channels", () => {
     expect(strip(html(<SideBadge side="left" />))).not.toBe(
       strip(html(<SideBadge side="right" />)),
     );
+  });
+});
+
+describe("side colors are the hardware", () => {
+  // The operator matches screen to module by color: blue shell on the left
+  // ankle, orange shell on the right (RAY-479 R1, RAY-542). Before RAY-542 the
+  // right side was the data cyan and nothing on screen was orange.
+  const tokens = fs.readFileSync(path.join(DIR, "..", "tokens", "colors.css"), "utf8");
+  const token = (name) => new RegExp(`--${name}:\\s*(#[0-9A-Fa-f]{6})`).exec(tokens)?.[1]?.toUpperCase();
+  const luminance = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  it("uses the module shell colors, not the brand blue or the data cyan", () => {
+    expect(token("side-left")).toBe("#0095E6");
+    expect(token("side-right")).toBe("#EC8E00");
+    for (const side of ["side-left", "side-right"]) {
+      expect([token("brand-primary"), token("accent-cyan")]).not.toContain(token(side));
+    }
+  });
+
+  it.each(["left", "right"])("the %s character reads on its shell (WCAG AA, 4.5:1)", (side) => {
+    expect(contrast(token(`side-${side}-fg`), token(`side-${side}`))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it.each(["left", "right"])("the %s badge outline holds on a white surface (3:1)", (side) => {
+    // The orange shell alone is ~2.5:1 on white; the center-ring edge carries it.
+    expect(contrast(token(`side-${side}-edge`), "#FFFFFF")).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps the right-foot orange out of the warning channel", () => {
+    // Orange foot vs amber warning: a side badge never uses a warning token, and
+    // the warning tokens never equal a side color.
+    const sources = componentSources().filter(({ rel }) => /SideBadge|ModuleFigure/.test(rel));
+    expect(sources.filter(({ text }) => text.includes("--warning-"))).toEqual([]);
+    const sides = ["side-left", "side-right", "side-left-edge", "side-right-edge"].map(token);
+    for (const w of ["warning-fg", "warning-bg", "warning-border"]) expect(sides).not.toContain(token(w));
+  });
+});
+
+describe("ModuleFigure — the module as it looks on the table", () => {
+  it("draws each side in its own shell token and names it", () => {
+    const left = html(<ModuleFigure side="left" />);
+    const right = html(<ModuleFigure side="right" />);
+    expect(left).toContain("var(--side-left)");
+    expect(left).toContain("蓝色模块（左脚）");
+    expect(right).toContain("var(--side-right)");
+    expect(right).toContain("橙色模块（右脚）");
+  });
+
+  it("captions itself with 左/右 by default, so the figure is never color alone", () => {
+    const strip = (markup) => markup.replace(/var\(--[a-z-]+\)|#[0-9a-fA-F]{3,8}/g, "").replace(/aria-label="[^"]*"/g, "");
+    expect(strip(html(<ModuleFigure side="left" />))).toContain("左");
+    expect(strip(html(<ModuleFigure side="right" />))).toContain("右");
+    expect(html(<ModuleFigure side="left" caption={false} />)).not.toContain("<figcaption");
   });
 });
 

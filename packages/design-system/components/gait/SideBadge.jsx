@@ -1,15 +1,18 @@
 import React from "react";
 
 /**
- * SideBadge — which foot. The side is carried by THREE channels at once: the
- * character (左/右), the shape (left = rounded square, right = circle) and the
- * color. Wearing the modules on the wrong ankles cannot be compensated for by
- * the algorithm, so redundancy here is not decoration — it is the cheapest
- * place to prevent an error that costs a whole session.
+ * SideBadge — which foot. It looks like the module the operator is holding:
+ * the left badge is the sky-blue shell, the right one the orange shell, both the
+ * module's rounded rectangle. The side is carried by TWO channels at once — the
+ * character (左/右) and the color — so a grayscale print still reads. Wearing
+ * the modules on the wrong ankles cannot be compensated for by the algorithm, so
+ * redundancy here is not decoration — it is the cheapest place to prevent an
+ * error that costs a whole session.
  */
 export function SideBadge({ side, size = 22, style, ...rest }) {
   const isLeft = side === "left";
   const ch = isLeft ? "左" : "右";
+  const key = isLeft ? "left" : "right";
   return (
     <span
       aria-label={ch}
@@ -17,9 +20,11 @@ export function SideBadge({ side, size = 22, style, ...rest }) {
         width: size,
         height: size,
         flex: "none",
-        borderRadius: isLeft ? "6px" : "999px",
-        background: isLeft ? "var(--side-left)" : "var(--side-right)",
-        color: "var(--text-on-brand)",
+        boxSizing: "border-box",
+        borderRadius: "6px",
+        background: `var(--side-${key})`,
+        border: `1px solid var(--side-${key}-edge)`,
+        color: `var(--side-${key}-fg)`,
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",

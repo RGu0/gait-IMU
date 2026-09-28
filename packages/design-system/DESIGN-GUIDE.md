@@ -88,17 +88,21 @@ React primitives under `components/<group>/`. Each is `<Name>.jsx` + `<Name>.d.t
 - **feedback/** — `StatusPill` (dot/icon + text, 4 semantics), `Banner` (non-blocking top-of-page notice), `Toast` (transient success/info only), `Dialog` (blocking decisions only, ≤2 buttons).
 - **flow/** — `StepBar` (linear wizard stepper), `ChecklistItem` (pre-check row: status icon + name + hint/action).
 - **data/** — `DataTable` (screening records; 56px rows, StatusPill status column, masked IDs).
-- **gait/** — dual-ankle IMU primitives: `SideBadge` (left/right in three channels at once), `LinkStatus` (arrival-rate tiers), `BatteryPair` (charge; pre-capture only), `MetricTile` (quality grades, never blank), `CountdownFocus` (subject-facing countdown), `RhythmStrip` (operator-side cadence, never a metronome).
+- **gait/** — dual-ankle IMU primitives: `SideBadge` (left/right as the module: character + module color), `ModuleFigure` (the TF9BT50 module as it looks on the table, for wear and pairing steps), `LinkStatus` (arrival-rate tiers), `BatteryPair` (charge; pre-capture only), `MetricTile` (quality grades, never blank), `CountdownFocus` (subject-facing countdown), `RhythmStrip` (operator-side cadence, never a metronome).
 
 Every family except `gait/` maps 1:1 to a README §5 spec. The `gait/` family is an **intentional extension** for the second product — see below.
 
 ### The gait extension — three rules that are not negotiable
 
-1. **Left/right is never color alone.** Character + shape + color always, and stroke style as a fourth channel in charts. Wearing the modules on the wrong ankles cannot be compensated for by the algorithm, and the client report is a grayscale A4 print.
+1. **Left/right looks like the hardware, and is never color alone.** The left module is a sky-blue TF9BT50 shell, the right one an orange shell of the same rounded-rectangle shape, so `--side-left` / `--side-right` are those shell colors and both `SideBadge`s share that shape. The side is carried by character (左/右) + color always, and stroke style as a further channel in charts. Wearing the modules on the wrong ankles cannot be compensated for by the algorithm, and the client report is a grayscale A4 print. (Until RAY-542 the sides were brand blue / data cyan, left square / right circle — none of which exists on the hardware; operators were told 「橙色模块戴右脚」 next to a cyan circle.)
 2. **The pressure heat scale is disabled here.** The gait product has no pressure dimension; `--viz-heat-*` would read as a pressure map. Its expressiveness lives in the gait data canvas (`--viz-gait-*`) instead.
 3. **A metric is never blank.** Three grades — `normal`, `low` (presented differently, never withheld), `uncomputable` (「本次不适用」 + a plain-language reason). A blank, a `0` or an `N/A` reads as a measurement rather than an absence.
 
-`--accent-cyan` was previously viz-only; its use is **widened** to the right-foot identity (`--side-right`). That is the one token whose role changed.
+**The side colors are hardware identity, not palette.** They sit outside the "~1 brand hue + slate + 4 semantics" budget the way the heat scale does, and for the same reason: they mean one thing only. Rules that keep them from colliding with the rest of the system:
+
+- **Orange right foot vs. amber warning.** A side mark always carries 左/右 and never an icon; a warning always carries the triangle glyph + text and never uses `--side-*`. The warning tokens and the side tokens must never share a value.
+- **Contrast.** The shells are too light for white text, so the character uses `--side-*-fg` (dark, ≥ 4.5:1); the orange shell is too light to outline itself on white, so badges carry a 1px `--side-*-edge` (the module's center-ring color, ≥ 3:1). Chart series use the edge shade (`--viz-gait-left/right`), since a 2px line in the shell color is too faint on the canvas.
+- `--accent-cyan` is data-only again; it no longer stands for the right foot.
 
 ## UI Kits
 
@@ -130,4 +134,4 @@ None to the component inventory — every component maps to a README §5 spec. T
 - **Fonts substituted**: Source Han Sans SC → Noto Sans SC (open-source release of the same family); Inter unchanged. Swap for licensed binaries in production.
 - **Icons**: hand-authored inline SVG in the components (the spec ships none). Swap for a licensed set if one exists.
 - **PRD now provided**: UI-kit screens follow the FeetForcePlate PRD (P-01/P-02–06/P-07/P-08) and README §6 layout patterns. The kit collapses the multi-page intake (P-02 subject lookup → P-03 optional profile → P-04 consent → P-05 pre-check → P-06 stance) into one `StepBar` wizard; if you want each PRD page as its own discrete screen, say so.
-- **No imagery/illustrations**: consistent with the brand — the system uses none beyond the logo.
+- **No imagery/illustrations**: consistent with the brand — the system uses none beyond the logo. One exception, on the gait product: `ModuleFigure`, a flat drawing of the sensor module the operator is holding, because matching hardware to screen is the task (RAY-542).

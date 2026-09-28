@@ -7,7 +7,7 @@
   --brand-bright: #3B8BEF;         /* large graphics only, never body text */
   --brand-primary-subtle: #EFF5FC;
   --brand-primary-border: #B7D3F2;
-  --accent-cyan: #17A2C4;          /* data accent; also the right-foot identity, see --side-right */
+  --accent-cyan: #17A2C4;          /* data accent (viz only) */
 
   /* ── Brand alpha layers (hover / selected / drag) ── */
   --brand-alpha-1: rgba(37, 105, 188, 0.06);
@@ -15,13 +15,26 @@
   --brand-alpha-3: rgba(37, 105, 188, 0.14);
 
   /* ── Side identity (dual-ankle IMU) ──────────────── */
-  /* Left/right is carried by THREE channels AT ONCE: the character 左/右, the
-     shape (left = rounded square, right = circle) and these two colors.
-     NEVER distinguish the two feet by color alone — a color-blind operator, a
-     grayscale A4 print and a thumbnail must all still read correctly. Charts
-     add a fourth channel: left solid, right dashed. */
-  --side-left: #2569BC;            /* = --brand-primary */
-  --side-right: #17A2C4;           /* = --accent-cyan, use widened to this role */
+  /* The two colors ARE the physical modules: the left module is a sky-blue
+     TF9BT50 shell, the right one an orange shell of the same shape (sampled from
+     the hardware, RAY-542). The operator matches screen to hardware by color, so
+     these must never drift toward the brand palette again.
+     Left/right is carried by TWO channels at once: the character 左/右 and the
+     color. Both badges share the module's rounded-rectangle shape — a shape
+     difference the hardware does not have would teach the operator a false cue.
+     NEVER distinguish the two feet by color alone — a grayscale A4 print and a
+     thumbnail must still read correctly (blue/orange is itself a color-blind-safe
+     pair). Charts add stroke style: left solid, right dashed.
+     The shells are too light for white text, so the character uses --side-*-fg
+     (dark: 5.5:1 on blue, 7.2:1 on orange). The orange shell is too light to
+     outline itself on white (2.5:1), so badges carry a 1px --side-*-edge — the
+     module's center-ring color. */
+  --side-left: #0095E6;            /* blue module shell */
+  --side-right: #EC8E00;           /* orange module shell */
+  --side-left-fg: #0F172A;         /* = --text-primary, 5.5:1 on --side-left */
+  --side-right-fg: #0F172A;        /* = --text-primary, 7.2:1 on --side-right */
+  --side-left-edge: #0F65AD;       /* blue module center ring, 6.0:1 on white */
+  --side-right-edge: #D3571E;      /* orange module center ring, 4.1:1 on white */
 
   /* ── Neutrals (Slate) ────────────────────────────── */
   --bg-page: #F8FAFC;

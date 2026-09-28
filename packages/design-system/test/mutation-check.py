@@ -54,10 +54,34 @@ MUTATIONS = [
         "></div>",
     ),
     (
-        "SideBadge 左右用同一个 token（只剩形状与文字）",
+        "SideBadge 左右用同一个 token（只剩文字）",
         "components/gait/SideBadge.jsx",
-        'background: isLeft ? "var(--side-left)" : "var(--side-right)",',
-        'background: "var(--side-left)",',
+        'const key = isLeft ? "left" : "right";',
+        'const key = "left";',
+    ),
+    (
+        "SideBadge 右侧退回圆形（与实物形状不符）",
+        "components/gait/SideBadge.jsx",
+        'borderRadius: "6px",',
+        'borderRadius: isLeft ? "6px" : "999px",',
+    ),
+    (
+        "tokens/colors.css 右脚退回数据青色（屏幕上又找不到橙色）",
+        "tokens/colors.css",
+        "--side-right: #EC8E00;",
+        "--side-right: #17A2C4;",
+    ),
+    (
+        "tokens/colors.css 左右字改回白色（橙底对比不足）",
+        "tokens/colors.css",
+        "--side-right-fg: #0F172A;",
+        "--side-right-fg: #FFFFFF;",
+    ),
+    (
+        "ModuleFigure 默认不带「左/右」说明（示意图只剩颜色）",
+        "components/gait/ModuleFigure.jsx",
+        "caption = true,",
+        "caption = false,",
     ),
     (
         "Button 抑制焦点环",
