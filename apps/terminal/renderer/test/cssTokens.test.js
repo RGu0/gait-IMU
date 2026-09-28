@@ -16,10 +16,6 @@ const REPO = path.resolve(HERE, "../../../..");
 const APP_CSS = path.join(HERE, "../src/app.css");
 const DS_ENTRY = path.join(REPO, "packages/design-system/styles.css");
 
-// RAY-542 side-identity-screens（PR #170）把这一行改成 --space-6；它合入前本分支的 main 基线上还在。
-// 只放行这一对（选择器 + 变量），不要求它仍存在 —— #170 合入后删掉本条即可。
-const PENDING_ELSEWHERE = new Set([".two-column__text --space-5"]);
-
 const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, "");
 
 function definedIn(css) {
@@ -58,9 +54,7 @@ describe("app.css custom properties", () => {
     expect(tokens.has("--space-6")).toBe(true);
     expect(tokens.has("--bg-surface")).toBe(true);
     const defined = new Set([...tokens, ...definedIn(appCss)]);
-    const bad = undefinedVarUses(appCss, defined)
-      .filter((h) => !PENDING_ELSEWHERE.has(`${h.selector} ${h.name}`))
-      .map((h) => `${h.selector} { … var(${h.name}) … }`);
+    const bad = undefinedVarUses(appCss, defined).map((h) => `${h.selector} { … var(${h.name}) … }`);
     expect(bad).toEqual([]);
   });
 
