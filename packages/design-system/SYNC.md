@@ -29,6 +29,22 @@
 | `ui_kits/feetforceplate/` | 另一个产品的界面 |
 | `assets/`、`uploads/` | 品牌资源与上传件，按需单独引入 |
 
+## 有意分叉（与源不同，且**不推回**）
+
+上面的「不要只改这里」有一个例外：下列改动只存在于镜像，源项目保持原样。**从源重拉时必须保留本地版本**，
+否则会被静默抹掉。
+
+| 文件 | 本地版本 | 源项目版本 | 为什么不推回 |
+|---|---|---|---|
+| `tokens/fonts.css` | `@import` 随包的 `@fontsource-variable/noto-sans-sc` 与 `inter`（钉 5.3.0，OFL-1.1） | `@import` Google Fonts CSS API | 打包后的 Electron 应用里，那条渲染阻塞的外网请求让首屏等了 1.1–56.6 s，离线机构可能一直白屏（RAY-493 `preview-rc2-fixes`）。而源项目是设计面板、没有 npm，推过去面板反而加载不到字体 |
+| `tokens/typography.css` | 字体栈前置 `"Noto Sans SC Variable"` / `"Inter Variable"`，原名保留在后 | 只有原名 | 随包字体的 family 名带 ` Variable` 后缀；这一行是上一条的配套 |
+| `package.json` 的 `dependencies` | 两个 `@fontsource-variable` 包 | 无（源项目不管理 npm 依赖） | 同上 |
+
+守卫：`apps/terminal/renderer/test/noExternalAssets.test.js` —— 镜像或渲染端出现 http(s) 的样式 / 字体引用即失败，
+所以重拉时若把 `fonts.css` 覆盖回源版本，构建会变红而不是静默退化。
+
+决定出处：RAY-541 R1（2026-09-28 用户裁定）。
+
 ## 为什么 package.json 里没有 react 依赖
 
 组件都 `import React from "react"`，按常理该声明 `peerDependencies: { react: ">=18" }`。
