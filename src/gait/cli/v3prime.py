@@ -48,7 +48,6 @@ import asyncio
 import json
 import math
 import sys
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +65,7 @@ from gait.analysis.events import (
 from gait.config import AlgoConfig
 from gait.contracts import FootLabel
 from gait.core.zupt import detect_stance
+from gait.device import hostclock
 from gait.device.binding import DeviceIdentity
 from gait.device.ble import StreamConfig, configure_streaming, start_streaming
 from gait.device.identity import platform_identity, resolve_recording_identity
@@ -85,8 +85,8 @@ from gait.validate.v3prime import (
 
 __all__ = ["analyze_trial", "main"]
 
-#: 主机单调时钟分辨率必须细于采样周期的这个比例。同 `linktest.CLOCK_RESOLUTION_RATIO`。
-CLOCK_RESOLUTION_RATIO = 10
+#: 主机单调时钟分辨率必须细于采样周期的这个比例。判据全仓唯一一处：`gait.device.hostclock`（RAY-545）。
+CLOCK_RESOLUTION_RATIO = hostclock.CLOCK_RESOLUTION_RATIO
 
 #: 一趟里落下的文件名。集中在这里，`live` 与 `replay` 不会各写各的。
 ARRIVALS_FILENAME = "arrivals.npz"
@@ -127,27 +127,20 @@ class FootCapture:
 
 
 def host_clock_resolution(samples: int = 200) -> float:
-    """实测 `time.monotonic()` 的分辨率，s。取连续不同读数之间的最小差。"""
-    deltas: list[float] = []
-    previous = time.monotonic()
-    for _ in range(samples):
-        current = time.monotonic()
-        if current != previous:
-            deltas.append(current - previous)
-            previous = current
-    return min(deltas) if deltas else 0.0
+    """实测 `time.monotonic()` 的分辨率，s。见 `gait.device.hostclock.measured_resolution`。"""
+    return hostclock.measured_resolution(samples)
 
 
 def require_adequate_clock(nominal_fs: float, echo=print) -> float:
     """时钟不够细就拒绝开跑。理由见模块文档。"""
     resolution = host_clock_resolution()
     period = 1.0 / nominal_fs
-    limit = period / CLOCK_RESOLUTION_RATIO
+    limit = hostclock.limit_for(nominal_fs)
     echo(
         f"主机时钟分辨率实测 {resolution * 1e3:.4g} ms"
         f"（采样周期 {period * 1e3:.1f} ms，要求细于其 1/{CLOCK_RESOLUTION_RATIO}）"
     )
-    if resolution > limit:
+    if not hostclock.is_adequate(resolution, nominal_fs):
         raise HarnessError(
             f"主机单调时钟分辨率 {resolution * 1e3:.3g} ms 粗于判据 {limit * 1e3:.3g} ms。"
             "本实验要分辨毫秒级的跨足偏差，用这样的时钟测出来的是时钟的量化台阶，"

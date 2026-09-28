@@ -58,7 +58,6 @@ import asyncio
 import json
 import platform
 import sys
-import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +79,7 @@ from wt901.transport.recording import RecordingTransport
 from wt901.transport.replay import ReplayTransport
 
 from gait.config import AlgoConfig
+from gait.device import hostclock
 from gait.device.binding import DeviceIdentity
 from gait.device.ble import (
     AppliedConfig,
@@ -114,10 +114,9 @@ SUSTAINED_WINDOW_S = AlgoConfig().integrity_sustained_window_s
 #: 依据与逐轮读数：`evidence/ray-274/threshold-calibration/`。
 SUSTAINED_LOSS_CRITERION = 0.08
 
-#: 主机单调时钟分辨率必须细于采样周期的这个比例，测量才有意义（见模块 docstring）。
-#: 取 10：量化误差 ≤ 半个周期的 1/5，不足以在残差上造出 3 样本（PRD 的空洞阈值）
-#: 的台阶。Windows + Python 3.12 的 15.6 ms 在 200 Hz 下差了 31 倍，会被拦住。
-CLOCK_RESOLUTION_RATIO = 10
+#: 主机单调时钟分辨率必须细于采样周期的这个比例（取 10 的理由见 `gait.device.hostclock`）。
+#: 判据全仓只有那一处实现（RAY-545）；这里重新导出，保持 `linktest.CLOCK_RESOLUTION_RATIO` 可用。
+CLOCK_RESOLUTION_RATIO = hostclock.CLOCK_RESOLUTION_RATIO
 
 
 #: 关闭一台设备最多等多久，秒。见 `_close_quietly`。
@@ -152,9 +151,10 @@ def host_clock_resolution() -> float:
     """`t_host` 所用时钟的分辨率，秒。
 
     wt901 用 `time.monotonic()` 打 `t_host`（device.py），所以要查的是它，
-    不是 `perf_counter` —— 两者在 Windows 上曾经是不同的实现。
+    不是 `perf_counter` —— 两者在 Windows 上曾经是不同的实现。取申报值，见
+    `gait.device.hostclock.declared_resolution`。
     """
-    return time.get_clock_info("monotonic").resolution
+    return hostclock.declared_resolution()
 
 
 _RATE_BY_HZ = {
@@ -349,9 +349,7 @@ def _verdict(
     """
     problems: list[str] = []
     period = 1.0 / nominal_fs
-    clock_adequate = (
-        clock_resolution is None or clock_resolution * CLOCK_RESOLUTION_RATIO <= period
-    )
+    clock_adequate = hostclock.is_adequate(clock_resolution, nominal_fs)
     if not clock_adequate:
         assert clock_resolution is not None
         problems.append(
