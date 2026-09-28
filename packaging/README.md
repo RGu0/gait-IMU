@@ -28,7 +28,9 @@ uv run --locked python packaging/smoke_sidecar.py dist/gait-sidecar/gait-sidecar
 依次验：
 
 1. `GAIT_SELFTEST=imports`：延迟加载的模块（bleak 平台后端、`gait.app.replay`、`gait.app.blesource`、
-   wt901、numpy 等）确实被冻结进去；
+   wt901、numpy 等）确实被冻结进去；再跑 `GAIT_SELFTEST=clock`：冻结产物**自带的**解释器 ≥ 3.13，
+   且 `time.monotonic()` 分辨率 × 10 ≤ 5 ms（与 `linktest` 同一判据）。真实传感器的到达时刻全靠这个时钟，
+   Windows + Python 3.12 只有 15.6 ms，会把 200 Hz 的链路 / 丢包量化失真（RAY-545）；
 2. 一条 `describe` 请求；
 3. 不设 `GAIT_DEVICE_SOURCE` 的 `snapshot`（stub 设备源）；
 4. 按安装包实际给 sidecar 的环境（`GAIT_DEVICE_SOURCE=synthetic GAIT_PREVIEW=1 GAIT_PROTOCOL_SECONDS=60`
@@ -38,6 +40,7 @@ uv run --locked python packaging/smoke_sidecar.py dist/gait-sidecar/gait-sidecar
 
 ```bash
 GAIT_SELFTEST=imports dist/gait-sidecar/gait-sidecar
+GAIT_SELFTEST=clock dist/gait-sidecar/gait-sidecar
 echo '{"kind":"request","v":"1.0","id":"1","method":"describe","params":{}}' | dist/gait-sidecar/gait-sidecar
 ```
 
