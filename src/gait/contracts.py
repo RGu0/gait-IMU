@@ -27,8 +27,10 @@ O(1) 判断。内容层面的判断（例如"加速度是否合理"）属于质�
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import IntFlag
 from typing import Any, Final, Literal
 
@@ -406,7 +408,7 @@ def _check_wear_confirmation(value: Any) -> None:
             "不记操作员身份（RAY-287 R3 / RAY-323 R1 决定 3）。"
         )
     result = value["result"]
-    if result not in WEAR_CONFIRMATION_RESULTS:
+    if not isinstance(result, str) or result not in WEAR_CONFIRMATION_RESULTS:
         raise ContractError(
             f"wear_confirmation.result 应为 {sorted(WEAR_CONFIRMATION_RESULTS)} 之一，收到 {result!r}"
         )
@@ -414,8 +416,12 @@ def _check_wear_confirmation(value: Any) -> None:
     # **确认时刻只属于 pass。** 一个带时刻的 unknown 读起来像「某时确认过、结论不明」，
     # 而实际发生的是「没人确认」—— 那正是 05 §8 警告过的、看着像审计凭据的假象。
     if result == "pass":
-        if not isinstance(confirmed_at, str) or not confirmed_at.strip():
-            raise ContractError("wear_confirmation.result 为 pass 时 confirmed_at 必须是非空时刻")
+        # 要求可解析的 ISO 8601 时刻，而不只是非空字符串：这一格若收任意文本，
+        # 就成了键集合封闭之后身份唯一还能混进来的地方。
+        if not _is_iso_timestamp(confirmed_at):
+            raise ContractError(
+                f"wear_confirmation.result 为 pass 时 confirmed_at 必须是 ISO 8601 时刻，收到 {confirmed_at!r}"
+            )
     elif confirmed_at is not None:
         raise ContractError(
             f"wear_confirmation.result 为 {result!r} 时 confirmed_at 必须为 null，"
@@ -454,7 +460,12 @@ def _check_inversion_signature(value: Any) -> None:
         if isinstance(strides, bool) or not isinstance(strides, int) or strides < 1:
             raise ContractError(f"inversion_signature.strides_used 必须是正整数，收到 {strides!r}")
     elif state == "not_computed":
-        if set(value) != _SIGNATURE_NOT_COMPUTED_KEYS or not str(value["reason"]).strip():
+        reason = value.get("reason")
+        if (
+            set(value) != _SIGNATURE_NOT_COMPUTED_KEYS
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
             raise ContractError(
                 "inversion_signature（not_computed）必须恰含 state 与非空 reason，"
                 f"收到 {sorted(value)}"
@@ -466,8 +477,19 @@ def _check_inversion_signature(value: Any) -> None:
 
 
 def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and bool(np.isfinite(value))
-    )
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # 超出 float 范围的 int
+        return False
+
+
+def _is_iso_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
