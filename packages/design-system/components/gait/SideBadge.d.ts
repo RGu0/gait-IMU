@@ -13,7 +13,8 @@ export interface SideBadgeProps {
 }
 
 /**
- * SideBadge — left/right identity in three channels at once (text + shape + color).
- * @startingPoint section="Gait" subtitle="Left/right identity — text + shape + color" viewport="700x150"
+ * SideBadge — left/right identity as the physical module: character + module color
+ * (left = blue shell, right = orange shell), same rounded rectangle on both sides.
+ * @startingPoint section="Gait" subtitle="Left/right identity — character + module color" viewport="700x150"
  */
 export function SideBadge(props: SideBadgeProps): JSX.Element;

@@ -18,7 +18,7 @@ If the user invokes this skill without any other guidance, ask them what they wa
 - `styles.css` — the single entry point; `@import`s all tokens. Link this one file.
 - `tokens/` — `colors.css`, `typography.css`, `spacing.css`, `effects.css`, `viz.css`, `fonts.css`.
 - `components/{forms,feedback,flow,data}/` — shared React primitives (`.jsx` + `.d.ts` + `.prompt.md`). Read the `.prompt.md` for each component's usage.
-- `components/gait/` — **dual-ankle IMU only**: `SideBadge` (left/right identity), `LinkStatus` (arrival-rate tiers), `BatteryPair` (charge, pre-capture only), `MetricTile` (quality grades), `CountdownFocus` (subject-facing countdown), `RhythmStrip` (operator-side cadence). Each `.prompt.md` carries the rule the component exists to enforce — read it before using the component, not after.
+- `components/gait/` — **dual-ankle IMU only**: `SideBadge` (left/right identity), `ModuleFigure` (the physical module, wear/pairing steps), `LinkStatus` (arrival-rate tiers), `BatteryPair` (charge, pre-capture only), `MetricTile` (quality grades), `CountdownFocus` (subject-facing countdown), `RhythmStrip` (operator-side cadence). Each `.prompt.md` carries the rule the component exists to enforce — read it before using the component, not after.
 - `ui_kits/feetforceplate/` — the screening app recreation (Hub → wizard → scan → result).
 - `guidelines/` — foundation specimen cards.
 
@@ -34,7 +34,7 @@ If the user invokes this skill without any other guidance, ask them what they wa
 
 ### Additionally, on the gait product
 
-- **Left/right is never color alone.** Character (左/右) + shape (left = rounded square, right = circle) + color, always; charts add stroke style (left solid, right dashed) as a fourth channel. Wearing the modules on the wrong ankles cannot be compensated for by the algorithm, and the client report is a grayscale A4 print.
+- **Left/right looks like the hardware and is never color alone.** Left = sky-blue module shell, right = orange module shell, same rounded rectangle (`--side-*`, `SideBadge`, `ModuleFigure`). Character (左/右) + module color, always; charts add stroke style (left solid, right dashed). Never recolor a side toward the brand blue or data cyan, and never let the orange foot borrow the warning channel. Wearing the modules on the wrong ankles cannot be compensated for by the algorithm, and the client report is a grayscale A4 print.
 - **`--viz-heat-*` is disabled outright here.** The gait product has no pressure dimension, so the heat scale would read as a pressure map. Its data canvas uses `--viz-gait-*` instead.
 - **A metric is never blank.** Three grades: `normal`, `low` (presented differently, never withheld), `uncomputable` (「本次不适用」 + a plain-language reason). A blank, a `0` or an `N/A` reads as a measurement rather than an absence.
 - **Nothing on a capture screen may pace the subject.** No fixed-cadence animation, no metronome; the cadence strip belongs in the operator column, drawn at real footfall times.

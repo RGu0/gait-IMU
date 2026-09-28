@@ -17,6 +17,7 @@ export { DataTable } from "./components/data/DataTable.jsx";
 
 // Dual-ankle IMU only — see components/gait/*.prompt.md for the rule each enforces.
 export { SideBadge } from "./components/gait/SideBadge.jsx";
+export { ModuleFigure } from "./components/gait/ModuleFigure.jsx";
 export { LinkStatus } from "./components/gait/LinkStatus.jsx";
 export { BatteryPair, batteryTier } from "./components/gait/BatteryPair.jsx";
 export { MetricTile } from "./components/gait/MetricTile.jsx";
