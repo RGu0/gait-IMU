@@ -137,7 +137,7 @@ body {
   align-items: flex-start;
   gap: var(--space-4);
   min-height: 176px;
-  padding: var(--space-5);
+  padding: var(--space-6);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-card);
@@ -280,7 +280,7 @@ body {
   display: grid;
   gap: var(--space-4);
   align-content: start;
-  padding: var(--space-5);
+  padding: var(--space-6);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-card);
@@ -881,7 +881,7 @@ body {
 .module-card {
   display: grid;
   gap: var(--space-4);
-  padding: var(--space-5);
+  padding: var(--space-6);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-card);
@@ -910,7 +910,7 @@ body {
   border: 1px solid var(--color-warning-border, #d9a441);
   background: var(--color-warning-surface, #fdf6e8);
   border-radius: var(--radius-md, 8px);
-  padding: var(--space-5, 20px);
+  padding: var(--space-6, 24px);
 }
 
 .capability-gap__summary {
@@ -927,7 +927,7 @@ body {
 
 /* 会话判定摘要（RAY-248）。三态各有自己的边色 —— indeterminate 不借用
    invalid 的红，因为「评不了」要操作员去 P-06 确认左右，不是去重测。 */
-.verdict-summary { margin-bottom: var(--space-5, 20px); }
+.verdict-summary { margin-bottom: var(--space-6, 24px); }
 
 .verdict-summary__headline {
   font-size: 24px;
@@ -969,7 +969,7 @@ body {
   border-bottom: 1px solid var(--color-warning-border, #d9a441);
   color: var(--color-warning-text, #8a6116);
   font-size: 14px;
-  padding: var(--space-2, 8px) var(--space-5, 20px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
   text-align: center;
 }
 
@@ -1000,7 +1000,7 @@ body {
 
 .sidecar-down__action {
   font-size: 18px;
-  margin: 0 0 var(--space-5, 20px);
+  margin: 0 0 var(--space-6, 24px);
   color: var(--color-text-secondary, #5a5a5a);
 }
 
