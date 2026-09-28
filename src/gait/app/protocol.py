@@ -2,7 +2,7 @@
 
 ## 版本号为什么与 `contracts.CONTRACT_VERSION` 分开
 
-`gait/contracts.py` 的 `CONTRACT_VERSION`（当前 1.1）说的是 `FootSeries` 这些**数据
+`gait/contracts.py` 的 `CONTRACT_VERSION`（当前 1.2）说的是 `FootSeries` 这些**数据
 结构**的形状；本模块的 `IPC_CONTRACT_VERSION` 说的是**跨进程消息**的形状。两者变更
 的理由不同：给 P-08 加一个事件字段不会动 `FootSeries`，把 gyr 改成 rad/s（R2）也不
 会动信封。合并成一个号，等于让任何一方的变更都去谎报另一方变了。

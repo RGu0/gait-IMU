@@ -227,6 +227,10 @@ def read_meta(directory: Path) -> SessionMeta:
         return SessionMeta(**payload)
     except ContractError as error:
         raise SessionFormatError(f"会话元数据不满足契约：{error}（{path}）") from error
+    except TypeError as error:
+        # 缺必填字段时 dataclass 构造抛的是 TypeError。它同样是「这份 meta 不合契约」，
+        # 归到同一个异常里，调用方（如 `listRecords`）才能用一处 except 接住坏文件。
+        raise SessionFormatError(f"会话元数据缺少必填字段：{error}（{path}）") from error
 
 
 def list_sessions(root: Path) -> list[str]:

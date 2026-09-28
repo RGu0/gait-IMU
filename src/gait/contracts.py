@@ -27,8 +27,10 @@ O(1) 判断。内容层面的判断（例如"加速度是否合理"）属于质�
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import IntFlag
 from typing import Any, Final, Literal
 
@@ -42,7 +44,12 @@ import numpy as np
 #: 含义而不是结构：一份 1.0 的历史会话与一份 1.1 的会话，同一个 gyr 数组相差
 #: 57.3 倍，而两者的字段名、形状、dtype 完全一样。没有这个版本号，就没有任何
 #: 东西能把它们分开。
-CONTRACT_VERSION: Final[str] = "1.1"
+#:
+#: 1.2（RAY-287 R3）：`SessionMeta` 新增 `wear_confirmation` 与 `inversion_signature`。
+#: 这次改的是结构：《05》§4 规定「出现未知字段即拒绝」，所以 1.1 的读者会拒绝 1.2
+#: 的文件，反之 1.2 的读者也按版本号拒绝 1.1 的文件。**不写迁移工具**（RAY-373，
+#: 《05》§7.1）—— 升版本前的扫描与它的裁定记在 RAY-287 `contract-1-2-bump` 的证据里。
+CONTRACT_VERSION: Final[str] = "1.2"
 
 FootLabel = Literal["L", "R"]
 Confidence = Literal["normal", "degraded", "invalid"]
@@ -93,6 +100,22 @@ MANDATORY_METADATA: Final[tuple[str, ...]] = (
     "integrity_report",
     "protocol_config",
 )
+
+
+#: `SessionMeta.wear_confirmation` 的结论值。与 `protocolflow.timed_walk` 的三态检查
+#: 同名同义 —— 那边的 `wearing` 就是由这份确认给出的，两处用两套词只会让人对不上。
+#: 契约层不能反向依赖 `protocolflow`，所以在这里另写一份，由测试钉住两者相等。
+WEAR_CONFIRMATION_RESULTS: Final[frozenset[str]] = frozenset({"pass", "fail", "unknown"})
+
+#: `wear_confirmation` 的**全部**键。键集合是封闭的，而不只是「至少有这些」：
+#: RAY-287 R3 定了**操作员身份不进会话元数据**（RAY-323 R1 决定 3），而拦住
+#: 「顺手加一个 `operator_id`」最直接的办法，就是这里不接受任何多出来的键。
+_WEAR_CONFIRMATION_KEYS: Final[frozenset[str]] = frozenset({"result", "confirmed_at", "swapped"})
+
+_SIGNATURE_COMPUTED_KEYS: Final[frozenset[str]] = frozenset(
+    {"state", "difference", "significance", "strides_used"}
+)
+_SIGNATURE_NOT_COMPUTED_KEYS: Final[frozenset[str]] = frozenset({"state", "reason"})
 
 
 class ContractError(ValueError):
@@ -347,6 +370,10 @@ class SessionMeta:
     contract_version: str = CONTRACT_VERSION
     notes: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+    # 1.2（RAY-287 R3）。`None` 表示**未记录**，不是「未确认」也不是「算过、为零」：
+    # 进程在收尾前被杀、或写入它的那段代码还没接上，都会留下 None。
+    wear_confirmation: dict[str, Any] | None = None
+    inversion_signature: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for name in ("session_id", "created_at", "scenario"):
@@ -366,3 +393,103 @@ class SessionMeta:
                 f"PRD §6.1 要求会话元数据强制包含这些字段且非空：{missing}。"
                 "空值与缺席对复现而言是一回事。"
             )
+        if self.wear_confirmation is not None:
+            _check_wear_confirmation(self.wear_confirmation)
+        if self.inversion_signature is not None:
+            _check_inversion_signature(self.inversion_signature)
+
+
+def _check_wear_confirmation(value: Any) -> None:
+    """P-07 左右确认的记录形状。RAY-287 R3：结果、确认时刻、确认前是否对调过。"""
+    if not isinstance(value, dict) or set(value) != _WEAR_CONFIRMATION_KEYS:
+        keys = sorted(value) if isinstance(value, dict) else type(value).__name__
+        raise ContractError(
+            f"wear_confirmation 的键必须恰为 {sorted(_WEAR_CONFIRMATION_KEYS)}，收到 {keys}。"
+            "不记操作员身份（RAY-287 R3 / RAY-323 R1 决定 3）。"
+        )
+    result = value["result"]
+    if not isinstance(result, str) or result not in WEAR_CONFIRMATION_RESULTS:
+        raise ContractError(
+            f"wear_confirmation.result 应为 {sorted(WEAR_CONFIRMATION_RESULTS)} 之一，收到 {result!r}"
+        )
+    confirmed_at = value["confirmed_at"]
+    # **确认时刻只属于 pass。** 一个带时刻的 unknown 读起来像「某时确认过、结论不明」，
+    # 而实际发生的是「没人确认」—— 那正是 05 §8 警告过的、看着像审计凭据的假象。
+    if result == "pass":
+        # 要求可解析的 ISO 8601 时刻，而不只是非空字符串：这一格若收任意文本，
+        # 就成了键集合封闭之后身份唯一还能混进来的地方。
+        if not _is_iso_timestamp(confirmed_at):
+            raise ContractError(
+                f"wear_confirmation.result 为 pass 时 confirmed_at 必须是 ISO 8601 时刻，收到 {confirmed_at!r}"
+            )
+    elif confirmed_at is not None:
+        raise ContractError(
+            f"wear_confirmation.result 为 {result!r} 时 confirmed_at 必须为 null，"
+            f"收到 {confirmed_at!r} —— 没有确认就没有确认时刻"
+        )
+    if not isinstance(value["swapped"], bool):
+        raise ContractError(f"wear_confirmation.swapped 必须是布尔值，收到 {value['swapped']!r}")
+
+
+def _check_inversion_signature(value: Any) -> None:
+    """`core.dualfoot.inversion_signature()` 的落盘形状。只供事后审计，不参与任何判定。
+
+    两种状态，与 `sync_report` 的 `state` / `reason` 同一写法：算出来了就记数，算不
+    出来就记原因。「算不出来」是真实结局（步数不足、找不到成对摆动相），不是缺值。
+    """
+    if not isinstance(value, dict):
+        raise ContractError(f"inversion_signature 必须是对象，收到 {type(value).__name__}")
+    state = value.get("state")
+    if state == "computed":
+        if set(value) != _SIGNATURE_COMPUTED_KEYS:
+            raise ContractError(
+                f"inversion_signature（computed）的键必须恰为 {sorted(_SIGNATURE_COMPUTED_KEYS)}，"
+                f"收到 {sorted(value)}"
+            )
+        difference = value["difference"]
+        if not _is_finite_number(difference):
+            raise ContractError(f"inversion_signature.difference 必须是有限数，收到 {difference!r}")
+        # 逐 stride 标准差为 0 时显著性是无穷大；JSON 里没有无穷大（`json.dumps`
+        # 会写出非标准的 `Infinity`），所以那种情况落成 null。
+        significance = value["significance"]
+        if significance is not None and not _is_finite_number(significance):
+            raise ContractError(
+                f"inversion_signature.significance 必须是有限数或 null，收到 {significance!r}"
+            )
+        strides = value["strides_used"]
+        if isinstance(strides, bool) or not isinstance(strides, int) or strides < 1:
+            raise ContractError(f"inversion_signature.strides_used 必须是正整数，收到 {strides!r}")
+    elif state == "not_computed":
+        reason = value.get("reason")
+        if (
+            set(value) != _SIGNATURE_NOT_COMPUTED_KEYS
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
+            raise ContractError(
+                "inversion_signature（not_computed）必须恰含 state 与非空 reason，"
+                f"收到 {sorted(value)}"
+            )
+    else:
+        raise ContractError(
+            f"inversion_signature.state 应为 'computed' 或 'not_computed'，收到 {state!r}"
+        )
+
+
+def _is_finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # 超出 float 范围的 int
+        return False
+
+
+def _is_iso_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True

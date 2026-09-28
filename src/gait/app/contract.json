@@ -1,6 +1,6 @@
 {
   "ipc_contract_version": "1.0",
-  "data_contract_version": "1.1",
+  "data_contract_version": "1.2",
   "error_domains": {
     "E-BLE": {
       "range": [
