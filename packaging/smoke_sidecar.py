@@ -105,11 +105,11 @@ def main(argv: list[str]) -> int:
     frozen = tuple(int(part) for part in clock["python"].split(".")[:2])
     if frozen < MIN_PYTHON:
         raise SystemExit(f"冻结 sidecar 的解释器是 {clock['python']}，需要 ≥ 3.13（RAY-545）")
-    # 判据与 linktest 同一个常数，import 而不是抄 —— 两处各写一份迟早对不上。
-    from gait.cli.linktest import CLOCK_RESOLUTION_RATIO
+    # 判据全仓只有一处（gait.device.hostclock），import 而不是抄 —— 各写一份迟早对不上。
+    from gait.device.hostclock import CLOCK_RESOLUTION_RATIO, is_adequate
 
     resolution = clock["monotonic_resolution_s"]
-    if resolution * CLOCK_RESOLUTION_RATIO > SAMPLE_PERIOD_S:
+    if not is_adequate(resolution, 1.0 / SAMPLE_PERIOD_S):
         raise SystemExit(
             f"冻结 sidecar 的 time.monotonic() 分辨率 {resolution * 1e3:.4g} ms，"
             f"粗于 200 Hz 采样周期的 1/{CLOCK_RESOLUTION_RATIO}（RAY-545）"

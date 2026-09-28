@@ -60,6 +60,7 @@ from gait.contracts import (
     check_wear_confirmation,
 )
 from gait.core.dualfoot import DualFootError, inversion_signature
+from gait.device import hostclock
 from gait.device.binding import (
     AdmissionVerdict,
     BindingError,
@@ -68,7 +69,11 @@ from gait.device.binding import (
     admit_for_session,
 )
 from gait.device.capture import SessionCapture
-from gait.device.footseries import frames_to_foot_series, load_session_frames
+from gait.device.footseries import (
+    NOMINAL_FS,
+    frames_to_foot_series,
+    load_session_frames,
+)
 from gait.device.identity import MAC_PROVENANCE, platform_identity
 from gait.device.orchestration import (
     MIN_BATTERY_PERCENT,
@@ -160,8 +165,12 @@ class TerminalService:
         tickets: TicketStore | None = None,
         preview: PreviewPolicy | None = None,
         bindings: BindingStore | None = None,
+        host_clock_resolution: Callable[[], float] | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
+        #: 本机 `time.monotonic()` 的分辨率从哪来（RAY-545）。测试注入固定值；生产取
+        #: `hostclock.effective_resolution`（申报值与实测值中较粗的那个）。
+        self._host_clock_resolution = host_clock_resolution or hostclock.effective_resolution
         #: 左右绑定的设备级存放处（RAY-479）。没给就借设备源的那一个（同一个目录，
         #: 两边都无状态地读盘）；两边都没有就是「本机没配置」，如实报 unavailable。
         self.bindings = bindings or getattr(self.source, "bindings", None)
@@ -460,6 +469,8 @@ class TerminalService:
         if self._binding_required:
             # 放第一项：左右没绑定时后面每一项都读不到数（不连接），先说根因。
             items.append(self._binding_item())
+            # 紧随其后：时钟不够细时，后面的到达率、链路都是量化出来的数（RAY-545）。
+            items.append(self._host_clock_item())
         calibration = self._calibration_verdicts()
         arrival = self.arrival_rates_checked()
         batteries = self.source.read_batteries()
@@ -597,6 +608,12 @@ class TerminalService:
         if self.login_required and self.tickets.load() is None:
             self.operator = None
             return operator_auth.ticket_expired()
+        # 真实传感器模式下，时钟不够细就不开会话（RAY-545）。与登录闸同理，闸放在 sidecar：
+        # 渲染端按自检结果拦是给人看的，这里拦住的才是「静默出一份量化失真的数据」。
+        if self._binding_required:
+            clock = self._host_clock()
+            if not clock["adequate"]:
+                return _host_clock_error(clock)
         # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
         wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
         now = float(params.get("now", 0.0))
@@ -711,6 +728,10 @@ class TerminalService:
         报告标注只从这里读，不从进程里的策略读（换一次启动参数不该改写旧报告）。
         """
         extra: dict[str, Any] = {"provenance": self.source.provenance()}
+        if self._binding_required:
+            # 真实传感器会话的到达时刻用的是哪一档时钟 —— 事后判断一份旧会话的链路 /
+            # 丢包数能不能信，只能靠这一条（RAY-545）。演示数据不经过主机时钟，不写。
+            extra["host_clock"] = self._host_clock()
         if self.preview is not None:
             waived = self._waives_factory_calibration and not all(
                 verdict.admitted for verdict in self._calibration_verdicts().values()
@@ -951,6 +972,28 @@ class TerminalService:
             "modules": self._modules_with_calibration(),
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
+
+    # ── 主机时钟（RAY-545）────────────────────────────────────────────────
+
+    def _host_clock(self) -> dict[str, Any]:
+        """本机时钟够不够给 200 Hz 的到达时刻计时。判据只在 `gait.device.hostclock`。"""
+        resolution = float(self._host_clock_resolution())
+        return {
+            "monotonic_resolution_s": resolution,
+            "required_resolution_s": hostclock.limit_for(NOMINAL_FS),
+            "nominal_fs": NOMINAL_FS,
+            "adequate": hostclock.is_adequate(resolution, NOMINAL_FS),
+        }
+
+    def _host_clock_item(self) -> dict[str, Any]:
+        clock = self._host_clock()
+        return self._item(
+            "host-clock",
+            "主机计时精度",
+            clock["adequate"],
+            pass_hint=f"{clock['monotonic_resolution_s'] * 1e6:.3g} µs",
+            fail=_host_clock_error(clock),
+        )
 
     # ── 左右绑定（RAY-479）────────────────────────────────────────────────
 
@@ -1527,6 +1570,19 @@ class TerminalService:
             "hint": pass_hint if passed else None,
             "error": None if passed else fail.snapshot(),
         }
+
+
+def _host_clock_error(clock: dict[str, Any]) -> TerminalError:
+    """时钟不够细。现象说数，动作说下一步 —— 操作员改不了时钟，只能换模式或换安装包。"""
+    return TerminalError(
+        code="E-BLE-1040",
+        message=(
+            f"本机计时精度 {clock['monotonic_resolution_s'] * 1e3:.3g} ms，粗于 200 Hz 采样所需的 "
+            f"{clock['required_resolution_s'] * 1e3:.2g} ms：真实传感器的到达时刻会被量化，"
+            "链路、丢包与各项指标都不可信。"
+        ),
+        action="本机暂不能用真实传感器检测：请在「预览」菜单改用演示模式，或安装新版安装包后重新检查。",
+    )
 
 
 def _usable(binding: FootBinding) -> AdmissionVerdict:
