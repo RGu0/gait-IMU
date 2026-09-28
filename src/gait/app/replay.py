@@ -60,6 +60,10 @@ DEMO_STEPS_PER_SECOND = 1.8
 
 DEMO_NOTE = "演示数据（合成/回放），非实测。"
 
+#: `threading.Event.wait()` 无法可靠地兑现亚毫秒等待；逐段交给它会在 Windows
+#: 调度粒度上累积成数秒。回放速度快到这里时，立即推送比伪造精确节拍更诚实。
+MINIMUM_REPLAY_WAIT_S = 1e-3
+
 
 def to_counts(acc: np.ndarray, gyr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """SI → int16 码值。**换算常数只从 wt901 取**，不在这里另抄一份。"""
@@ -185,7 +189,7 @@ class ReplayDeviceSource(StubDeviceSource):
             self._stream_started_at = start
             for t, label, data in timeline:
                 delay = start + t / self.speed - self.clock()
-                if delay > 0 and self._stop.wait(delay):
+                if delay >= MINIMUM_REPLAY_WAIT_S and self._stop.wait(delay):
                     return
                 if self._stop.is_set():
                     return

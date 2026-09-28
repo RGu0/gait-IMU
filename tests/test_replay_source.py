@@ -134,6 +134,26 @@ def test_chunks_sharing_an_arrival_time_replay_in_recorded_order() -> None:
     assert received == {label: [data for _, data in items] for label, items in chunks.items()}
 
 
+def test_high_speed_replay_skips_sub_schedulable_waits() -> None:
+    """高速回放不能为每段不可调度的延迟各睡一个 Windows 时钟刻度。"""
+    chunks = {
+        label: [(index / 200, bytes([index % 256])) for index in range(400)]
+        for label in ("L", "R")
+    }
+    source = ReplayDeviceSource(
+        chunks=chunks, label="synthetic", speed=1e9, clock=lambda: 0.0
+    )
+    received: dict[str, list[bytes]] = {"L": [], "R": []}
+    for label, transport in source.transports().items():
+        transport.on_data(received[label].append)
+
+    source.begin_stream()
+    _wait_until_fed(source)
+    source.end_stream()
+
+    assert received == {label: [data for _, data in items] for label, items in chunks.items()}
+
+
 def test_step_counts_are_cosmetic_and_bounded(synthetic_chunks) -> None:
     clock = [0.0]
     source = ReplayDeviceSource(
