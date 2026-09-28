@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Banner, Button, StepBar } from "@gait/design-system";
+import { Banner, Button, ModuleFigure, StepBar } from "@gait/design-system";
 
 /**
  * 左右模块配对向导（RAY-479）。
@@ -7,8 +7,9 @@ import { Banner, Button, StepBar } from "@gait/design-system";
  * 用户拍板（2026-09-16）：**左脚是蓝色外壳的模块，右脚是橙色外壳的模块**；配对先左后右，
  * 每一步只开那一种颜色的模块，由 sidecar 读出它自报的 MAC 存为这只脚的绑定。
  *
- * 这里说的「蓝色 / 橙色」是**外壳颜色**，不是屏幕上的左右识别色（设计令牌里左蓝右青）——
- * 操作员手里拿的是外壳，所以文案只说外壳。
+ * 「蓝色 / 橙色」是**外壳颜色**。RAY-542 起屏幕上的左右识别色就取自外壳（`--side-left` 蓝、
+ * `--side-right` 橙），每一步都画出这一步要打开的那块模块（`ModuleFigure`），让操作员对着
+ * 手里的外壳找，而不是对着一个颜色词。
  *
  * 屏上没有「跳过」，也没有「对调」：一只脚没绑成就停在这一步，错误原样给出 sidecar 的
  * 现象与动作（例如「发现多个未绑定模块：请只打开蓝色（左脚）模块」），然后「重试」。
@@ -79,6 +80,12 @@ export function BindingWizardScreen({ bindFoot, onDone, onCancel }) {
             {finished ? "之后每次连接都按绑定区分左右：蓝色模块戴左脚、橙色模块戴右脚。" : LEADS[current.foot]}
           </p>
         </div>
+
+        {!finished ? (
+          <div className="binding-wizard__module">
+            <ModuleFigure side={current.side} width={96} />
+          </div>
+        ) : null}
 
         {FEET.filter(({ foot }) => bound[foot] !== undefined).map(({ foot, name }) => (
           <Banner key={foot} tone="success" aria-label={`${name}绑定结果`}>

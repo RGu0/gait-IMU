@@ -36,7 +36,7 @@ function ModuleCard({ module }) {
     <article className="module-card">
       <header>
         <SideBadge side={module.side} size={24} />
-        <span>{module.side === "left" ? "左侧模块" : "右侧模块"}</span>
+        <span>{module.side === "left" ? "蓝色模块" : "橙色模块"}</span>
         <StatusPill tone={pill.tone} icon={pill.icon}>
           {pill.label}
         </StatusPill>

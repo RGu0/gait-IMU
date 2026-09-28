@@ -96,24 +96,40 @@
 
 .rp-sidebar { display: flex; align-items: center; gap: 2mm; }
 
-/* Left = rounded square, right = circle. Shape survives a grayscale print;
-   colour does not (C-9). */
+/* The side marks look like the modules (RAY-542): blue shell left, orange shell
+   right, the same rounded rectangle — a shape difference the hardware does not
+   have would teach a false cue. Colour does not survive a grayscale print, so
+   the side is carried by the character 左/右 on the mark and by solid vs hatched
+   bars (C-9). Colours come from the design-system tokens, with the token values
+   as fallbacks so the template still prints standalone. */
 .rp-sidemark {
   width: 4.5mm; height: 4.5mm;
+  box-sizing: border-box;
   display: inline-flex; align-items: center; justify-content: center;
-  color: #fff; font-size: 7.5pt;
+  border-radius: 1.2mm;
+  font-size: 7.5pt;
   flex: none;
 }
-.rp-sidemark--left { background: #2569BC; border-radius: 1.2mm; }
-.rp-sidemark--right { background: #17A2C4; border-radius: 50%; }
+.rp-sidemark--left {
+  background: var(--side-left, #0095E6);
+  border: 0.2mm solid var(--side-left-edge, #0F65AD);
+  color: var(--side-left-fg, #0F172A);
+}
+.rp-sidemark--right {
+  background: var(--side-right, #EC8E00);
+  border: 0.2mm solid var(--side-right-edge, #D3571E);
+  color: var(--side-right-fg, #0F172A);
+}
 
 .rp-sidebar__track { flex: 1; height: 3mm; background: #F1F5F9; border-radius: 1.5mm; overflow: hidden; }
 .rp-sidebar__fill { display: block; height: 100%; }
-.rp-sidebar__fill--left { background: #2569BC; }
+/* Bars use the darker center-ring shade, as the gait charts do: the shell
+   colour itself is too faint as a thin fill. */
+.rp-sidebar__fill--left { background: var(--viz-gait-left, #0F65AD); }
 
 /* Hatched, not merely another hue — see above. */
 .rp-sidebar__fill--right {
-  background: repeating-linear-gradient(45deg, #17A2C4 0 1mm, #FFFFFF 1mm 1.8mm);
+  background: repeating-linear-gradient(45deg, var(--viz-gait-right, #D3571E) 0 1mm, #FFFFFF 1mm 1.8mm);
 }
 
 .rp-sidebar__value { width: 12mm; text-align: right; font-variant-numeric: tabular-nums; }

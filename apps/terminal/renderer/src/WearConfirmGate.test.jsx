@@ -85,8 +85,8 @@ describe("P-07 — no left/right swap (RAY-479)", () => {
   it("shows the physical shell colour reminder", () => {
     const { container } = renderScreen();
     expect(screen.getByLabelText("佩戴颜色提醒")).toHaveTextContent("蓝色模块戴左脚、橙色模块戴右脚");
-    // 按 .wear-points 取，不按 role —— 向导头部的步骤条也是 listitem。
-    const rows = container.querySelectorAll(".wear-points li");
+    // 按 .side-rows 取，不按 role —— 向导头部的步骤条也是 listitem。
+    const rows = container.querySelectorAll(".side-rows li");
     expect(rows[0]).toHaveTextContent("受试者左踝← 蓝色模块");
     expect(rows[1]).toHaveTextContent("受试者右踝← 橙色模块");
   });

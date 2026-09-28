@@ -80,8 +80,8 @@ function SideBar({ side, value, max }) {
   const width = `${Math.round((value / (max || 1)) * 100)}%`;
   return (
     <div className="rp-sidebar">
-      {/* Shape + text carry the side as well as colour: this page is printed in
-          black and white (C-9). */}
+      {/* The character and the solid / hatched fill carry the side as well as
+          colour: this page is printed in black and white (C-9). */}
       <span className={`rp-sidemark rp-sidemark--${side}`}>{side === "left" ? "左" : "右"}</span>
       <span className="rp-sidebar__track">
         <span className={`rp-sidebar__fill rp-sidebar__fill--${side}`} style={{ width }} />
@@ -200,10 +200,10 @@ export function ReportDocument({ report }) {
           <rect x="0.5" y="0.5" width="479" height="89" rx="6" fill="#F6FAFD" stroke="#DCE7F2" />
           <line x1="10" y1="45" x2="470" y2="45" stroke="rgba(37,105,188,0.12)" strokeWidth="1.5" />
           {report.timeline.left.map((x) => (
-            <line key={`l${x}`} x1={x} y1="45" x2={x} y2="20" stroke="#2569BC" strokeWidth="2.5" strokeLinecap="round" />
+            <line key={`l${x}`} x1={x} y1="45" x2={x} y2="20" style={{ stroke: "var(--viz-gait-left, #0F65AD)" }} strokeWidth="2.5" strokeLinecap="round" />
           ))}
           {report.timeline.right.map((x) => (
-            <line key={`r${x}`} x1={x} y1="45" x2={x} y2="70" stroke="#17A2C4" strokeWidth="2.5" strokeDasharray="6 4" strokeLinecap="round" />
+            <line key={`r${x}`} x1={x} y1="45" x2={x} y2="70" style={{ stroke: "var(--viz-gait-right, #D3571E)" }} strokeWidth="2.5" strokeDasharray="6 4" strokeLinecap="round" />
           ))}
         </svg>
         <p className="rp-chart__legend">上方实线为左足落步，下方虚线为右足落步。</p>

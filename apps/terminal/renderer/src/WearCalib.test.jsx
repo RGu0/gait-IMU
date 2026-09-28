@@ -19,14 +19,18 @@ describe("P-06 — the wearing diagram is the last human check on left/right", (
     expect(screen.getAllByText("受试者右踝").length).toBeGreaterThan(0);
   });
 
-  it("carries the side as shape and character, not colour alone", () => {
+  it("carries the side as character and module colour, not colour alone", () => {
     const { container } = renderGuide();
     const svg = container.querySelector(".ankle-diagram");
-    // rounded square for left, circle for right
-    expect(svg.querySelector('rect[rx="12"]')).not.toBeNull();
-    expect(svg.querySelector("circle")).not.toBeNull();
     expect(svg.textContent).toContain("左");
     expect(svg.textContent).toContain("右");
+    // The marks are the modules: same rounded rectangle, shell colours (RAY-542).
+    const left = svg.querySelector('rect[fill="var(--side-left)"]');
+    const right = svg.querySelector('rect[fill="var(--side-right)"]');
+    expect(left).not.toBeNull();
+    expect(right).not.toBeNull();
+    for (const attr of ["width", "height", "rx"]) expect(left.getAttribute(attr)).toBe(right.getAttribute(attr));
+    expect(svg.querySelector("circle")).toBeNull();
   });
 
   it("names the three things that can be got wrong", () => {
