@@ -64,6 +64,25 @@ CSC_IDENTITY_AUTO_DISCOVERY=false pnpm --filter @gait/terminal-main exec \
   期望看到 `sidecar state: ready`、`renderer did-finish-load` 与 `renderer text: "预览版…"`，
   15 秒后自己退出，`gait-sidecar` 进程随之结束。
 
+## 装机后端到端验收
+
+`acceptance/preview_acceptance.mjs` 拉起**已安装**的应用（`--remote-debugging-port` + 一次性
+`--user-data-dir`），经 CDP 在演示模式走一遍：冷启动零外网请求 → 走满 60 秒出报告（出厂标定
+「已豁免」、两条注记）→ 中途停止 → 检测记录（完成 / 已停止、重开报告）→ 采集中强杀 sidecar
+（「检测已中断」、恢复、记录「未正常结束」）→ 落盘 meta → 关窗退出无残留。视口钉在 1280×720，
+四个页面判横向溢出。Windows 上另经 `acceptance/win_snapshot.ps1` 枚举可见顶层窗口，判**无控制台
+窗口**（先弹一个真控制台做正对照，看不见就判失败，不放过）。
+
+CI：`preview-release.yml` 的 `acceptance-windows` job 静默安装 NSIS 包后跑它（RAY-493 A5-win），
+结果与截图在构件 `acceptance-Windows`。本机（macOS）：
+
+```bash
+A5_APP="/Applications/GaitIMU Preview.app/Contents/MacOS/GaitIMU Preview" A5_OUT=/tmp/a5 \
+  node packaging/acceptance/preview_acceptance.mjs
+```
+
+需要 Node ≥ 22（全局 `WebSocket`）。不碰本机的预览设置与会话：userData 是临时目录。
+
 ## 给测试人员的安装说明（Preview）
 
 Preview **不签名、不公证**，首次打开会被系统拦一次，这是预期的。
@@ -83,6 +102,8 @@ Preview **不签名、不公证**，首次打开会被系统拦一次，这是�
 1. 运行 `GaitIMU Preview Setup <版本>.exe`。
 2. SmartScreen 提示「Windows 已保护你的电脑」时，点「更多信息」→「仍要运行」。
 3. 安装程序允许选择安装目录，默认装在当前用户下，不需要管理员权限。
+4. Windows 上「真实传感器」模式是**实验功能**：Preview 只在 Windows 上验收了演示模式（RAY-493
+   砍项 4），真机蓝牙未经验证。
 
 ### 使用
 

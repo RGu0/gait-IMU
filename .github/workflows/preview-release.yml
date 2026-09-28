@@ -121,3 +121,48 @@ jobs:
             apps/terminal/main/release/*.zip
             apps/terminal/main/release/*.exe
           if-no-files-found: error
+
+  # A5-win（RAY-493 windows-ci-acceptance）：把刚打出的 NSIS 包真的装上，用**安装后的** exe
+  # 跑演示模式端到端 —— A1 走满出报告、A2 停止/记录/强杀 sidecar 后恢复、A3 落盘 meta、
+  # 1280×720 不溢出、全程无控制台窗口、退出无残留。驱动与 macOS 装机验收是同一个脚本。
+  acceptance-windows:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: installer-Windows
+          path: installer
+
+      - name: 静默安装（NSIS /S，按用户安装）
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer -Filter "*Setup*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "installer-Windows 构件里没有安装程序" }
+          $proc = Start-Process $setup.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安装程序退出码 $($proc.ExitCode)" }
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter "GaitIMU Preview.exe" | Select-Object -First 1
+          if (-not $exe) { throw "安装后在 $env:LOCALAPPDATA\Programs 下找不到 GaitIMU Preview.exe" }
+          Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* |
+            Where-Object DisplayName -like "GaitIMU*" |
+            Format-List DisplayName, DisplayVersion, InstallLocation
+          "A5_APP=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 演示模式端到端（安装后的应用）
+        env:
+          A5_OUT: ${{ runner.temp }}/acceptance-windows
+        run: node packaging/acceptance/preview_acceptance.mjs
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: acceptance-Windows
+          path: ${{ runner.temp }}/acceptance-windows
+          if-no-files-found: warn
