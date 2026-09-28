@@ -69,6 +69,7 @@ from gait.device.orchestration import (
 )
 from gait.io.session import (
     META_FILENAME,
+    SessionFormatError,
     create_session,
     list_sessions,
     new_session_id,
@@ -854,7 +855,14 @@ class TerminalService:
                 # 建目录后、写 meta 前就失败的会话（旧版 create_session 会留下它）：
                 # 没有可列的内容，跳过，别让一条残骸弄坏整张检测记录。
                 continue
-            meta = read_meta(directory)
+            try:
+                meta = read_meta(directory)
+            except SessionFormatError:
+                # 契约版本不同（或 meta 已坏）的会话：`read_meta` 按《05》§4 拒绝解读，
+                # 这里也不猜。跳过它而不是让整张检测记录失败 —— 1.1 → 1.2 时装过
+                # Preview 的机器上必然有这样的旧会话（RAY-287 R3，不迁移，见
+                # `packaging/README.md`「Preview 会话数据」）。文件留在磁盘上，不删。
+                continue
             complete = meta.integrity_report.get("complete")
             provenance = meta.extra.get("provenance") or {}
             records.append(

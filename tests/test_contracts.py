@@ -295,7 +295,7 @@ def test_mandatory_metadata_matches_prd_list():
 def test_session_meta_records_the_contract_version():
     """三个月后判断某份历史报告用的是哪版结构，靠的就是这个字段。
 
-    这里不写字面版本号：字面量只由 `test_contract_version_records_the_unit_change`
+    这里不写字面版本号：字面量只由 `test_contract_version_records_every_shape_change`
     一处持有，好让"升版本"始终是一个需要改那一处、因而必须想一想的动作。散在多处
     的话，升版本就退化成批量替换。
     """
@@ -401,7 +401,11 @@ def test_unit_table_names_only_real_fields():
     assert stale == [], f"单位表引用了不存在的字段：{stale}"
 
 
-def test_contract_version_records_the_unit_change():
-    """单位变更改的是数值的含义而非结构，没有版本号就没人能把两代会话分开。"""
-    assert CONTRACT_VERSION == "1.1"
-    assert make_session_meta().contract_version == "1.1"
+def test_contract_version_records_every_shape_change():
+    """版本号的字面量只在这里钉一次。
+
+    1.1：单位变更改的是数值的含义而非结构，没有版本号就没人能把两代会话分开。
+    1.2：RAY-287 R3 给 `SessionMeta` 加了两个字段 —— 结构变了，旧读者会拒绝新文件。
+    """
+    assert CONTRACT_VERSION == "1.2"
+    assert make_session_meta().contract_version == "1.2"
