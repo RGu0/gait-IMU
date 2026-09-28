@@ -380,7 +380,7 @@ class HttpOperatorAuth:
         if isinstance(raw, str) and raw:
             try:
                 # `fromisoformat` 从 3.11 起原生认 `Z`，不必先替换成 `+00:00`
-                # （本仓库 requires-python >= 3.12）。多那一步只会让人以为它必须。
+                # （本仓库 requires-python >= 3.13）。多那一步只会让人以为它必须。
                 parsed = datetime.fromisoformat(raw)
             except ValueError:
                 raise _unreadable(f"（expires_at 读不懂：{raw!r}）") from None

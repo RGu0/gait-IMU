@@ -13,12 +13,22 @@ PyInstaller 需要一个脚本文件作起点，而 `python -m gait.app` 是模�
 所以这里把「会被延迟加载的那几个模块」在冻结产物里当场 import 一遍。CI 两个平台都跑
 它，缺一个就红 —— 包括 `gait.app.replay` 与 `gait.app.blesource`（RAY-493 已合入，
 不再容忍缺失）。
+
+## `GAIT_SELFTEST=clock`
+
+打印冻结产物**自带的**解释器版本与 `time.monotonic()` 的实现和分辨率（JSON 一行）。
+到达时刻 `t_host` 全靠它（包括上游 wt901），而 Windows + Python 3.12 的它只有 15.6 ms
+—— 200 Hz 的 5 ms 周期被量化成台阶，链路 / 丢包全失真（RAY-545）。开发机上的 Python
+证明不了安装包里的是哪个，所以由 `packaging/smoke_sidecar.py` 在两个平台对冻结产物本身断言。
 """
 
 from __future__ import annotations
 
 import importlib
+import json
+import platform
 import sys
+import time
 
 
 def _required_modules(platform: str) -> list[str]:
@@ -47,11 +57,24 @@ def selftest_imports() -> int:
     return 0
 
 
+def selftest_clock() -> int:
+    info = time.get_clock_info("monotonic")
+    print(json.dumps({
+        "python": platform.python_version(),
+        "monotonic_implementation": info.implementation,
+        "monotonic_resolution_s": info.resolution,
+    }))
+    return 0
+
+
 def run() -> int:
     import os
 
-    if os.environ.get("GAIT_SELFTEST") == "imports":
+    selftest = os.environ.get("GAIT_SELFTEST")
+    if selftest == "imports":
         return selftest_imports()
+    if selftest == "clock":
+        return selftest_clock()
     from gait.app.__main__ import main
 
     return main()

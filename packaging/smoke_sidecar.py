@@ -2,9 +2,11 @@
 
     python packaging/smoke_sidecar.py dist/gait-sidecar/gait-sidecar[.exe]
 
-四步，任一步不符即非零退出：
+五步，任一步不符即非零退出：
 
 1. `GAIT_SELFTEST=imports` —— 延迟 import 的模块是否真的被冻结进去（见 sidecar_entry.py）。
+   再跑 `GAIT_SELFTEST=clock` —— 冻结产物**自带的**解释器 ≥ 3.13，且 `time.monotonic()` 的分辨率
+   够测 200 Hz（与 `linktest` 同一判据）。Windows + 3.12 是 15.6 ms，会在这里红（RAY-545）。
 2. 管道一条 `describe` 请求 —— 协议往返、`contract.json` 是否作为包数据带上
    （缺了它进程在 import 期就崩，根本回不了话）。
 3. 管道一条 `snapshot` 请求，**不设 `GAIT_DEVICE_SOURCE`** —— 默认设备源在冻结产物里能起。
@@ -26,6 +28,8 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+MIN_PYTHON = (3, 13)
+SAMPLE_PERIOD_S = 1.0 / 200.0
 CONTRACT = REPO_ROOT / "src" / "gait" / "app" / "contract.json"
 TIMEOUT_S = 120
 
@@ -91,6 +95,25 @@ def main(argv: list[str]) -> int:
     print("  " + proc.stdout.strip().replace("\n", "\n  "))
     if proc.returncode != 0 or "selftest ok" not in proc.stdout:
         raise SystemExit("selftest 失败")
+
+    print("[1b/4] GAIT_SELFTEST=clock")
+    proc = _run(exe, stdin="", env=_env(GAIT_SELFTEST="clock"))
+    print("  " + proc.stdout.strip())
+    if proc.returncode != 0:
+        raise SystemExit("clock selftest 失败")
+    clock = json.loads(proc.stdout.strip().splitlines()[-1])
+    frozen = tuple(int(part) for part in clock["python"].split(".")[:2])
+    if frozen < MIN_PYTHON:
+        raise SystemExit(f"冻结 sidecar 的解释器是 {clock['python']}，需要 ≥ 3.13（RAY-545）")
+    # 判据与 linktest 同一个常数，import 而不是抄 —— 两处各写一份迟早对不上。
+    from gait.cli.linktest import CLOCK_RESOLUTION_RATIO
+
+    resolution = clock["monotonic_resolution_s"]
+    if resolution * CLOCK_RESOLUTION_RATIO > SAMPLE_PERIOD_S:
+        raise SystemExit(
+            f"冻结 sidecar 的 time.monotonic() 分辨率 {resolution * 1e3:.4g} ms，"
+            f"粗于 200 Hz 采样周期的 1/{CLOCK_RESOLUTION_RATIO}（RAY-545）"
+        )
 
     print("[2/4] describe")
     (result,) = _requests(exe, ["describe"], _env())
