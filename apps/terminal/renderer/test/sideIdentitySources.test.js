@@ -36,7 +36,9 @@ describe("the renderer no longer paints a side in the pre-RAY-542 colours", () =
     // The shape of the old mistake: a side element filled with --brand-primary
     // or --accent-cyan. Side elements take --side-* instead.
     const offenders = sources(SRC).filter(({ text }) =>
-      /side[^\n]{0,80}var\(--(accent-cyan|brand-primary)\)|var\(--(accent-cyan|brand-primary)\)[^\n]{0,80}side/i.test(text),
+      // Anchored on side markers (--side-*, side-*, side=, side ===) so "aside",
+      // "inside" or ".sidebar" do not trip it.
+      /(--side-|\bside-|\bside=|\bside ===)[^\n]{0,80}var\(--(accent-cyan|brand-primary)\)|var\(--(accent-cyan|brand-primary)\)[^\n]{0,80}(--side-|\bside-|\bside=|\bside ===)/.test(text),
     );
     expect(offenders.map(({ rel }) => rel)).toEqual([]);
   });

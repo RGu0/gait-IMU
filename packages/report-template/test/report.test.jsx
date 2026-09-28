@@ -200,8 +200,15 @@ describe("side colours are the modules, not the old brand blue / data cyan (RAY-
     expect(html()).not.toMatch(OLD);
   });
 
-  it("dashes the right series in the timeline chart", () => {
-    expect(html()).toContain('stroke-dasharray="6 4"');
+  it("dashes the right series in the timeline chart, and only the right", () => {
+    // Right-foot strikes are drawn downward (y2=70), left upward (y2=20).
+    const lines = [...html().matchAll(/<line[^>]*>/g)].map(([tag]) => tag);
+    const right = lines.filter((tag) => /y2="70"/.test(tag));
+    const left = lines.filter((tag) => /y2="20"/.test(tag));
+    expect(right.length).toBeGreaterThan(0);
+    expect(left.length).toBeGreaterThan(0);
+    for (const tag of right) expect(tag).toContain('stroke-dasharray="6 4"');
+    for (const tag of left) expect(tag).not.toContain("stroke-dasharray");
   });
 });
 
