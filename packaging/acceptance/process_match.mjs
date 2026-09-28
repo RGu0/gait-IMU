@@ -1,9 +1,15 @@
 /**
  * 装机驱动认 sidecar 进程的纯函数（RAY-547）。
  *
- * 只看进程的**可执行文件**（`exe`：macOS 取 `ps -o comm`，Windows 取 `Win32_Process.ExecutablePath`；
- * 缺省时退回 `name`），从不看命令行参数 —— 否则一条 `zsh -c "…/sidecar/gait-sidecar …"` 这样只是
- * 在参数里提到路径的 shell 也会被当成 sidecar，Q.1 就把它判成残留（2026-09-28 RAY-545 #173 实测）。
+ * 只看进程的**可执行文件**（`exe`；缺省时退回 `name`），从不看命令行参数 —— 否则一条
+ * `zsh -c "…/sidecar/gait-sidecar …"` 这样只是在参数里提到路径的 shell 也会被当成 sidecar，Q.1 就把它
+ * 判成残留（2026-09-28 RAY-545 #173 实测）。
+ *
+ * `exe` 的来源：Windows 是 `Win32_Process.ExecutablePath`（真实映像路径）；macOS 是 `ps -o comm`，
+ * 它给的其实是 **argv[0]**，不是 exec 路径（`exec -a` 可以改写）。应用按绝对路径 spawn sidecar
+ * （`apps/terminal/main/sidecarCommand.js` 的 `packagedCommand`），所以 argv[0] 就是安装内的绝对路径；
+ * 若将来改成相对路径 spawn 或 sidecar 改写 argv[0]，`fromInstall` 会变 false、Q.1 会漏报残留 ——
+ * 届时改用 `proc_pidpath` 一类取真实映像路径的办法。
  *
  * 进程对象形状：`{ pid, ppid, name, exe, command }`；`command` 只留作证据，不参与判定。
  */

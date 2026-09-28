@@ -55,7 +55,7 @@ function winSnapshot() {
   const snap = JSON.parse(raw);
   return { windows: snap.windows ?? [], processes: snap.processes ?? [] };
 }
-// macOS：可执行路径（comm）与完整命令行分两次取 —— 两列都可能含空格，只有放在最后一列才不会被截断。
+// macOS：comm（argv[0]，sidecar 按绝对路径 spawn，即安装内路径；见 process_match.mjs）与完整命令行分两次取 —— 两列都可能含空格，只有放在最后一列才不会被截断。
 // 判定只用 exe；command 仅作证据（RAY-547）。
 function psColumn(col) {
   const out = new Map();
