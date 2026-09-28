@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isSidecar, leftoverSidecars } from "./process_match.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WIN = process.platform === "win32";
@@ -54,12 +55,22 @@ function winSnapshot() {
   const snap = JSON.parse(raw);
   return { windows: snap.windows ?? [], processes: snap.processes ?? [] };
 }
+// macOS：可执行路径（comm）与完整命令行分两次取 —— 两列都可能含空格，只有放在最后一列才不会被截断。
+// 判定只用 exe；command 仅作证据（RAY-547）。
+function psColumn(col) {
+  const out = new Map();
+  for (const l of execFileSync("ps", ["-axo", `pid=,ppid=,${col}=`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l);
+    if (m) out.set(+m[1], { ppid: +m[2], value: m[3].trimEnd() });
+  }
+  return out;
+}
 function processes() {
   if (WIN) return winSnapshot().processes;
-  return execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
-    .split("\n").map((l) => l.trim()).filter(Boolean)
-    .map((l) => { const m = /^(\d+)\s+(\d+)\s+(.*)$/.exec(l); return m ? { pid: +m[1], ppid: +m[2], name: null, command: m[3] } : null; })
-    .filter(Boolean);
+  const exes = psColumn("comm");
+  const commands = psColumn("command");
+  return [...exes].map(([pid, { ppid, value: exe }]) =>
+    ({ pid, ppid, name: path.basename(exe), exe, command: commands.get(pid)?.value ?? null }));
 }
 function descendants(root, procs) {
   const byParent = new Map();
@@ -72,8 +83,6 @@ function descendants(root, procs) {
   }
   return out;
 }
-const isSidecar = (p) => /(^|[\\/])gait-sidecar(\.exe)?("|\s|$)/i.test(p.command ?? "") || /^gait-sidecar(\.exe)?$/i.test(p.name ?? "");
-const fromInstall = (p) => (p.command ?? "").toLowerCase().replaceAll("/", path.sep).includes(INSTALL_ROOT);
 // 应用拉起的 sidecar：进程树里最外层的那一个（PyInstaller 若有子进程也一并算作它）。
 function sidecarProcesses(procs = processes()) {
   const tree = descendants(app.pid, procs).filter(isSidecar);
@@ -542,7 +551,7 @@ try {
     for (let i = 0; i < 100 && !appExited; i++) await sleep(100);
   }
   await sleep(4_000);
-  const leftovers = processes().filter((p) => isSidecar(p) && fromInstall(p));
+  const leftovers = leftoverSidecars(processes(), INSTALL_ROOT);
   record("Q.1 clean quit via window close, no orphan sidecar", pass(quitVia === "window.close()" && leftovers.length === 0),
     { quitVia, msToExit: appExited ? appExited.t - quitAt : null, leftovers });
   const summary = results.reduce((a, r) => ({ ...a, [r.status]: (a[r.status] ?? 0) + 1 }), {});

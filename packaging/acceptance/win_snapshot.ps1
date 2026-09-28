@@ -8,6 +8,9 @@
 # pid，而 conhost 的父进程是那个控制台程序 —— 所以沿进程树往下找能覆盖到。
 # Windows Terminal 托管时窗口属于 WindowsTerminal.exe，不在树里；驱动另用「启动前后新增的
 # 控制台类窗口」兜这一种，并用一个故意弹出的控制台做正对照，证明检测在当前环境里看得见。
+#
+# 认 sidecar 只用 name / exe（ExecutablePath），command 只作证据：命令行参数里提到 sidecar 路径的
+# 进程不是 sidecar（RAY-547）。
 $ErrorActionPreference = "Stop"
 
 Add-Type -TypeDefinition @"
@@ -56,6 +59,7 @@ $processes = Get-CimInstance Win32_Process | ForEach-Object {
     pid = [int]$_.ProcessId
     ppid = [int]$_.ParentProcessId
     name = $_.Name
+    exe = $_.ExecutablePath
     command = $_.CommandLine
   }
 }
