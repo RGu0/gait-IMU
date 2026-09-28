@@ -437,11 +437,11 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
    * 真 sidecar 的 startSession 是异步的。以前这里把 Promise 直接塞进 live，
    * TestRunScreen 在 `live.steps.left` 上当场崩。
    */
-  async function startWalk() {
+  async function startWalk(confirmation) {
     const generation = sidecarGenerationRef.current;
     let started;
     try {
-      started = await adapter.startSession(subject);
+      started = await adapter.startSession(subject, confirmation);
     } catch (error) {
       if (error?.code === TICKET_EXPIRED_CODE) {
         backToLogin(error);
@@ -592,9 +592,9 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
   if (stage === STAGE.calibration) {
     return (
       <WearConfirmScreen
-        onDone={({ wearing: w }) => {
+        onDone={({ wearing: w, confirmedAt }) => {
           setWearing(w);
-          startWalk();
+          startWalk({ wearing: w, confirmedAt });
         }}
         onBack={() => setStage(STAGE.wear)}
       />

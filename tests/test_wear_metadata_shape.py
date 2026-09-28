@@ -19,7 +19,7 @@ from gait.protocolflow.timed_walk import CHECK_FAIL, CHECK_PASS, CHECK_UNKNOWN
 from tests.test_contracts import make_session_meta
 from tests.test_session_format import make_meta
 
-CONFIRMED = {"result": "pass", "confirmed_at": "2026-09-28T02:30:00+00:00", "swapped": True}
+CONFIRMED = {"result": "pass", "confirmed_at": "2026-09-28T02:30:00+00:00"}
 COMPUTED = {"state": "computed", "difference": 0.12, "significance": 2.5, "strides_used": 9}
 NOT_COMPUTED = {"state": "not_computed", "reason": "只有 1 个支撑相可用，算不出摆动相横滚"}
 
@@ -43,10 +43,10 @@ def test_well_formed_records_are_accepted(signature):
 
 
 def test_an_unconfirmed_session_records_no_confirmation_time():
-    make_session_meta(wear_confirmation={"result": "unknown", "confirmed_at": None, "swapped": False})
+    make_session_meta(wear_confirmation={"result": "unknown", "confirmed_at": None})
     with pytest.raises(ContractError, match="没有确认就没有确认时刻"):
         make_session_meta(
-            wear_confirmation={"result": "unknown", "confirmed_at": "2026-09-28T02:30:00Z", "swapped": False}
+            wear_confirmation={"result": "unknown", "confirmed_at": "2026-09-28T02:30:00Z"}
         )
 
 
@@ -55,9 +55,12 @@ def test_a_pass_must_say_when():
         make_session_meta(wear_confirmation={**CONFIRMED, "confirmed_at": None})
 
 
-@pytest.mark.parametrize("extra_key", ["operator_id", "operatorId", "confirmed_by"])
+@pytest.mark.parametrize("extra_key", ["operator_id", "operatorId", "confirmed_by", "swapped"])
 def test_operator_identity_has_no_place_to_go(extra_key):
-    """RAY-287 R3 / RAY-323 R1 决定 3：身份不进会话元数据。键集合封闭，多一个都不收。"""
+    """RAY-287 R3 / RAY-323 R1 决定 3：身份不进会话元数据。键集合封闭，多一个都不收。
+
+    `swapped` 也在这里：R4 撤掉了它（P-07 已无对调动作，那一格只会恒为假）。
+    """
     with pytest.raises(ContractError, match="不记操作员身份"):
         make_session_meta(wear_confirmation={**CONFIRMED, extra_key: "op-001"})
 
@@ -67,10 +70,9 @@ def test_operator_identity_has_no_place_to_go(extra_key):
     [
         {**CONFIRMED, "result": "confirmed"},
         {**CONFIRMED, "result": ["pass"]},
-        {**CONFIRMED, "swapped": "no"},
         {**CONFIRMED, "confirmed_at": "张三"},
         {**CONFIRMED, "confirmed_at": "yesterday"},
-        {"result": "pass", "confirmed_at": "2026-09-28T02:30:00Z"},
+        {"result": "pass"},
     ],
 )
 def test_malformed_confirmations_are_refused(bad):
@@ -147,7 +149,7 @@ def test_a_previous_contract_session_is_skipped_not_fatal(tmp_path):
 @pytest.mark.parametrize(
     "corrupt",
     [
-        lambda payload: payload.update(wear_confirmation={"result": [], "confirmed_at": None, "swapped": False}),
+        lambda payload: payload.update(wear_confirmation={"result": [], "confirmed_at": None}),
         lambda payload: payload.pop("subject_uuid"),
     ],
     ids=["unhashable-result", "missing-required-field"],

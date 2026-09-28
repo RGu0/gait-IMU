@@ -312,10 +312,17 @@ export function createSidecarAdapter(
     // 真实后端：三态电量准入、到达率、出厂标定、磁盘
     runPreflight: () => call("runPreflight"),
 
-    // 真实后端：TimedWalk。受检者 uuid 随会话落进元数据。
-    startSession: async (subject) => {
+    // 真实后端：TimedWalk。受检者 uuid 与 P-07 的左右确认（RAY-287）随会话落进元数据。
+    // 没有确认就不发 wearConfirmation：sidecar 据此记 unknown，而不是替它编一个 pass。
+    startSession: async (subject, confirmation) => {
       const params = { now: now() };
       if (subject?.subjectUuid) params.subjectUuid = subject.subjectUuid;
+      if (confirmation?.wearing) {
+        params.wearConfirmation = {
+          result: confirmation.wearing,
+          confirmedAt: confirmation.confirmedAt ?? null,
+        };
+      }
       const started = await call("startSession", params);
       if (gapOf(started)) return started;
       const steps = toSides(started?.steps);

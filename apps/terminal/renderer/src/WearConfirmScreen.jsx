@@ -39,7 +39,9 @@ export function WearConfirmScreen({ onDone, onBack }) {
     // "顺手把 disabled 去掉"的改动无法静默地把恒真值放出去 —— 闸的语义
     // 写在这里，而不是只写在按钮的可用性上。
     if (!confirmed) return;
-    onDone({ wearing: "pass" });
+    // 确认时刻在按下的这一刻取，随会话元数据落盘（RAY-287 R4）。不记是谁 ——
+    // 操作员身份不进会话元数据（RAY-323 R1 决定 3）。
+    onDone({ wearing: "pass", confirmedAt: new Date().toISOString() });
   }
 
   return (

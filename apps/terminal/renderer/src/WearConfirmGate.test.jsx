@@ -43,7 +43,22 @@ describe("P-07 — the left/right confirmation is a gate", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     expect(primary()).toBeEnabled();
     fireEvent.click(primary());
-    expect(onDone).toHaveBeenCalledWith({ wearing: "pass" });
+    expect(onDone).toHaveBeenCalledWith({ wearing: "pass", confirmedAt: expect.any(String) });
+  });
+
+  it("stamps the moment of confirmation, and nothing that says who (RAY-287 R4)", () => {
+    const onDone = vi.fn();
+    renderScreen({ onDone });
+    const before = Date.now();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(primary());
+
+    const [payload] = onDone.mock.calls[0];
+    // 键集合恰为两个：多出来的任何一格（操作员、对调）都会随元数据落盘。
+    expect(Object.keys(payload).sort()).toEqual(["confirmedAt", "wearing"]);
+    const stamped = Date.parse(payload.confirmedAt);
+    expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 1000);
   });
 
   it("explains why the primary action is not available yet", () => {

@@ -110,7 +110,11 @@ WEAR_CONFIRMATION_RESULTS: Final[frozenset[str]] = frozenset({"pass", "fail", "u
 #: `wear_confirmation` 的**全部**键。键集合是封闭的，而不只是「至少有这些」：
 #: RAY-287 R3 定了**操作员身份不进会话元数据**（RAY-323 R1 决定 3），而拦住
 #: 「顺手加一个 `operator_id`」最直接的办法，就是这里不接受任何多出来的键。
-_WEAR_CONFIRMATION_KEYS: Final[frozenset[str]] = frozenset({"result", "confirmed_at", "swapped"})
+#:
+#: R4 撤掉了 R3 的 `swapped`（确认前是否对调过）：RAY-479 R1 已删除 P-07 的「一键对调」，
+#: 那一格只会恒为假 —— 一个看着像审计凭据、实际什么都没记的恒值。撤掉时还没有任何
+#: 生产者写过非空的 `wear_confirmation`，所以仍是 1.2，不构成同一版本号的两种形状。
+_WEAR_CONFIRMATION_KEYS: Final[frozenset[str]] = frozenset({"result", "confirmed_at"})
 
 _SIGNATURE_COMPUTED_KEYS: Final[frozenset[str]] = frozenset(
     {"state", "difference", "significance", "strides_used"}
@@ -394,13 +398,13 @@ class SessionMeta:
                 "空值与缺席对复现而言是一回事。"
             )
         if self.wear_confirmation is not None:
-            _check_wear_confirmation(self.wear_confirmation)
+            check_wear_confirmation(self.wear_confirmation)
         if self.inversion_signature is not None:
             _check_inversion_signature(self.inversion_signature)
 
 
-def _check_wear_confirmation(value: Any) -> None:
-    """P-07 左右确认的记录形状。RAY-287 R3：结果、确认时刻、确认前是否对调过。"""
+def check_wear_confirmation(value: Any) -> None:
+    """P-07 左右确认的记录形状。RAY-287 R4：结果、确认时刻。"""
     if not isinstance(value, dict) or set(value) != _WEAR_CONFIRMATION_KEYS:
         keys = sorted(value) if isinstance(value, dict) else type(value).__name__
         raise ContractError(
@@ -427,8 +431,6 @@ def _check_wear_confirmation(value: Any) -> None:
             f"wear_confirmation.result 为 {result!r} 时 confirmed_at 必须为 null，"
             f"收到 {confirmed_at!r} —— 没有确认就没有确认时刻"
         )
-    if not isinstance(value["swapped"], bool):
-        raise ContractError(f"wear_confirmation.swapped 必须是布尔值，收到 {value['swapped']!r}")
 
 
 def _check_inversion_signature(value: Any) -> None:

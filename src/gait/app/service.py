@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -50,7 +51,15 @@ from gait.cloud.operator import OperatorAuth, OperatorAuthFailed, TicketStore
 from gait.cloud.subjects import SubjectDirectory, SubjectLookupFailed
 from gait.cloud.upload import UploadQueue, enqueue_session
 from gait.config import ProtocolConfig
-from gait.contracts import CONTRACT_VERSION, FootLabel, FootSeries, SessionMeta
+from gait.contracts import (
+    CONTRACT_VERSION,
+    ContractError,
+    FootLabel,
+    FootSeries,
+    SessionMeta,
+    check_wear_confirmation,
+)
+from gait.core.dualfoot import DualFootError, inversion_signature
 from gait.device.binding import (
     AdmissionVerdict,
     BindingError,
@@ -234,6 +243,8 @@ class TerminalService:
         #: 而 P-08 的倒计时要在**走的过程中**回答「还剩多久」。这里自己记开走时刻，
         #: 而不是去读 TimedWalk 的私有字段 —— 读私有等于把它的内部当公开接口。
         self._walk_started_at: float | None = None
+        #: 这一次 P-07 左右确认的记录（RAY-287 R4），随开始时的元数据落盘。
+        self._wear_confirmation: dict[str, Any] | None = None
 
     @property
     def login_required(self) -> bool:
@@ -588,6 +599,8 @@ class TerminalService:
             return operator_auth.ticket_expired()
         now = float(params.get("now", 0.0))
         self._subject_uuid = _valid_uuid(params.get("subjectUuid")) or new_subject_uuid()
+        # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
+        self._wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
         self.walk = TimedWalk(self.config)
         self._aborted = None
         self._recording_errors = {}
@@ -681,6 +694,8 @@ class TerminalService:
             contract_version=CONTRACT_VERSION,
             notes="本地采集会话；元数据在会话结束时改写。停在 pending 即表示未正常结束。",
             extra=self._meta_extra(),
+            # 开始时就写：确认发生在开走之前，进程中途被杀也不该丢掉它。
+            wear_confirmation=self._wear_confirmation,
         )
 
     @property
@@ -1213,9 +1228,39 @@ class TerminalService:
         chain = self._chain_for(params)
         if chain is None:
             return []
+        self._record_inversion_signature(params, chain)
         # `selected` 是分段筛选之后的中段步，也就是分析层认为可用的那些。传全部
         # `cycles` 会把转身那几步算进指标里 —— 那是 `analysis/segments` 存在的理由。
         return [cycle for outcome in chain.feet.values() for cycle in outcome.selected]
+
+    def _record_inversion_signature(self, params: dict[str, Any], chain: ChainResult) -> None:
+        """把 `inversion_signature()` 的输出记进这次会话的元数据（RAY-287）。**只记一次。**
+
+        ## 为什么在这里算
+
+        它要两只脚的导航结果，而采集端唯一跑出导航结果的地方就是报告前的这次基础链。
+        收尾时另跑一遍链只为算它，是把一次几秒的重算平白做两遍。
+
+        ## 它不影响报告的任何一个字
+
+        RAY-287：**不参与判定、不进报告、不做质量标注**。所以这里的任何失败（元数据读
+        不回来、写不进去）都吞掉 —— 字段留在 `None`，读作「未记录」，是实话；而让一次
+        审计用的附带记录把报告打掉，是把代价放错了地方。
+
+        已经记过就不再写：重开历史报告不该改写会话文件。同一份录制跑同一条链，算出来的
+        也是同一个数，重写只会换掉 mtime。
+        """
+        session_id = params.get("sessionId") or self.session_id
+        if not session_id or self.session_root is None:
+            return
+        directory = session_directory(self.session_root, str(session_id))
+        try:
+            meta = read_meta(directory)
+            if meta.inversion_signature is not None:
+                return
+            write_meta(directory, replace(meta, inversion_signature=_signature_record(chain)))
+        except (OSError, ValueError):
+            return
 
     def _chain_for(self, params: dict[str, Any]) -> ChainResult | None:
         """把一次已落盘的会话跑过基础链。拿不到数据就返回 `None`。
@@ -1501,6 +1546,58 @@ def _capture_snapshot(status: Any) -> dict[str, Any] | None:
         "complete": status.complete,
         "chunks_written": dict(status.chunks_written),
         "problems": list(status.problems),
+    }
+
+
+def _wear_confirmation_from(value: Any) -> dict[str, Any]:
+    """`startSession` 带来的 P-07 确认 → 元数据里的 `wear_confirmation`（RAY-287 R4）。
+
+    **没带就是 `unknown`，不是 `None`。** sidecar 此刻确切知道这场会话开始时没有收到
+    确认 —— 那是一个事实，不是「没记录」。`None` 留给真正不知道的情形。
+
+    带了但形状不对就拒绝开始（`ProtocolError`），而不是退回 `unknown`：确认记录是
+    v1 唯一的左右保障，渲染端送错了东西应当当场暴露，不该被悄悄改写成另一种结论。
+    """
+    if value is None:
+        return {"result": CHECK_UNKNOWN, "confirmed_at": None}
+    if not isinstance(value, dict):
+        raise protocol.ProtocolError(f"wearConfirmation 必须是对象，收到 {type(value).__name__}")
+    extra = sorted(set(value) - {"result", "confirmedAt"})
+    if extra:
+        # 不静默丢弃：多出来的键（例如 operatorId）说明渲染端以为这里会记它，而这里不记
+        # （RAY-323 R1 决定 3）。让它当场失败，比让两端各自以为对方处理了好。
+        raise protocol.ProtocolError(f"wearConfirmation 含未知字段：{extra}")
+    record = {"result": value.get("result"), "confirmed_at": value.get("confirmedAt")}
+    try:
+        check_wear_confirmation(record)
+    except ContractError as error:
+        raise protocol.ProtocolError(f"wearConfirmation 不合契约：{error}") from error
+    return record
+
+
+def _signature_record(chain: ChainResult) -> dict[str, Any]:
+    """`ChainResult` → `SessionMeta.inversion_signature`（《05》§3.4 的两态）。
+
+    `inversion_signature` 要求两只脚采样数相同。对不齐时落成 `not_computed`、原因原样
+    写进去 —— 对齐是同步层的职责（RAY-209），不是本函数该去修的事。（2026-09-28 实测：
+    一份 60 秒真机会话经 MVP 桥后两足同为 12520 个样本，算得出。）
+
+    **算得出不等于判得出。** 符号与左右的对应至今未标定（RAY-230），这个数只供事后审计。
+    """
+    feet = chain.feet
+    if "L" not in feet or "R" not in feet:
+        return {"state": "not_computed", "reason": f"只有 {sorted(feet)} 的数据，需要两只脚"}
+    try:
+        signature = inversion_signature(feet["L"].navigation, feet["R"].navigation)
+    except DualFootError as error:
+        return {"state": "not_computed", "reason": str(error)}
+    # 逐 stride 标准差为 0 时显著性是 inf；JSON 没有无穷大，契约规定落成 null。
+    significance = signature.significance
+    return {
+        "state": "computed",
+        "difference": float(signature.difference),
+        "significance": float(significance) if math.isfinite(significance) else None,
+        "strides_used": int(signature.strides_used),
     }
 
 

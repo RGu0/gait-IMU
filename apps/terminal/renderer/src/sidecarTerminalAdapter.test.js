@@ -140,6 +140,25 @@ describe("会话", () => {
     expect(calls[0].params).toEqual({ now: 1 });
   });
 
+  it("startSession 把 P-07 的确认结果与时刻带给 sidecar（RAY-287）", async () => {
+    const { adapter, calls } = adapterWith({ startSession: START_SESSION }, { now: () => 7 });
+    await adapter.startSession(
+      { subjectUuid: "u-1" },
+      { wearing: "pass", confirmedAt: "2026-09-28T03:00:00.000Z" },
+    );
+    expect(calls[0].params).toEqual({
+      now: 7,
+      subjectUuid: "u-1",
+      wearConfirmation: { result: "pass", confirmedAt: "2026-09-28T03:00:00.000Z" },
+    });
+  });
+
+  it("没有确认就不发 wearConfirmation —— 由 sidecar 记 unknown，不在这里替它编", async () => {
+    const { adapter, calls } = adapterWith({ startSession: START_SESSION }, { now: () => 1 });
+    await adapter.startSession({ subjectUuid: "u-1" }, undefined);
+    expect(calls[0].params).not.toHaveProperty("wearConfirmation");
+  });
+
   it("reportFor 的拒绝以 TerminalFailure 抛出，带码与动作", async () => {
     const { adapter } = adapterWith({ reportFor: fail(REPORT_NO_CYCLES) });
     const error = await adapter.reportFor({ id: "x" }).catch((caught) => caught);
