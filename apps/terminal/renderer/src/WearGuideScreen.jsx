@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button, Dialog } from "@gait/design-system";
 import { AnkleDiagram } from "./AnkleDiagram.jsx";
+import { ModulePair } from "./ModulePair.jsx";
 import { WizardShell } from "./WizardShell.jsx";
 
 /**
@@ -49,6 +50,12 @@ export function WearGuideScreen({ onContinue }) {
         </div>
 
         <div className="two-column__text">
+          {/* The modules as they look in the hand (RAY-542): "blue on the left
+              ankle" is checked against the shell, not against a colour word.
+              Beside the mirrored front view this pair runs in the opposite
+              order (the drawing has orange on the viewer's left), so the title
+              says outright that it is not the ankles' positions. */}
+          <ModulePair title="手里的模块（不是图中踝的位置）：蓝色戴左踝、橙色戴右踝" />
           <ul className="wear-points">
             {POINTS.map((point) => (
               <li key={point.key}>
