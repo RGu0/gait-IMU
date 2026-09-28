@@ -569,6 +569,72 @@ class TestConnectOrchestration:
         finally:
             source.close()
 
+    def test_both_feet_are_configured_before_either_starts_and_starts_are_concurrent(self):
+        """两台的非速率配置全部下完，才允许任何一台写速率；两次速率写并发（RAY-333）。
+
+        **写速率寄存器就是开流。** 逐台走完整配置时，第一台独自推流 3~5 秒，
+        那正是第二台开流后过渡期的成因（`T-213-02`，7/7 复现，跟随连接顺序）。
+        产品路径是受试者真正站着等的地方；顺序一旦被改回「配置完一台就开流」，
+        到达率在自检当时照样会爬到 200，过渡期只会静默回归。
+
+        并发用屏障钉：每次 `start` 进入后等另一只脚的 `start` 也进入。
+        若两次速率写被改成逐个 `await`，第一次永远等不到第二次，连接判失败。
+        """
+        world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        events: list[tuple[str, str]] = []
+        entered: list[str] = []
+
+        async def configure(device):
+            events.append(("configure", device.device_id))
+            return AppliedConfig(StreamConfig(), 3, 1, 0, 0, None, ())
+
+        async def start(device, applied):
+            events.append(("start", device.device_id))
+            entered.append(device.device_id)
+            async with asyncio.timeout(1.0):
+                while len(entered) < 2:
+                    await asyncio.sleep(0)
+            return applied
+
+        source = BleDeviceSource(ops=replace(world.ops(), configure=configure, start=start))
+        try:
+            assert source.refresh(timeout=5) == "connected", source.last_error
+        finally:
+            source.close()
+        kinds = [kind for kind, _ in events]
+        assert kinds == ["configure", "configure", "start", "start"], events
+        assert {device for _, device in events} == set(world.transports)
+
+    def test_default_ops_defer_the_rate_until_start(self, monkeypatch):
+        """默认的 `configure` 必须带 `defer_rate=True`，`start` 才写速率（RAY-333）。
+
+        上一条用的是注入的假 ops；这一条钉住生产默认值本身，
+        防止有人把默认 `configure` 改回整套配置（那会在配置阶段就开流）。
+        """
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_configure(device, *args, **kwargs):
+            calls.append(("configure", kwargs))
+            return AppliedConfig(StreamConfig(), 3, 1, 0, 0, None, ())
+
+        async def fake_start(device, config, applied):
+            calls.append(("start", {"config": config}))
+            return applied
+
+        monkeypatch.setattr("gait.app.blesource.configure_streaming", fake_configure)
+        monkeypatch.setattr("gait.app.blesource.start_streaming", fake_start)
+        ops = DeviceOps()
+
+        async def run() -> None:
+            applied = await ops.configure(object())
+            await ops.start(object(), applied)
+
+        asyncio.run(run())
+        assert calls == [
+            ("configure", {"defer_rate": True}),
+            ("start", {"config": StreamConfig()}),
+        ]
+
     def test_scan_failure_degrades_and_a_later_refresh_reconnects(self):
         world = _FakeWorld(["AA:00:00:00:00:01", "AA:00:00:00:00:02"], scans_until_found=6)
         source = BleDeviceSource(ops=world.ops())
