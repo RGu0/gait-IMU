@@ -174,3 +174,28 @@ def test_an_infinite_significance_is_stored_as_null(monkeypatch):
     )
     record = _signature_record(_Chain({"L": _Nav(None), "R": _Nav(None)}))
     assert record == {"state": "computed", "difference": 0.0, "significance": None, "strides_used": 3}
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        lambda left, right: __import__("gait.core.dualfoot", fromlist=["x"]).InversionSignature(
+            difference=math.nan, significance=1.0, strides_used=3
+        ),
+        lambda left, right: (_ for _ in ()).throw(IndexError("boom")),
+    ],
+    ids=["nan-difference", "unexpected-exception"],
+)
+def test_a_broken_signature_never_stops_the_session_from_closing(recorded_session, monkeypatch, fake):  # noqa: F811
+    """审计用的附带记录坏了，收尾照常：会话仍然落成终态、仍然排进上传队列。"""
+    from gait.app import service as service_module
+
+    monkeypatch.setattr(service_module, "inversion_signature", fake)
+    root, session_id = recorded_session
+    service = TerminalService(session_root=root)
+    service.session_id = session_id
+    recorded = service._signature_at_close()
+    assert recorded["state"] == "not_computed"
+    # 结果必须能过契约 —— 否则收尾那次 write_meta 会抛。
+    directory = session_directory(root, session_id)
+    write_meta(directory, replace(read_meta(directory), inversion_signature=recorded))

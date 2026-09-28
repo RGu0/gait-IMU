@@ -356,6 +356,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
       return;
     }
     setSubject(null);
+    confirmationRef.current = null;
     setProfile(null);
     setCredentials({ organization: "", password: "" });
     setLoginError("");
@@ -574,6 +575,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onAgree={() => setStage(STAGE.preflight)}
         onDecline={() => {
           setSubject(null);
+          confirmationRef.current = null;
           setProfile(null);
           setStage(STAGE.hub);
         }}
@@ -692,9 +694,9 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onNextSubject={() => {
           setResult(null);
           setSubject(null);
+          confirmationRef.current = null;
           setProfile(null);
           setWearing("unknown");
-          confirmationRef.current = null;
           setStage(STAGE.subject);
         }}
         onOpenReport={() => openReport({ subjectLabel: subject?.maskedId }, STAGE.preflight)}

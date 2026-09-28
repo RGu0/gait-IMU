@@ -801,20 +801,24 @@ class TerminalService:
         收尾这次改写本来就在入队之前，一起写就没有这个窗口。代价是收尾多跑一遍基础链
         （60 秒真机会话实测约 0.9 s）。
 
-        ## 它不影响任何判定
+        ## 它不影响任何判定，也不许打断收尾
 
-        不参与判定、不进报告、不做质量标注。所以这里的失败**只**落成 `not_computed`
-        加原因，不向上抛 —— 一次审计用的附带记录不该把收尾打断。
+        不参与判定、不进报告、不做质量标注。所以这里的**任何**失败都只落成
+        `not_computed` 加原因，不向上抛。这里有意接住所有 `Exception`：收尾一旦抛出，
+        `self.capture` 就不会清空、会话进不了上传队列、排空线程永远停着 —— 为一份
+        审计用的附带记录丢掉一整场会话的上传，是把代价放错了地方。
         """
         try:
             chain = self._chain_for({"sessionId": self.session_id})
+            if chain is None:
+                return {"state": "not_computed", "reason": "这次会话没有任何一只脚的录制"}
+            return _signature_record(chain)
         except SessionDataUnreadable as error:
             return {"state": "not_computed", "reason": f"原始数据读不回来：{error}"}
         except ValueError as error:
             return {"state": "not_computed", "reason": f"基础链算不出导航结果：{error}"}
-        if chain is None:
-            return {"state": "not_computed", "reason": "这次会话没有任何一只脚的录制"}
-        return _signature_record(chain)
+        except Exception as error:  # noqa: BLE001 —— 理由见上
+            return {"state": "not_computed", "reason": f"计算时出错：{type(error).__name__}: {error}"}
 
     def _enqueue_for_upload(self) -> None:
         """把刚收尾的会话排进待传队列。
@@ -1591,6 +1595,9 @@ def _signature_record(chain: ChainResult) -> dict[str, Any]:
         signature = inversion_signature(feet["L"].navigation, feet["R"].navigation)
     except DualFootError as error:
         return {"state": "not_computed", "reason": str(error)}
+    if not math.isfinite(signature.difference):
+        # 导航发散（横滚成了 NaN）时差值也跟着坏。契约拒绝非有限数，这里如实记成算不出。
+        return {"state": "not_computed", "reason": f"差值不是有限数：{signature.difference}"}
     # 逐 stride 标准差为 0 时显著性是 inf；JSON 没有无穷大，契约规定落成 null。
     significance = signature.significance
     return {
