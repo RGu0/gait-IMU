@@ -90,15 +90,41 @@ def test_operator_identity_does_not_reach_the_session_file(tmp_path):
 # ── inversion_signature ──────────────────────────────────────────────────
 
 
-def test_the_first_report_records_the_signature(recorded_session):  # noqa: F811
+def test_stopping_records_the_signature_in_the_same_rewrite(tmp_path):
+    """收尾那次改写就带上它 —— 不留到出报告时再补写。"""
+    service, session_id = _start(tmp_path, {})
+    service.handle({"id": "t", "method": "stopSession", "params": {"now": 5.0}})
+    recorded = _meta(tmp_path, session_id).inversion_signature
+    assert recorded is not None
+    assert recorded["state"] in {"computed", "not_computed"}
+
+
+def test_a_report_never_rewrites_the_session_file(recorded_session):  # noqa: F811
+    """审查发现的阻断（PR #168）：出报告时补写 meta.json 会改变打包摘要。
+
+    会话收尾即入上传队列；幂等键由打包摘要导出。入队后 meta.json 再变一个字节，
+    传了一半的会话重试时就会被服务端判为「同一会话、不同内容」而永久冲突（G-04）。
+
+    用一份**有真实录制**的会话：报告真的跑出基础链，签名尚未记录 —— 正是上一版会在
+    这里补写的情形。stub 会话没有帧、链不跑，测不出这件事。
+    """
     root, session_id = recorded_session
-    assert _meta(root, session_id).inversion_signature is None
+    path = session_directory(root, session_id) / "meta.json"
+    before = path.read_bytes()
+    report = TerminalService(session_root=root)._do_reportFor({"sessionId": session_id})
+    assert "metrics" in report  # 链确实跑了
+    assert path.read_bytes() == before
 
-    TerminalService(session_root=root)._do_reportFor({"sessionId": session_id})
 
-    recorded = _meta(root, session_id).inversion_signature
-    # 合成录制两足同长、时间轴一致，所以这里一定算得出。
-    # 合成模型没有横滚（RAY-206 的已声明限制），差值只是噪声 —— 这里只验「算得对、记得下」。
+def test_synthetic_recording_yields_a_computed_signature(recorded_session):  # noqa: F811
+    """合成录制两足同长、时间轴一致，所以一定算得出。
+
+    合成模型没有横滚（RAY-206 的已声明限制），差值只是噪声 —— 这里只验「算得对、记得下」。
+    """
+    root, session_id = recorded_session
+    service = TerminalService(session_root=root)
+    service.session_id = session_id
+    recorded = service._signature_at_close()
     assert recorded["state"] == "computed"
     assert math.isfinite(recorded["difference"])
     assert recorded["strides_used"] >= 1
@@ -108,22 +134,16 @@ def test_the_signature_changes_nothing_in_the_report(recorded_session):  # noqa:
     """不参与判定、不进报告：有它没它，报告逐字相同。"""
     root, session_id = recorded_session
     service = TerminalService(session_root=root)
-    first = service._do_reportFor({"sessionId": session_id, "reportId": "R"})
-    assert _meta(root, session_id).inversion_signature is not None
-    second = service._do_reportFor({"sessionId": session_id, "reportId": "R"})
-    assert first == second
-    assert "inversion" not in str(first)
-    assert "signature" not in str(first)
-
-
-def test_reopening_a_report_does_not_rewrite_the_signature(recorded_session):  # noqa: F811
-    root, session_id = recorded_session
+    without = service._do_reportFor({"sessionId": session_id, "reportId": "R"})
+    service.session_id = session_id
     directory = session_directory(root, session_id)
-    marker = {"state": "not_computed", "reason": "预先写入的值，不应被覆盖"}
-    write_meta(directory, replace(read_meta(directory), inversion_signature=marker))
-
-    TerminalService(session_root=root)._do_reportFor({"sessionId": session_id})
-    assert _meta(root, session_id).inversion_signature == marker
+    write_meta(directory, replace(read_meta(directory), inversion_signature=service._signature_at_close()))
+    service.session_id = None
+    with_signature = service._do_reportFor({"sessionId": session_id, "reportId": "R"})
+    assert _meta(root, session_id).inversion_signature["state"] == "computed"
+    assert without == with_signature
+    assert "inversion" not in str(with_signature)
+    assert "signature" not in str(with_signature)
 
 
 class _Nav:

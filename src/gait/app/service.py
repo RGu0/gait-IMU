@@ -597,10 +597,11 @@ class TerminalService:
         if self.login_required and self.tickets.load() is None:
             self.operator = None
             return operator_auth.ticket_expired()
+        # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
+        wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
         now = float(params.get("now", 0.0))
         self._subject_uuid = _valid_uuid(params.get("subjectUuid")) or new_subject_uuid()
-        # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
-        self._wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
+        self._wear_confirmation = wear_confirmation
         self.walk = TimedWalk(self.config)
         self._aborted = None
         self._recording_errors = {}
@@ -761,6 +762,10 @@ class TerminalService:
             directory,
             replace(
                 meta,
+                # 在**排进上传队列之前**的这一次改写里一起写（RAY-287）。入队之后再动
+                # meta.json 会改变打包摘要，而上传的幂等键由摘要导出 —— 重试时服务端
+                # 会看到同一会话的另一份内容，判为冲突，这份会话就永远传不上去（G-04）。
+                inversion_signature=self._signature_at_close(),
                 integrity_report={
                     "complete": status.complete,
                     "chunks_written": dict(status.chunks_written),
@@ -785,6 +790,31 @@ class TerminalService:
         self.capture = None
         self._enqueue_for_upload()
         return status
+
+    def _signature_at_close(self) -> dict[str, Any] | None:
+        """`inversion_signature()` 的记录，在收尾那次元数据改写里算（RAY-287 R4）。
+
+        ## 为什么在收尾时算，而不是出报告时
+
+        出报告时算要再写一次 meta.json，而那时会话**已经排进上传队列**：打包摘要随之
+        变化，幂等键跟着变，已传了一半的会话在重试时会被服务端判为冲突，永远传不上去。
+        收尾这次改写本来就在入队之前，一起写就没有这个窗口。代价是收尾多跑一遍基础链
+        （60 秒真机会话实测约 0.9 s）。
+
+        ## 它不影响任何判定
+
+        不参与判定、不进报告、不做质量标注。所以这里的失败**只**落成 `not_computed`
+        加原因，不向上抛 —— 一次审计用的附带记录不该把收尾打断。
+        """
+        try:
+            chain = self._chain_for({"sessionId": self.session_id})
+        except SessionDataUnreadable as error:
+            return {"state": "not_computed", "reason": f"原始数据读不回来：{error}"}
+        except ValueError as error:
+            return {"state": "not_computed", "reason": f"基础链算不出导航结果：{error}"}
+        if chain is None:
+            return {"state": "not_computed", "reason": "这次会话没有任何一只脚的录制"}
+        return _signature_record(chain)
 
     def _enqueue_for_upload(self) -> None:
         """把刚收尾的会话排进待传队列。
@@ -1228,39 +1258,9 @@ class TerminalService:
         chain = self._chain_for(params)
         if chain is None:
             return []
-        self._record_inversion_signature(params, chain)
         # `selected` 是分段筛选之后的中段步，也就是分析层认为可用的那些。传全部
         # `cycles` 会把转身那几步算进指标里 —— 那是 `analysis/segments` 存在的理由。
         return [cycle for outcome in chain.feet.values() for cycle in outcome.selected]
-
-    def _record_inversion_signature(self, params: dict[str, Any], chain: ChainResult) -> None:
-        """把 `inversion_signature()` 的输出记进这次会话的元数据（RAY-287）。**只记一次。**
-
-        ## 为什么在这里算
-
-        它要两只脚的导航结果，而采集端唯一跑出导航结果的地方就是报告前的这次基础链。
-        收尾时另跑一遍链只为算它，是把一次几秒的重算平白做两遍。
-
-        ## 它不影响报告的任何一个字
-
-        RAY-287：**不参与判定、不进报告、不做质量标注**。所以这里的任何失败（元数据读
-        不回来、写不进去）都吞掉 —— 字段留在 `None`，读作「未记录」，是实话；而让一次
-        审计用的附带记录把报告打掉，是把代价放错了地方。
-
-        已经记过就不再写：重开历史报告不该改写会话文件。同一份录制跑同一条链，算出来的
-        也是同一个数，重写只会换掉 mtime。
-        """
-        session_id = params.get("sessionId") or self.session_id
-        if not session_id or self.session_root is None:
-            return
-        directory = session_directory(self.session_root, str(session_id))
-        try:
-            meta = read_meta(directory)
-            if meta.inversion_signature is not None:
-                return
-            write_meta(directory, replace(meta, inversion_signature=_signature_record(chain)))
-        except (OSError, ValueError):
-            return
 
     def _chain_for(self, params: dict[str, Any]) -> ChainResult | None:
         """把一次已落盘的会话跑过基础链。拿不到数据就返回 `None`。
