@@ -5,10 +5,24 @@
 
 | | |
 |---|---|
-| 源项目 | `40065384-1a4c-4f8f-93eb-4d067444d67f`（`PROJECT_TYPE_DESIGN_SYSTEM`） |
-| 拉取时间 | 2026-08-21（`components/gait/LinkStatus.*` 三份于 2026-09-10 单独重拉，RAY-274 交付 4） |
+| 源项目 | `ea9fbe8a-52f7-43d9-bdaf-778c26f60d4b`（`PROJECT_TYPE_DESIGN_SYSTEM`），2026-09-28 起；见下「源项目迁移」 |
+| 拉取时间 | 2026-09-28（新源由本目录重建后逐文件重拉比对，含 `components/flow/ChecklistItem.*` 三份；RAY-541 / RAY-542） |
 | 拉取方式 | DesignSync `get_file`，逐个文件 |
-| 对应 Issue | RAY-249 |
+| 对应 Issue | RAY-249（首次镜像）、RAY-541（源迁移） |
+
+## 源项目迁移（2026-09-28，RAY-541 R2）
+
+原源 `40065384-1a4c-4f8f-93eb-4d067444d67f` 属于**已无 subscription 的旧账号**：写入 403「cannot edit this project」，
+新账号又读不到它（404），无法逐文件复制。用户裁定：**以本目录为底，在新账号下重建源**。旧源留作历史，**不再是源**。
+
+- 写入的是本目录的源码（62 个文件：`readme.md` = `DESIGN-GUIDE.md`、`SKILL.md`、`styles.css`、`tokens/*.css`、各组件
+  `.jsx` / `.d.ts` / `.prompt.md`），外加 `components/gait/gait.card.html`、`guidelines/colors-gait.card.html` 两张预览卡
+  （命名空间 `SteadyHealthDesignSystem_ea9fbe`）。内容以 RAY-542 `side-identity-design-system` 分支为准，该 PR 合入前
+  `main` 上的镜像会比源旧一步。
+- 下文「有意分叉」三处写入的是**源版本**（首次拉取 `c56356f` 时的 Google Fonts 版），本地版本不变。
+- 不写 `package.json`、`index.js`（仓库自建，源里本来没有）。
+- **新源比旧源少**：其余 `*.card.html` 预览卡、其余 `guidelines/*.card.html`、`ui_kits/feetforceplate/`、`assets/`、`uploads/`
+  —— 本目录有意不镜像它们（见下表），旧源又读不到，所以无从恢复。需要时在 Claude Design 里重做。
 
 ## 改动方向
 
@@ -28,6 +42,22 @@
 | `guidelines/*.card.html` | 同上。规范内容已在 `DESIGN-GUIDE.md` 里 |
 | `ui_kits/feetforceplate/` | 另一个产品的界面 |
 | `assets/`、`uploads/` | 品牌资源与上传件，按需单独引入 |
+
+## 有意分叉（与源不同，且**不推回**）
+
+上面的「不要只改这里」有一个例外：下列改动只存在于镜像，源项目保持原样。**从源重拉时必须保留本地版本**，
+否则会被静默抹掉。
+
+| 文件 | 本地版本 | 源项目版本 | 为什么不推回 |
+|---|---|---|---|
+| `tokens/fonts.css` | `@import` 随包的 `@fontsource-variable/noto-sans-sc` 与 `inter`（钉 5.3.0，OFL-1.1） | `@import` Google Fonts CSS API | 打包后的 Electron 应用里，那条渲染阻塞的外网请求让首屏等了 1.1–56.6 s，离线机构可能一直白屏（RAY-493 `preview-rc2-fixes`）。而源项目是设计面板、没有 npm，推过去面板反而加载不到字体 |
+| `tokens/typography.css` | 字体栈前置 `"Noto Sans SC Variable"` / `"Inter Variable"`，原名保留在后 | 只有原名 | 随包字体的 family 名带 ` Variable` 后缀；这一行是上一条的配套 |
+| `package.json` 的 `dependencies` | 两个 `@fontsource-variable` 包 | 无（源项目不管理 npm 依赖） | 同上 |
+
+守卫：`apps/terminal/renderer/test/noExternalAssets.test.js` —— 镜像或渲染端出现 http(s) 的样式 / 字体引用即失败，
+所以重拉时若把 `fonts.css` 覆盖回源版本，构建会变红而不是静默退化。
+
+决定出处：RAY-541 R1（2026-09-28 用户裁定）。
 
 ## 为什么 package.json 里没有 react 依赖
 
