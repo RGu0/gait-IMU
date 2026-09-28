@@ -882,3 +882,30 @@ class TestScanRssi:
         finally:
             for _d, _r, writer in connected:
                 writer.close()
+
+
+def test_both_devices_are_configured_before_either_starts_streaming() -> None:
+    """两台的非速率配置必须全部下完，才允许任何一台开流（RAY-333）。
+
+    与 `test_v3prime` 里同名测试钉的是同一个不变量 —— 本工具同为双设备顺序建链，
+    犯过同一处设计缺陷（第一台写完速率即满速推流，第二台还在配置，
+    第二台开流后第 2~6 秒掉到 160~184 样本/秒，`T-213-02`），一并修过，
+    但此前只有 v3prime 那一处被测试钉住。
+
+    结构性测试（读源码而非跑设备）：`run_bench` 的实机分支需要真实 BLE。
+    """
+    import inspect
+
+    from gait.cli.linktest import run_bench
+
+    source = inspect.getsource(run_bench)
+    configure_at = source.index("configure_streaming(")
+    start_at = source.index("start_streaming(")
+
+    assert "defer_rate=True" in source[configure_at : configure_at + 200], (
+        "配置阶段必须延后速率写入"
+    )
+    assert configure_at < start_at, "两台配置完毕之前不得开流"
+    assert "asyncio.gather(" in source[start_at - 400 : start_at], (
+        "两次速率写入应并发，把间隔压到一次 BLE 写的往返"
+    )
