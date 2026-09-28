@@ -654,7 +654,10 @@ body {
 
 .ankle-diagram { max-width: 100%; height: auto; }
 
-.two-column__text { display: grid; gap: var(--space-5); align-content: start; }
+/* --space-6, not --space-5: the 8px system has no 20px step, and an undefined
+   token here collapsed the gap to nothing — the P-07 checkbox sat flush against
+   the side rows (RAY-542). */
+.two-column__text { display: grid; gap: var(--space-6); align-content: start; }
 
 .wear-points { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-4); }
 
@@ -667,6 +670,28 @@ body {
 
 .wear-points strong { color: var(--brand-primary); }
 .wear-points span { color: var(--text-secondary); }
+
+/* P-07: one row per side — badge, ankle, module colour — on a single line
+   (RAY-542). Not .wear-points: that is P-06's two-cell title/detail grid, and a
+   three-element row inside it wrapped 「← 蓝色模块」 onto a narrow second line. */
+.side-rows { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-3); }
+
+.side-rows li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  white-space: nowrap;
+  font: var(--text-body-lg);
+}
+
+.side-rows strong { color: var(--text-primary); font-weight: 600; }
+.side-rows span { color: var(--text-secondary); }
+
+/* The two modules as they look in the hand (P-06, P-07). */
+.module-pair { margin: 0; display: grid; gap: var(--space-3); justify-items: start; }
+.module-pair__title { font: var(--text-secondary-size); color: var(--text-secondary); }
+.module-pair__figures { display: flex; gap: var(--space-6); align-items: flex-end; }
+.two-column__figure .module-pair { justify-items: center; }
 
 .wear-confirm {
   display: flex;
@@ -982,7 +1007,8 @@ body {
 /* RAY-479 左右模块配对 */
 .binding-wizard .wizard-body { display: grid; gap: var(--space-4); }
 .binding-wizard__busy { margin: 0; color: var(--text-secondary); }
-.wear-color-reminder { margin: 0 0 var(--space-4); font: var(--text-body); }
+.binding-wizard__module { display: flex; justify-content: center; padding: var(--space-2) 0; }
+.wear-color-reminder { margin: 0; font: var(--text-body); }
 
 /* 顶栏右端：当前操作员 + 登出（RAY-323 R2，仅要登录的终端才有）。 */
 .app-bar__session {

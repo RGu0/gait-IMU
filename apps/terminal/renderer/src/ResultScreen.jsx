@@ -31,7 +31,7 @@ function ComparisonRow({ metric }) {
       <span className="compare-row__name">{metric.label}</span>
       <div className="compare-row__bars">
         <div className="compare-bar">
-          <SideBadge side="left" size={20} />
+          <SideBadge side="left" size={22} />
           {/* Solid fill for left, hatched for right: the pair has to survive a
               grayscale A4 print, so colour alone cannot carry the side (C-9). */}
           <span className="compare-bar__track">
@@ -40,7 +40,7 @@ function ComparisonRow({ metric }) {
           <span className="compare-bar__value">{metric.left}</span>
         </div>
         <div className="compare-bar">
-          <SideBadge side="right" size={20} />
+          <SideBadge side="right" size={22} />
           <span className="compare-bar__track">
             <span className="compare-bar__fill compare-bar__fill--right" style={{ width: pct(metric.right) }} />
           </span>

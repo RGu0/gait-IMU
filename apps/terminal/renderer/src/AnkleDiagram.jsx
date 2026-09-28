@@ -4,10 +4,13 @@
  *
  * A front view mirrors the subject — their left ankle appears on the viewer's
  * right. That is the single most likely way to get this wrong, so the side is
- * carried four times over: the shape of the badge (rounded square vs circle),
- * the character 「左」/「右」, the colour, and the caption spelling out the
- * mirroring in words. Three of those four survive a black-and-white printout,
- * and all four survive a viewer who is not looking closely.
+ * carried three times over: the character 「左」/「右」 on the module, the
+ * module's own shell colour (blue left, orange right — what the operator is
+ * holding), and the caption spelling out the mirroring in words.
+ *
+ * Both modules are drawn as the same rounded rectangle, because the hardware is
+ * (RAY-542). The badge used to be a square on the left and a circle on the
+ * right; that taught the operator a shape cue no module in their hand has.
  *
  * Static, no video, no network (PRD P-06): this has to work on a terminal that
  * has been offline all morning.
@@ -26,19 +29,19 @@ export function AnkleDiagram({ scale = 1 }) {
       {/* subject's RIGHT ankle — drawn on the viewer's LEFT */}
       <g>
         <rect x="96" y="90" width="72" height="150" rx="26" fill="#FFFFFF" stroke="var(--border-strong)" strokeWidth="2" />
-        <circle cx="132" cy="196" r="22" fill="var(--side-right)" />
-        <text x="132" y="203" textAnchor="middle" fill="#FFFFFF" style={{ font: "600 20px var(--font-ui)" }}>右</text>
+        <rect x="112" y="174" width="40" height="46" rx="8" fill="var(--side-right)" stroke="var(--side-right-edge)" strokeWidth="1.5" />
+        <text x="132" y="204" textAnchor="middle" fill="var(--side-right-fg)" style={{ font: "600 20px var(--font-ui)" }}>右</text>
         {/* orientation arrow: the module's mark points up */}
-        <path d="M132 168 L132 140 M124 148 L132 140 L140 148" stroke="var(--side-right)" strokeWidth="3" fill="none" strokeLinecap="round" />
+        <path d="M132 168 L132 140 M124 148 L132 140 L140 148" stroke="var(--side-right-edge)" strokeWidth="3" fill="none" strokeLinecap="round" />
         <text x="132" y="272" textAnchor="middle" fill="var(--text-secondary)" style={{ font: "400 14px var(--font-ui)" }}>受试者右踝</text>
       </g>
 
       {/* subject's LEFT ankle — drawn on the viewer's RIGHT */}
       <g>
         <rect x="312" y="90" width="72" height="150" rx="26" fill="#FFFFFF" stroke="var(--border-strong)" strokeWidth="2" />
-        <rect x="326" y="174" width="44" height="44" rx="12" fill="var(--side-left)" />
-        <text x="348" y="203" textAnchor="middle" fill="#FFFFFF" style={{ font: "600 20px var(--font-ui)" }}>左</text>
-        <path d="M348 168 L348 140 M340 148 L348 140 L356 148" stroke="var(--side-left)" strokeWidth="3" fill="none" strokeLinecap="round" />
+        <rect x="328" y="174" width="40" height="46" rx="8" fill="var(--side-left)" stroke="var(--side-left-edge)" strokeWidth="1.5" />
+        <text x="348" y="204" textAnchor="middle" fill="var(--side-left-fg)" style={{ font: "600 20px var(--font-ui)" }}>左</text>
+        <path d="M348 168 L348 140 M340 148 L348 140 L356 148" stroke="var(--side-left-edge)" strokeWidth="3" fill="none" strokeLinecap="round" />
         <text x="348" y="272" textAnchor="middle" fill="var(--text-secondary)" style={{ font: "400 14px var(--font-ui)" }}>受试者左踝</text>
       </g>
 

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button, SideBadge } from "@gait/design-system";
+import { ModulePair } from "./ModulePair.jsx";
 import { WizardShell } from "./WizardShell.jsx";
 
 /**
@@ -59,19 +60,25 @@ export function WearConfirmScreen({ onDone, onBack }) {
         </>
       }
     >
+      {/* 左栏是模块外观，右栏是逐行核对。之前这一屏只有文字栏，落进了为插图留的
+          560px 栏里，而每行三个元素又套着 P-06 的两格布局 ——「← 蓝色模块」被挤到
+          第二行（RAY-542）。现在每行一个 flex 行，标识、踝部、颜色同在一行。 */}
       <div className="two-column">
+        <div className="two-column__figure">
+          <ModulePair width={88} />
+        </div>
         <div className="two-column__text">
           <p className="wear-color-reminder" aria-label="佩戴颜色提醒">
             <strong>{COLOR_REMINDER}</strong>
           </p>
-          <ul className="wear-points">
+          <ul className="side-rows">
             <li>
-              <SideBadge side="left" size={20} />
+              <SideBadge side="left" size={24} />
               <strong>受试者左踝</strong>
               <span>← 蓝色模块</span>
             </li>
             <li>
-              <SideBadge side="right" size={20} />
+              <SideBadge side="right" size={24} />
               <strong>受试者右踝</strong>
               <span>← 橙色模块</span>
             </li>

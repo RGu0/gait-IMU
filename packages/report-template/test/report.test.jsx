@@ -166,11 +166,38 @@ describe("left and right survive a grayscale print (C-9)", () => {
     expect(markup).toContain(">右<");
   });
 
-  it("distinguishes the bars by shape and fill, not hue alone", () => {
-    // rounded square vs circle, solid vs hatched
-    expect(CSS).toMatch(/\.rp-sidemark--left\s*\{[^}]*border-radius:\s*1\.2mm/);
-    expect(CSS).toMatch(/\.rp-sidemark--right\s*\{[^}]*border-radius:\s*50%/);
+  it("distinguishes the bars by fill, not hue alone", () => {
+    // solid vs hatched — the channel that survives grayscale besides 左/右
     expect(CSS).toMatch(/\.rp-sidebar__fill--right\s*\{[^}]*repeating-linear-gradient/);
+    expect(CSS).not.toMatch(/\.rp-sidebar__fill--left\s*\{[^}]*repeating-linear-gradient/);
+  });
+
+  it("draws both side marks as the same module shape (RAY-542)", () => {
+    // The two modules are the same rounded rectangle; a square-vs-circle
+    // difference on paper has no counterpart in the hand.
+    const rule = (sel) => new RegExp(`\\.${sel}\\s*\\{([^}]*)\\}`).exec(CSS)?.[1] ?? "";
+    expect(rule("rp-sidemark")).toMatch(/border-radius:\s*1\.2mm/);
+    for (const side of ["left", "right"]) expect(rule(`rp-sidemark--${side}`)).not.toMatch(/border-radius/);
+  });
+});
+
+describe("side colours are the modules, not the old brand blue / data cyan (RAY-542)", () => {
+  // Before RAY-542 the report drew the right foot in the data cyan: nothing on
+  // the page was orange, while the operator had just fitted an orange module.
+  const OLD = /#2569BC|#17A2C4/i;
+  const sideRules = () =>
+    [...CSS.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(([, sel]) => /side|timeline|chart/.test(sel)).map(([, , body]) => body);
+
+  it("uses the side tokens for the marks and the gait tokens for the bars", () => {
+    expect(CSS).toMatch(/\.rp-sidemark--left\s*\{[^}]*var\(--side-left,/);
+    expect(CSS).toMatch(/\.rp-sidemark--right\s*\{[^}]*var\(--side-right,/);
+    expect(CSS).toMatch(/\.rp-sidebar__fill--left\s*\{[^}]*var\(--viz-gait-left,/);
+    expect(CSS).toMatch(/\.rp-sidebar__fill--right\s*\{[^}]*var\(--viz-gait-right,/);
+  });
+
+  it("never paints a side in the pre-RAY-542 colours", () => {
+    expect(sideRules().filter((body) => OLD.test(body))).toEqual([]);
+    expect(html()).not.toMatch(OLD);
   });
 
   it("dashes the right series in the timeline chart", () => {

@@ -81,8 +81,8 @@ export function HubScreen({
           <article className="hub-card">
             <h2>双侧采集模块</h2>
             <div className="device-identities">
-              <div><SideBadge side="left" size={24} />左侧模块</div>
-              <div><SideBadge side="right" size={24} />右侧模块</div>
+              <div><SideBadge side="left" size={24} />蓝色模块</div>
+              <div><SideBadge side="right" size={24} />橙色模块</div>
             </div>
             {hasBattery ? <BatteryPair left={deviceSummary.leftBattery} right={deviceSummary.rightBattery} /> : null}
           </article>
