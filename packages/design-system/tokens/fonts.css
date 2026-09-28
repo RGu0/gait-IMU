@@ -4,7 +4,8 @@
      Adobe/Google typeface family; visually identical).
    · Inter → Inter (unchanged).
 
-   LOCAL DIVERGENCE (RAY-493 preview-rc2-fixes) — push back to the Claude Design source:
+   INTENTIONAL DIVERGENCE (RAY-493 preview-rc2-fixes; kept local by RAY-541, see SYNC.md
+   「有意分叉」) — NOT pushed back; preserve this file when re-pulling from the source:
    the design source @imports the Google Fonts CSS API. In the packaged Electron app that
    render-blocking request held the first paint for 1–57 s, and offline institutions
    may never get it. Fonts are now bundled from @fontsource-variable (pinned exact
