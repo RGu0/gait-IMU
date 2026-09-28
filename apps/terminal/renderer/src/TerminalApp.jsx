@@ -153,6 +153,10 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
   // 佩戴确认（P-07 最小接线）：`wearing` 是 PRD §13 的佩戴底线。RAY-479 起没有「一键对调」：
   // 左右只由配对绑定决定（蓝色模块左脚、橙色模块右脚）。
   const [wearing, setWearing] = useState("unknown");
+  // 这次 P-07 的确认（结果 + 时刻），随每次 startSession 落进会话元数据（RAY-287）。
+  // 「重新检测」不回到 P-07，判定照旧用上面的 `wearing` —— 元数据就得带同一份确认，
+  // 原样带着它当时的时刻，而不是在重测里改记成 unknown，让判定与文件互相矛盾。
+  const confirmationRef = useRef(null);
   // 配对向导结束后回到哪一屏（RAY-479）：设备页、工作台或自检。
   const [bindingReturn, setBindingReturn] = useState(STAGE.hub);
   // sidecar 的进程状态。null 表示「没有进程可看护」（mock 路径），
@@ -352,6 +356,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
       return;
     }
     setSubject(null);
+    confirmationRef.current = null;
     setProfile(null);
     setCredentials({ organization: "", password: "" });
     setLoginError("");
@@ -386,6 +391,8 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
 
   function confirmSubject(chosen) {
     setSubject(chosen);
+    // 换了受检者就没有确认：上一位的 P-07 不能带进这一位的会话元数据。
+    confirmationRef.current = null;
     setStage(STAGE.profile);
   }
 
@@ -441,7 +448,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     const generation = sidecarGenerationRef.current;
     let started;
     try {
-      started = await adapter.startSession(subject);
+      started = await adapter.startSession(subject, confirmationRef.current ?? undefined);
     } catch (error) {
       if (error?.code === TICKET_EXPIRED_CODE) {
         backToLogin(error);
@@ -568,6 +575,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onAgree={() => setStage(STAGE.preflight)}
         onDecline={() => {
           setSubject(null);
+          confirmationRef.current = null;
           setProfile(null);
           setStage(STAGE.hub);
         }}
@@ -592,8 +600,9 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
   if (stage === STAGE.calibration) {
     return (
       <WearConfirmScreen
-        onDone={({ wearing: w }) => {
+        onDone={({ wearing: w, confirmedAt }) => {
           setWearing(w);
+          confirmationRef.current = { wearing: w, confirmedAt };
           startWalk();
         }}
         onBack={() => setStage(STAGE.wear)}
@@ -685,6 +694,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
         onNextSubject={() => {
           setResult(null);
           setSubject(null);
+          confirmationRef.current = null;
           setProfile(null);
           setWearing("unknown");
           setStage(STAGE.subject);
