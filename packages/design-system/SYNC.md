@@ -5,10 +5,24 @@
 
 | | |
 |---|---|
-| 源项目 | `40065384-1a4c-4f8f-93eb-4d067444d67f`（`PROJECT_TYPE_DESIGN_SYSTEM`） |
-| 拉取时间 | 2026-08-21（`components/gait/LinkStatus.*` 三份于 2026-09-10 单独重拉，RAY-274 交付 4） |
+| 源项目 | `ea9fbe8a-52f7-43d9-bdaf-778c26f60d4b`（`PROJECT_TYPE_DESIGN_SYSTEM`），2026-09-28 起；见下「源项目迁移」 |
+| 拉取时间 | 2026-09-28（新源由本目录重建后逐文件重拉比对，含 `components/flow/ChecklistItem.*` 三份；RAY-541 / RAY-542） |
 | 拉取方式 | DesignSync `get_file`，逐个文件 |
-| 对应 Issue | RAY-249 |
+| 对应 Issue | RAY-249（首次镜像）、RAY-541（源迁移） |
+
+## 源项目迁移（2026-09-28，RAY-541 R2）
+
+原源 `40065384-1a4c-4f8f-93eb-4d067444d67f` 属于**已无 subscription 的旧账号**：写入 403「cannot edit this project」，
+新账号又读不到它（404），无法逐文件复制。用户裁定：**以本目录为底，在新账号下重建源**。旧源留作历史，**不再是源**。
+
+- 写入的是本目录的源码（62 个文件：`readme.md` = `DESIGN-GUIDE.md`、`SKILL.md`、`styles.css`、`tokens/*.css`、各组件
+  `.jsx` / `.d.ts` / `.prompt.md`），外加 `components/gait/gait.card.html`、`guidelines/colors-gait.card.html` 两张预览卡
+  （命名空间 `SteadyHealthDesignSystem_ea9fbe`）。内容以 RAY-542 `side-identity-design-system` 分支为准，该 PR 合入前
+  `main` 上的镜像会比源旧一步。
+- 下文「有意分叉」三处写入的是**源版本**（首次拉取 `c56356f` 时的 Google Fonts 版），本地版本不变。
+- 不写 `package.json`、`index.js`（仓库自建，源里本来没有）。
+- **新源比旧源少**：其余 `*.card.html` 预览卡、其余 `guidelines/*.card.html`、`ui_kits/feetforceplate/`、`assets/`、`uploads/`
+  —— 本目录有意不镜像它们（见下表），旧源又读不到，所以无从恢复。需要时在 Claude Design 里重做。
 
 ## 改动方向
 
