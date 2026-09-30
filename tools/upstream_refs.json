@@ -22,8 +22,8 @@
       ],
       "files": {
         "shared/contracts/cloud.py": {
-          "sha256": "37071a3272f866eb9e93a76fedd48c37cb92c15ff748a8fd7866364556f4d45c",
-          "bytes": 11578,
+          "sha256": "ac0bc10c4d1b3c8168af9ebeaf5b7eaa0a5fc99c54e9e754a59d4966c4e43cc1",
+          "bytes": 11625,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md",
@@ -47,8 +47,8 @@
           ]
         },
         "cloud/api/app.py": {
-          "sha256": "706b67ef8b7a7acc75736847df0c7cf65c4ca5511aa6173648cf61717cb1dc10",
-          "bytes": 37994,
+          "sha256": "a938b3285bc218862825d360c04bb8ee401f8d454d2d8868a6f7389f8726968c",
+          "bytes": 40403,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md"
@@ -70,8 +70,8 @@
           ]
         },
         "cloud/api/postgres.py": {
-          "sha256": "84ed1056613978d279440dd6b376b07c3891b6cc41cc508a7558185f584505ea",
-          "bytes": 55890,
+          "sha256": "2b3484cfa11e0c9eb91c13723effd5ee32ea78cacbb4564fe3fbfe88c75897b5",
+          "bytes": 56920,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md"
           ]
@@ -91,8 +91,8 @@
           ]
         },
         "client/sync/persistent_upload.py": {
-          "sha256": "1b5ac402a2ada835f1fd1481c6b852eaf59d37125409b9c911a9652f778c59c3",
-          "bytes": 30076,
+          "sha256": "13c38db027e0c2020dd5edeb820615431e4eaa7e0471bebee20b8ee86597355d",
+          "bytes": 37576,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             "src/gait/cloud/upload.py",
