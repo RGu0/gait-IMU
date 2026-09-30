@@ -73,6 +73,6 @@ State the four files reviewed, the material upstream additions, affected documen
 
 List each upstream file, its relevant current fact, cited documents reviewed, and the fresh digest recorded by the checker.
 
-- [ ] **Step 3: Run governed test and commit**
+- [x] **Step 3: Run governed test and commit**
 
 Expected: `./dev test` passes after the documentation and pin refresh. Commit only the documented scope files.
