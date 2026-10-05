@@ -25,7 +25,7 @@ export UV_CONFIG_FILE=/dev/null
 
 # Central storage, not a shared mutable environment: uv keys each environment
 # by its project path and interpreter. Caller overrides must not redirect it.
-unset UV_PROJECT_ENVIRONMENT
+unset UV_PROJECT_ENVIRONMENT VIRTUAL_ENV CONDA_PREFIX UV_SYSTEM_PYTHON
 case ",${UV_PREVIEW_FEATURES:-}," in
   *,centralized-project-envs,*) ;;
   *) export UV_PREVIEW_FEATURES="${UV_PREVIEW_FEATURES:+${UV_PREVIEW_FEATURES},}centralized-project-envs" ;;
@@ -68,6 +68,10 @@ case "$cmd" in
     ;;
   python-path)
     # IDE/debugger locator; .venv can be a directory link or a plain path file.
+    if [ ! -e .venv ]; then
+      echo "project environment locator .venv is unavailable; run governed setup or restore IDE locator support" >&2
+      exit 3
+    fi
     uv python find
     ;;
   setup)

@@ -30,6 +30,9 @@ $env:PYTHONUTF8 = "1"
 $env:UV_CONFIG_FILE = "NUL"
 
 Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
+Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+Remove-Item Env:CONDA_PREFIX -ErrorAction SilentlyContinue
+Remove-Item Env:UV_SYSTEM_PYTHON -ErrorAction SilentlyContinue
 if ("centralized-project-envs" -notin ($env:UV_PREVIEW_FEATURES -split ',')) {
     $env:UV_PREVIEW_FEATURES = (@($env:UV_PREVIEW_FEATURES, "centralized-project-envs") | Where-Object { $_ }) -join ','
 }
@@ -67,6 +70,10 @@ switch ($Command) {
         Invoke-Step "uv" @("python", "find", "--show-version")
     }
     "python-path" {
+        if (-not (Test-Path -LiteralPath '.venv')) {
+            [Console]::Error.WriteLine('project environment locator .venv is unavailable; run governed setup or restore IDE locator support')
+            exit 3
+        }
         Invoke-Step "uv" @("python", "find")
     }
     "setup" {
