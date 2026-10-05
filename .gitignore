@@ -1,5 +1,5 @@
 # environments — recreated per worktree, never shared or cloud-synced
-.venv/
+.venv
 node_modules/
 
 # build and cache

@@ -23,6 +23,14 @@ export PYTHONUTF8=1
 # 若将来在 pyproject.toml 里新增 [tool.uv] 的其他子表，这一条要重新验。
 export UV_CONFIG_FILE=/dev/null
 
+# Central storage, not a shared mutable environment: uv keys each environment
+# by its project path and interpreter. Caller overrides must not redirect it.
+unset UV_PROJECT_ENVIRONMENT
+case ",${UV_PREVIEW_FEATURES:-}," in
+  *,centralized-project-envs,*) ;;
+  *) export UV_PREVIEW_FEATURES="${UV_PREVIEW_FEATURES:+${UV_PREVIEW_FEATURES},}centralized-project-envs" ;;
+esac
+
 # Node 侧与 Python 侧对称。
 #
 # `uv run --locked` 自己按 .python-version 解析解释器，不看调用方的 PATH，
@@ -54,6 +62,14 @@ cmd="${1:-}"
 if [ $# -gt 0 ]; then shift; fi
 
 case "$cmd" in
+  python-info)
+    # Read-only runtime gate; never sync or repair an environment during a probe.
+    uv python find --show-version
+    ;;
+  python-path)
+    # IDE/debugger locator; .venv can be a directory link or a plain path file.
+    uv python find
+    ;;
   setup)
     uv sync --locked
     run_node pnpm install --frozen-lockfile
@@ -83,7 +99,7 @@ case "$cmd" in
     run_node "$@"
     ;;
   *)
-    echo "usage: ./dev {setup|test|lint|build|node <cmd>...}" >&2
+    echo "usage: ./dev {setup|test|lint|build|python-info|python-path|node <cmd>...}" >&2
     exit 2
     ;;
 esac

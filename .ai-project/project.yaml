@@ -1,4 +1,5 @@
 schema_version: 1
+python_resolution: "entrypoint"
 id: "gait-imu"
 repository: "git@github.com:RGu0/gait-IMU.git"
 default_branch: "main"

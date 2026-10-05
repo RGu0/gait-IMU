@@ -2,7 +2,7 @@
 # pwsh -File dev.ps1 <setup|test|lint|build|node>.
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("setup", "test", "lint", "build", "node")]
+    [ValidateSet("setup", "test", "lint", "build", "node", "python-info", "python-path")]
     [string]$Command,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -28,6 +28,11 @@ $env:PYTHONUTF8 = "1"
 # windows-latest CI 上跑通。不用 [System.IO.Path] 或 os.devNull 那种 \\.\nul 写法：
 # 没有人验证过 uv 接受它。
 $env:UV_CONFIG_FILE = "NUL"
+
+Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
+if ("centralized-project-envs" -notin ($env:UV_PREVIEW_FEATURES -split ',')) {
+    $env:UV_PREVIEW_FEATURES = (@($env:UV_PREVIEW_FEATURES, "centralized-project-envs") | Where-Object { $_ }) -join ','
+}
 
 function Invoke-Step {
     param([string]$Exe, [string[]]$StepArgs)
@@ -58,6 +63,12 @@ function Invoke-Node {
 }
 
 switch ($Command) {
+    "python-info" {
+        Invoke-Step "uv" @("python", "find", "--show-version")
+    }
+    "python-path" {
+        Invoke-Step "uv" @("python", "find")
+    }
     "setup" {
         Invoke-Step "uv" @("sync", "--locked")
         Invoke-Node "pnpm" @("install", "--frozen-lockfile")
