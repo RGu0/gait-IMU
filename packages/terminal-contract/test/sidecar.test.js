@@ -15,13 +15,61 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 import { createSidecarAdapter } from "../../../apps/terminal/renderer/src/sidecarTerminalAdapter.js";
-import { UV_CONFIG_FILE_NULL } from "../../../apps/terminal/main/sidecarCommand.js";
+import { developmentCommand, UV_CONFIG_FILE_NULL } from "../../../apps/terminal/main/sidecarCommand.js";
+import { sidecarOptions } from "../../../apps/terminal/main/runtimeConfig.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
+/**
+ * RAY-750 R1：命令与环境经产品的 sidecarOptions(developmentCommand()) 拼出，
+ * 不再抄一份 process.env。调用方环境里显式塞进 GAIT_ACCESS_ROOT /
+ * GAIT_SESSION_ROOT，并断言它们没有渗进 product env（产品环境是替换式的，
+ * PATH 不继承 —— spawn 用解析后的绝对 uv 路径）；developmentCommand 的显式
+ * 业务变量（PYTHONUTF8、UV_CONFIG_FILE，见 RAY-483）原样保留。
+ */
+const DEV_COMMAND = developmentCommand(REPO_ROOT);
+// 保留集成测试的 --no-sync（不动 developmentCommand 本身）：--locked 会让每次 spawn
+// 都重新解析依赖，把每条用例拖慢约 4 s 且网络一抖就间歇超时。锁文件新鲜度由
+// ./dev test / ./dev lint 的 uv run --locked 与 CI 的 uv sync --locked 守，不在这里。
+const COMMAND = {
+  ...DEV_COMMAND,
+  args: DEV_COMMAND.args.map((arg) => (arg === "--locked" ? "--no-sync" : arg)),
+};
+
 /** 起一个真进程，并把它包成 adapter 要的 transport。 */
-function startSidecar() {
+function startSidecar(userDataDir) {
+  const { executable: SIDECAR_EXECUTABLE, options: SIDECAR_OPTIONS } = sidecarOptions({
+    command: COMMAND,
+    settings: {},
+    userDataDir,
+    processEnv: {
+      ...process.env,
+      GAIT_ACCESS_ROOT: "/ray-750-must-not-leak",
+      GAIT_SESSION_ROOT: "/ray-750-must-not-leak",
+    },
+    platform: process.platform,
+  });
+  if (!SIDECAR_EXECUTABLE) {
+    throw new Error("PATH 里解析不到 uv；请先在仓库里跑 ./dev setup 再跑本测试。");
+  }
+  if (
+    SIDECAR_OPTIONS.env.GAIT_ACCESS_ROOT !== undefined ||
+    SIDECAR_OPTIONS.env.GAIT_SESSION_ROOT === "/ray-750-must-not-leak"
+  ) {
+    throw new Error("调用方的 GAIT_* 变量渗进了 product env —— 产品环境应当是替换式的。");
+  }
+  if (SIDECAR_OPTIONS.env.PYTHONUTF8 !== "1" || SIDECAR_OPTIONS.env.UV_CONFIG_FILE !== UV_CONFIG_FILE_NULL) {
+    throw new Error("developmentCommand 的显式业务变量没有保留下来。");
+  }
+  expect(path.isAbsolute(SIDECAR_EXECUTABLE)).toBe(true);
+  expect(SIDECAR_OPTIONS.command).toBe(SIDECAR_EXECUTABLE);
+  expect(SIDECAR_OPTIONS.env).not.toHaveProperty("PATH");
+  expect(SIDECAR_OPTIONS.env.GAIT_SESSION_ROOT).toBe(path.join(userDataDir, "sessions"));
+
   // `--no-sync` 而不是 `--locked`。`--locked` 会让 uv 在**每一次** `uv run` 上重新
   // 解析依赖，而依赖里的 techflex-cloud-foundation 是一个 GitHub release 资产直链：
   // 它的 HTTP 缓存项每次都判过期，于是每次 spawn 都要向 github.com 发一轮
@@ -36,11 +84,11 @@ function startSidecar() {
   // 锁文件的新鲜度不靠这里守：`./dev test` 与 `./dev lint` 里的 `uv run --locked`
   // 已经守了，CI 还先跑 `./dev setup`（`uv sync --locked`）。这条用例要验的是 IPC
   // 两侧能不能对上话，不是依赖解析。
-  const child = spawn("uv", ["run", "--no-sync", "python", "-m", "gait.app"], {
-    cwd: REPO_ROOT,
-    // UV_CONFIG_FILE：本机的 uv 镜像配置会让 uv 报一个假的 lockfile 陈旧错误。取值与产品
-    // 路径共用同一个常量（RAY-483）；不用 UV_NO_CONFIG，它会连 .python-version 一起关掉。
-    env: { ...process.env, UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
+  // 命令、cwd、env 全部来自产品路径（见文件顶部）；UV_CONFIG_FILE 仍由
+  // developmentCommand 带来（RAY-483），不用 UV_NO_CONFIG，它会连 .python-version 一起关掉。
+  const child = spawn(SIDECAR_EXECUTABLE, SIDECAR_OPTIONS.args, {
+    cwd: SIDECAR_OPTIONS.cwd,
+    env: SIDECAR_OPTIONS.env,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -122,15 +170,26 @@ function startSidecar() {
 describe("真实 sidecar 往返（不经 mock）", () => {
   let sidecar;
   let adapter;
+  let userDataDir;
 
   beforeEach(() => {
-    sidecar = startSidecar();
+    userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gait-ray-750-contract-"));
+    sidecar = startSidecar(userDataDir);
     adapter = createSidecarAdapter(sidecar.transport);
   });
 
-  afterEach(() => {
-    sidecar.child.stdin.end();
-    sidecar.child.kill();
+  afterEach(async () => {
+    if (sidecar) {
+      const stopped = new Promise((resolve) => {
+        if (sidecar.child.exitCode !== null || sidecar.child.signalCode !== null) resolve();
+        else sidecar.child.once("close", resolve);
+      });
+      sidecar.child.stdin.end();
+      sidecar.child.kill();
+      await stopped;
+    }
+    if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true });
+    sidecar = undefined;
   });
 
   it("两侧报出同一个 IPC 契约版本", async () => {
@@ -171,16 +230,16 @@ describe("真实 sidecar 往返（不经 mock）", () => {
     expect(begun.phase).toBe("stand");
     expect(await adapter.runCalibration({ action: "cancel" })).toEqual({ phase: "cancelled" });
 
-    // report 已实现（RAY-224 `basic-report`）：没有周期时它给的是一个**错误**
-    // 而不是缺口 —— 两者在契约上是不同的结局，这条断言把它们分开。
+    // 产品环境配置了真实会话目录；请求一个不存在的会话时，实际读取路径
+    // 返回 E-BLE-1021（RAY-345），不是无持久化环境的 E-QLT-5003，也不是能力缺口。
     await expect(adapter.reportFor({ id: "whatever" })).rejects.toMatchObject({
       name: "TerminalFailure",
-      code: "E-QLT-5003",
+      code: "E-BLE-1021",
     });
   });
 
   it("错误带着 sidecar 给的码与动作到达渲染端", async () => {
-    // 走一条真实的短步行：180 s 配置下只走 30 s，有效时长不到 70%，
+    // 走一条真实的短步行：产品预览 60 s 配置下只走 30 s，有效时长不到 70%，
     // 于是 TimedWalk.verdict() 判 invalid，服务端附上 E-QLT-5002。
     // 这条路的错误码与文案全部由 sidecar 推出，渲染端一个字也没写。
     await adapter.call("startSession", { now: 0 });
