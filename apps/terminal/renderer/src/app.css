@@ -907,21 +907,21 @@ body {
 /* 能力缺口（RAY-248）。刻意用 warning 描边而不是 danger：设备没出问题，
    是这条通路还没建好 —— 用 danger 会让操作员去排查一个不存在的故障。 */
 .capability-gap {
-  border: 1px solid var(--color-warning-border, #d9a441);
-  background: var(--color-warning-surface, #fdf6e8);
-  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  border-radius: var(--radius-control);
   padding: var(--space-6, 24px);
 }
 
 .capability-gap__summary {
   font-size: 20px;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--text-primary);
   margin: 0 0 var(--space-3, 12px);
 }
 
 .capability-gap__note {
   font-size: 15px;
-  color: var(--color-text-secondary, #5a5a5a);
+  color: var(--text-secondary);
   margin: 0;
 }
 
@@ -932,15 +932,15 @@ body {
 .verdict-summary__headline {
   font-size: 24px;
   margin: 0 0 var(--space-4, 16px);
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--text-primary);
 }
 
 .verdict-summary[data-overall="indeterminate"] .verdict-summary__headline {
-  color: var(--color-warning-text, #8a6116);
+  color: var(--warning-fg);
 }
 
 .verdict-summary[data-overall="invalid"] .verdict-summary__headline {
-  color: var(--color-danger-text, #a12b2b);
+  color: var(--danger-fg);
 }
 
 .verdict-summary__checks {
@@ -951,7 +951,7 @@ body {
 
 .verdict-summary__checks dt {
   font-size: 13px;
-  color: var(--color-text-secondary, #5a5a5a);
+  color: var(--text-secondary);
 }
 
 .verdict-summary__checks dd {
@@ -965,43 +965,46 @@ body {
 /* 走 mock 时的常驻提示（RAY-248）。一个悄悄用着假数据的窗口与一个连着真后端的
    窗口长得一模一样 —— 而两者的结论完全不能互换。 */
 .mock-banner {
-  background: var(--color-warning-surface, #fdf6e8);
-  border-bottom: 1px solid var(--color-warning-border, #d9a441);
-  color: var(--color-warning-text, #8a6116);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  color: var(--warning-fg);
   font-size: 14px;
   padding: var(--space-2, 8px) var(--space-4, 16px);
   text-align: center;
 }
 
 /* sidecar 不在时的整页接管（RAY-250）。用 danger 而不是 warning：与能力缺口不同，
-   这不是「这条路还没建好」，是「现在什么都做不了」。 */
+   这不是「这条路还没建好」，是「现在什么都做不了」。
+   「整页」是接管内容区，不是盖住整个窗口（RAY-753）：它在文档流里，和 .abort-page 一样
+   排在预览横幅之下 —— 此前是 position: fixed; inset: 0; z-index: 100，连横幅一起盖掉，
+   预览身份在这一屏消失了。顶栏不显示是 TerminalStages 只渲染这一屏的结果，不靠遮盖。 */
 .sidecar-down {
-  position: fixed;
-  inset: 0;
+  min-height: 100vh;
   display: grid;
   place-items: center;
-  background: var(--color-surface, #fff);
+  background: var(--bg-surface);
   padding: var(--space-6, 24px);
-  z-index: 100;
 }
 
 .sidecar-down__panel {
   max-width: 620px;
   text-align: center;
-  border-top: 3px solid var(--color-danger-border, #a12b2b);
+  /* 一道醒目的危险色线：设计系统的 --danger-border 是浅粉描边色，撑不起 3px 的强调线，
+     取 --danger-fg（RAY-753）。 */
+  border-top: 3px solid var(--danger-fg);
   padding-top: var(--space-6, 24px);
 }
 
 .sidecar-down__message {
   font-size: 28px;
   margin: 0 0 var(--space-4, 16px);
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--text-primary);
 }
 
 .sidecar-down__action {
   font-size: 18px;
   margin: 0 0 var(--space-6, 24px);
-  color: var(--color-text-secondary, #5a5a5a);
+  color: var(--text-secondary);
 }
 
 /* RAY-479 左右模块配对 */

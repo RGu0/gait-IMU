@@ -119,9 +119,11 @@ def test_demo_mode_starts_on_a_coarse_clock(tmp_path: Path) -> None:
 # ── 落盘 ────────────────────────────────────────────────────────────────
 
 
-def test_a_real_sensor_session_records_its_clock(tmp_path: Path) -> None:
-    service = TerminalService(
-        source=_RealSensorStub(), session_root=tmp_path, host_clock_resolution=lambda: QPC
+def test_a_real_sensor_session_records_its_clock(tmp_path: Path, calibrated) -> None:
+    service = calibrated(
+        TerminalService(
+            source=_RealSensorStub(), session_root=tmp_path, host_clock_resolution=lambda: QPC
+        )
     )
     assert _call(service, "startSession")["status"] == "ok"
     meta = read_meta(tmp_path / service.session_id)
