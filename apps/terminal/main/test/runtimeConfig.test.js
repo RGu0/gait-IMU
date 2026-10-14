@@ -14,6 +14,7 @@ import {
   DEVICE_SOURCES,
   loadSettings,
   osEnv,
+  readBuildInfo,
   rendererIndex,
   resolveExecutable,
   REQUEST_TIMEOUT_MS,
@@ -67,6 +68,8 @@ describe("sidecarEnv", () => {
 
   it("给出会话目录、设备来源与预览开关", () => {
     expect(sidecarEnv({ settings: { deviceSource: "ble" }, userDataDir })).toEqual({
+      GAIT_APP_VERSION: "",
+      GAIT_BUILD_COMMIT: "",
       GAIT_SESSION_ROOT: path.join(userDataDir, "sessions"),
       GAIT_CONFIG_ROOT: path.join(userDataDir, "config"),
       GAIT_DEVICE_SOURCE: "ble",
@@ -84,10 +87,36 @@ describe("sidecarEnv", () => {
     }
   });
 
+  it("把应用版本与构建提交递给 sidecar —— 「设备与支持」的软件版本由它统一返回（RAY-752）", () => {
+    const env = sidecarEnv({ settings: {}, userDataDir, build: { appVersion: "0.1.0", commit: "375f608" } });
+    expect(env.GAIT_APP_VERSION).toBe("0.1.0");
+    expect(env.GAIT_BUILD_COMMIT).toBe("375f608");
+  });
+
   it("永远不带 GAIT_ACCESS_ROOT —— 预览版不预配置云端", () => {
     for (const deviceSource of [...DEVICE_SOURCES, undefined]) {
       expect(sidecarEnv({ settings: { deviceSource }, userDataDir })).not.toHaveProperty("GAIT_ACCESS_ROOT");
     }
+  });
+});
+
+describe("readBuildInfo", () => {
+  it("读打包流水线写进安装包的提交号", () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, "build-info.json"), JSON.stringify({ commit: "375f608" }));
+    expect(readBuildInfo(dir)).toEqual({ commit: "375f608" });
+  });
+
+  it("开发态没有这个文件：空对象，不报错 —— 软件版本于是写「开发构建」", () => {
+    expect(readBuildInfo(tempDir())).toEqual({});
+  });
+
+  it("文件坏了或字段不对：同样当作没有，不让主进程因此起不来", () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, "build-info.json"), "{not json");
+    expect(readBuildInfo(dir)).toEqual({});
+    fs.writeFileSync(path.join(dir, "build-info.json"), JSON.stringify({ commit: 375 }));
+    expect(readBuildInfo(dir)).toEqual({});
   });
 });
 
@@ -180,6 +209,8 @@ describe("sidecarOptions", () => {
     expect(options.cwd).toBe("/repo");
     expect(options.requestTimeoutMs).toBe(REQUEST_TIMEOUT_MS);
     expect(Object.keys(options.env).sort()).toEqual([
+      "GAIT_APP_VERSION",
+      "GAIT_BUILD_COMMIT",
       "GAIT_CONFIG_ROOT",
       "GAIT_DEVICE_SOURCE",
       "GAIT_PREVIEW",

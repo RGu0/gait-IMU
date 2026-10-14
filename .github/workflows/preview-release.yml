@@ -97,6 +97,17 @@ jobs:
       - name: 构建渲染进程
         run: pnpm --filter @gait/terminal-renderer build
 
+      # 构建信息随包：「设备与支持」的软件版本显示 0.1.0（<提交前 7 位>），让服务方直接对上是哪个
+      # 安装包（RAY-752）。只写提交号；版本号由 app.getVersion() 取。
+      # PR 上 github.sha 是 GitHub 临时造的合并提交，不是分支头；取 PR 头提交，其余触发取 github.sha。
+      - name: 写入构建信息
+        shell: bash
+        env:
+          BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          printf '{"commit":"%s"}\n' "${BUILD_COMMIT::7}" > apps/terminal/main/build-info.json
+          cat apps/terminal/main/build-info.json
+
       # electron / electron-builder 依赖与 preload.cjs 由 RAY-493 electron-shell-boot 引入（已合入）。
       # 守卫保留：它让「Electron 外壳不在」表现为跳过而不是一条看不懂的 electron-builder 报错。
       - name: electron-builder

@@ -22,6 +22,9 @@ files:
   - runtimeConfig.js
   # RAY-224 pdf-export：main.js import 的导出/打印模块。漏掉它，打包态主进程启动即 ERR_MODULE_NOT_FOUND。
   - reportExport.js
+  # RAY-752：打包流水线写入的构建信息（提交号），「设备与支持」的软件版本用。不进仓库；
+  # 本机打包没有它时，安装包里的软件版本显示「开发构建」。
+  - build-info.json
   - package.json
   - from: ../renderer/dist
     to: renderer

@@ -13,6 +13,8 @@ dist/
 # dist/ 覆盖（uv build 也写 dist/）；这里补上它的中间目录与 electron-builder 的输出。
 build/pyinstaller/
 apps/terminal/main/release/
+# 打包流水线写入的构建信息（RAY-752），只随安装包走。
+apps/terminal/main/build-info.json
 
 # governance context link (device-local)
 .project-context

@@ -35,6 +35,8 @@ export const DEVICE_SUPPORT = {
     { side: "left", maskedAddress: "…:9A:4C", batteryPercent: 82, factoryCalibrated: false },
     { side: "right", maskedAddress: "…:9A:51", batteryPercent: 76, factoryCalibrated: false },
   ],
+  // RAY-752：sidecar 只给它知道的两项；服务电话、终端编号不出现。
+  support: { algoVersion: "gait-contract-1.2", appVersion: "0.1.0（375f608）" },
   ipcContractVersion: V,
 };
 

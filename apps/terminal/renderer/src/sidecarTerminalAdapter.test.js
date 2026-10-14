@@ -124,6 +124,20 @@ describe("数据形状翻成视图形状", () => {
     expect(info.devices.modules[0]).toMatchObject({ side: "left", firmware: "未记录", factoryCalibrated: false });
     expect(Object.values(info.support).every((v) => typeof v === "string" && v.length > 0)).toBe(true);
   });
+
+  it("软件版本、算法版本照 sidecar 给的显示；它不给的两项如实写「未配置」（RAY-752）", async () => {
+    const { adapter } = adapterWith({ deviceSupport: DEVICE_SUPPORT });
+    const { support } = await adapter.deviceSupport();
+    expect(support).toEqual({
+      phone: "未配置",
+      terminalId: "未配置",
+      appVersion: "0.1.0（375f608）",
+      algoVersion: "gait-contract-1.2",
+    });
+    // 旧 sidecar（没有 support 块）：四项都「未配置」，不编造。
+    const { adapter: old } = adapterWith({ deviceSupport: { modules: DEVICE_SUPPORT.modules } });
+    expect(Object.values((await old.deviceSupport()).support)).toEqual(["未配置", "未配置", "未配置", "未配置"]);
+  });
 });
 
 describe("会话", () => {
