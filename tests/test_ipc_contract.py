@@ -45,11 +45,26 @@ def test_ipc_version_is_separate_from_the_data_contract() -> None:
     assert "ipc_contract_version" in described
 
 
-def test_every_response_carries_the_version() -> None:
+@pytest.fixture
+def a_gap(monkeypatch) -> str:
+    """一份仍有缺口的契约，供「第三种结局」本身的测试用。
+
+    RAY-208 接通后真实契约里**一个缺口都不剩了**，而 `unimplemented()` 会拒绝为已实现
+    的能力出境（契约与实现必须同时翻面）。这条结局的形状仍要有人守 —— 下一个还没接通的
+    能力会走同一条路 —— 所以这里把 `calibration` 临时翻回缺口，形状照旧验。
+    """
+    patched = json.loads(json.dumps(contract()))
+    patched["capabilities"]["calibration"]["implemented"] = False
+    monkeypatch.setattr("gait.app.errors.contract", lambda: patched)
+    monkeypatch.setattr("gait.app.protocol.contract", lambda: patched)
+    return "calibration"
+
+
+def test_every_response_carries_the_version(a_gap: str) -> None:
     for message in (
         protocol.ok("1", {"a": 1}),
         protocol.error("2", TerminalError("E-BLE-1001", "未连接。", "请重连。")),
-        protocol.unimplemented("3", "calibration"),
+        protocol.unimplemented("3", a_gap),
         protocol.event("session.tick", 1, {"remainingSeconds": 3}),
     ):
         assert message["v"] == protocol.IPC_CONTRACT_VERSION
@@ -144,8 +159,8 @@ def test_an_implemented_capability_is_no_longer_a_gap() -> None:
         protocol.unimplemented("1", "report")
 
 
-def test_unimplemented_is_neither_ok_nor_error() -> None:
-    message = protocol.unimplemented("1", "calibration")
+def test_unimplemented_is_neither_ok_nor_error(a_gap: str) -> None:
+    message = protocol.unimplemented("1", a_gap)
     assert message["status"] == protocol.STATUS_UNIMPLEMENTED
     assert "result" not in message and "error" not in message
     assert message["unimplemented"]["issue"] == "RAY-208"
@@ -445,29 +460,22 @@ def test_create_subject_uses_the_real_uuid_source() -> None:
     assert result["consentValid"] is False
 
 
-@pytest.mark.parametrize(
-    ("method", "capability", "issue"),
-    [
-        ("runCalibration", "calibration", "RAY-208"),
-    ],
-)
-def test_gaps_are_visible_not_faked(
-    method: str, capability: str, issue: str | None
-) -> None:
-    """**仍然**是缺口的那些必须以第三种结局出境（既不是成功也不是错误）。
+def test_calibration_is_no_longer_a_gap() -> None:
+    """RAY-208 接通后它必须**停止**报缺口 —— 与 `lookupSubject` / `login` 同型。
 
-    返回一个看起来正常的假值会让「流程已端到端验证」变成一句空话 —— 那正是这条
-    测试要挡住的事。
-
-    这份名单是**会缩短的**：`report` 在 RAY-345 接通后移出，`lookupSubject` 在
-    RAY-322 接通后移出，`login` 在 RAY-323 接通后移出（各见下面的「不再是缺口」）。
-    名单空掉那天这条测试就该删，而不是留着一个空 parametrize 假装还在守什么 ——
-    **现在只剩 `calibration` 一条了**。
+    缺口名单至此清空（`report` → RAY-345、`lookupSubject` → RAY-322、`login` →
+    RAY-323、`runCalibration` → RAY-208），原先那条「缺口必须以第三种结局出境」的
+    parametrize 测试按它自己的约定随之删除。第三种结局本身仍由 `protocol.unimplemented`
+    的测试守着。
     """
-    response = TerminalService().handle({"id": "1", "method": method})
-    assert response["status"] == protocol.STATUS_UNIMPLEMENTED
-    assert response["unimplemented"]["capability"] == capability
-    assert response["unimplemented"]["issue"] == issue
+    assert contract()["capabilities"]["calibration"]["implemented"] is True
+    service = TerminalService(source=StubDeviceSource())
+    response = service.handle(
+        {"id": "1", "method": "runCalibration", "params": {"action": "begin", "fresh": True}}
+    )
+    assert response["status"] == protocol.STATUS_OK
+    assert response["result"]["phase"] == "stand"
+    service.handle({"id": "2", "method": "runCalibration", "params": {"action": "cancel"}})
 
 
 def test_lookup_subject_is_no_longer_a_gap() -> None:
@@ -512,13 +520,14 @@ def test_logout_is_registered_and_answers() -> None:
 def test_serve_round_trips_json_lines() -> None:
     stdin = io.StringIO(
         '{"id":"1","method":"describe","params":{}}\n'
-        '{"id":"2","method":"runCalibration","params":{}}\n'
+        '{"id":"2","method":"runCalibration","params":{"action":"cancel"}}\n'
     )
     stdout = io.StringIO()
     serve(stdin, stdout, TerminalService(source=StubDeviceSource()))
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert lines[0]["status"] == "ok"
-    assert lines[1]["status"] == protocol.STATUS_UNIMPLEMENTED
+    assert lines[1]["status"] == "ok"
+    assert lines[1]["result"] == {"phase": "cancelled"}
 
 
 def test_serve_reports_protocol_failures_without_inventing_a_device_code() -> None:

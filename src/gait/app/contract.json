@@ -58,6 +58,9 @@
     "E-BLE-1031": "配对时未能唯一识别模块",
     "E-BLE-1040": "本机计时精度不足以给 200 Hz 到达时刻计时",
     "E-CAL-3001": "出厂标定参数缺失",
+    "E-CAL-3002": "会话标定时受试者没有站稳（静立或走完后站定）",
+    "E-CAL-3003": "会话标定的直线行走段判不出足部前向",
+    "E-CAL-3004": "会话标定时没有收到足够的模块数据",
     "E-NET-6020": "本机构档案库中没有这个编号",
     "E-NET-6022": "云端档案库连不上",
     "E-NET-6023": "云端档案库返回了无法解析的响应",
@@ -68,7 +71,8 @@
     "E-NET-6043": "本终端尚未配置云端访问方式，无法验证机构账号",
     "E-NET-6044": "登录已过期，需要重新登录",
     "E-QLT-5002": "有效步行时长低于配置的 70%",
-    "E-QLT-5003": "会话完整性不足，双足指标不可算"
+    "E-QLT-5003": "会话完整性不足，双足指标不可算",
+    "E-WEAR-2001": "模块松动：走动后重力方向相对标定值偏离超过 5°"
   },
   "methods": [
     "bindFoot",
@@ -96,9 +100,9 @@
   ],
   "capabilities": {
     "calibration": {
-      "implemented": false,
+      "implemented": true,
       "issue": "RAY-208",
-      "summary": "会话标定（静立 5 s 零偏刷新 + 直线走 10 步安装角/松动判定）尚未接入 sidecar：gait/calib/ 已有实现（store.py 出厂参数库——自检 E-CAL-3001 据此判定；still.py / walk.py / accel.py），但会话标定流程还没接到 sidecar 的 runCalibration"
+      "summary": "P-07 会话标定已接通（gait/app/sessioncalib.py → gait/calib/）：runCalibration 的 begin / status / cancel 三个动作，sidecar 按收到的样本推进静立 5 s（零偏 + 重力方向）→ 直线走 10 步（安装旋转）→ 走完站定 3 s（松动 > 5° 阻断）。结果与逐步耗时进会话元数据 calib_snapshot；**尚未用于分析链**，报告仍注明「未使用标定参数」。回放旧会话的数据源没有标定片段，如实报 unavailable"
     },
     "report": {
       "implemented": true,

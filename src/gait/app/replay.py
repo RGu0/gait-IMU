@@ -36,7 +36,7 @@ from wt901.protocol.units import (
 )
 from wt901.recording import read_recording
 
-from gait.app.sources import StubDeviceSource
+from gait.app.sources import CalibrationUnavailable, StubDeviceSource
 from gait.io.session import raw_path
 from gait.validate.synthetic import NoiseModel, WalkSpec, generate_dual_walk
 
@@ -75,38 +75,76 @@ def to_counts(acc: np.ndarray, gyr: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     )
 
 
-def frames_from_synthetic(
-    duration_s: float, seed: int = 0, *, chunk_frames: int = DEFAULT_CHUNK_FRAMES
-) -> Chunks:
-    """一段合成双足步行，按 200 Hz 打成 0x55 0x61 帧、再分段。
+def _chunked(acc: np.ndarray, gyr: np.ndarray, chunk_frames: int) -> list[Chunk]:
+    """SI 样本 → 0x55 0x61 帧 → 分段。
 
     每段的 `t` 取段内**最后一帧**的时刻：字节是攒够一段才到的，取首帧时刻会让回放
     提前把还没「采到」的样本推出去。
     """
+    acc_counts, gyr_counts = to_counts(acc, gyr)
+    frames = [
+        b"\x55\x61" + struct.pack("<9h", *acc_counts[index], *gyr_counts[index], 0, 0, 0)
+        for index in range(len(acc_counts))
+    ]
+    return [
+        (
+            round((min(start + chunk_frames, len(frames)) - 1) / SAMPLE_RATE_HZ, 6),
+            b"".join(frames[start : start + chunk_frames]),
+        )
+        for start in range(0, len(frames), chunk_frames)
+    ]
+
+
+def _noise(seed: int) -> NoiseModel:
+    return NoiseModel(
+        accel_density=ACCEL_NOISE_DENSITY,
+        gyro_density=GYRO_NOISE_DENSITY,
+        seed=seed,
+    )
+
+
+def frames_from_synthetic(
+    duration_s: float, seed: int = 0, *, chunk_frames: int = DEFAULT_CHUNK_FRAMES
+) -> Chunks:
+    """一段合成双足步行，按 200 Hz 打成 0x55 0x61 帧、再分段。"""
+    if chunk_frames < 1:
+        raise ValueError(f"chunk_frames 至少为 1，收到 {chunk_frames}")
+    dual = generate_dual_walk(WalkSpec(duration_s=float(duration_s)), noise=_noise(seed))
+    return {
+        label: _chunked(series.acc, series.gyr, chunk_frames)
+        for label, (series, _truth) in dual.items()
+    }
+
+
+#: P-07 演示片段（RAY-208）：静立 → 直线走 → 站定。静立与站定都留出余量 —— sidecar
+#: 要在里面**找得到** 5 s / 2 s 的静止，而不是恰好 5 s / 2 s 的样本。
+CALIBRATION_STAND_S = 7.0
+CALIBRATION_WALK_S = 8.0
+CALIBRATION_SETTLE_S = 6.0
+
+
+def calibration_clip(seed: int = 0, *, chunk_frames: int = DEFAULT_CHUNK_FRAMES) -> Chunks:
+    """合成的 P-07 标定片段。
+
+    站定段取自同一段合成数据的起步前静止：它的重力方向与标定基准一致，也就是「没有
+    松动」。合成器没有「走完后站定」这一段，拼接处的那一下跳变在演示里无害 —— 它落在
+    sidecar 找静止窗口时会跳过的那一侧。
+    """
     if chunk_frames < 1:
         raise ValueError(f"chunk_frames 至少为 1，收到 {chunk_frames}")
     dual = generate_dual_walk(
-        WalkSpec(duration_s=float(duration_s)),
-        noise=NoiseModel(
-            accel_density=ACCEL_NOISE_DENSITY,
-            gyro_density=GYRO_NOISE_DENSITY,
-            seed=seed,
+        WalkSpec(
+            duration_s=CALIBRATION_STAND_S + CALIBRATION_WALK_S,
+            still_lead_s=CALIBRATION_STAND_S,
         ),
+        noise=_noise(seed),
     )
+    settle = round(CALIBRATION_SETTLE_S * SAMPLE_RATE_HZ)
     chunks: Chunks = {}
     for label, (series, _truth) in dual.items():
-        acc, gyr = to_counts(series.acc, series.gyr)
-        frames = [
-            b"\x55\x61" + struct.pack("<9h", *acc[index], *gyr[index], 0, 0, 0)
-            for index in range(len(acc))
-        ]
-        chunks[label] = [
-            (
-                round((min(start + chunk_frames, len(frames)) - 1) / SAMPLE_RATE_HZ, 6),
-                b"".join(frames[start : start + chunk_frames]),
-            )
-            for start in range(0, len(frames), chunk_frames)
-        ]
+        acc = np.concatenate([series.acc, series.acc[:settle]])
+        gyr = np.concatenate([series.gyr, series.gyr[:settle]])
+        chunks[label] = _chunked(acc, gyr, chunk_frames)
     return chunks
 
 
@@ -141,11 +179,15 @@ class ReplayDeviceSource(StubDeviceSource):
     #: 进程入口不必为它阻塞，第一条 `describe` 也不必等。
     loader: Callable[[], Chunks] | None = None
     label: str = "replay"
+    #: P-07 标定时推的片段（RAY-208）。`None` 表示这个源**没有**标定片段：回放一份旧
+    #: 会话时，它开头那几秒不是为静立准备的，拿来标定只会得到一个莫名其妙的失败。
+    calibration_loader: Callable[[], Chunks] | None = None
     speed: float = 1.0
     clock: Callable[[], float] = time.monotonic
     _ready: threading.Event = field(default_factory=threading.Event)
     _stream_started_at: float | None = None
     _stream_seconds: float = 0.0
+    _calibration_chunks: Chunks | None = None
 
     def __post_init__(self) -> None:
         if self.speed <= 0:
@@ -165,13 +207,28 @@ class ReplayDeviceSource(StubDeviceSource):
         threading.Thread(target=load, name="gait-replay-load", daemon=True).start()
 
     def begin_stream(self) -> None:
+        self._pump(lambda: self.chunks, wait_ready=True)
+
+    def begin_calibration_stream(self) -> None:
+        """推 P-07 的标定片段。没有片段时如实说没有，不拿会话数据去凑。"""
+        if self.calibration_loader is None:
+            raise CalibrationUnavailable(
+                f"「{self.label}」数据源没有标定片段，这一步做不了会话标定。"
+            )
+        if self._calibration_chunks is None:
+            self._calibration_chunks = self.calibration_loader()
+        chunks = self._calibration_chunks
+        self._pump(lambda: chunks, wait_ready=False)
+
+    def _pump(self, chunks_of: Callable[[], Chunks], *, wait_ready: bool) -> None:
         if self._feeder is not None:
             return
         self._stop.clear()
         self.transports()
 
         def pump() -> None:
-            self._ready.wait()
+            if wait_ready:
+                self._ready.wait()
             # 只按 `(t, label)` 排，靠排序的稳定性保住每只脚的录制顺序（RAY-538）。
             # 并列的 t 很常见：Windows + Python 3.12 的 monotonic 粒度约 15.6 ms，
             # 一个刻度里能录下十几段。键里带上 `data` 时，并列段按载荷字节重排，
@@ -179,7 +236,7 @@ class ReplayDeviceSource(StubDeviceSource):
             timeline = sorted(
                 (
                     (t, label, data)
-                    for label, items in self.chunks.items()
+                    for label, items in chunks_of().items()
                     for t, data in items
                 ),
                 key=lambda item: (item[0], item[1]),

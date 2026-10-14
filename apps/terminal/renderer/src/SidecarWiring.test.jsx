@@ -12,6 +12,7 @@ import { ErrorBoundary } from "./ErrorBoundary.jsx";
 import { TerminalApp } from "./TerminalApp.jsx";
 import { createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 import {
+  CALIBRATION_PASSED,
   CREATE_SUBJECT,
   PREFLIGHT,
   PREFLIGHT_WAIVED,
@@ -31,6 +32,7 @@ function sidecar(overrides = {}, { events } = {}) {
     listRecords: RECORDS,
     recheckDevices: SNAPSHOT,
     createSubject: CREATE_SUBJECT,
+    runCalibration: CALIBRATION_PASSED,
     runPreflight: PREFLIGHT_WAIVED,
     startSession: START_SESSION,
     stopSession: STOP_SESSION,

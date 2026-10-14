@@ -240,6 +240,26 @@ export const INVALID_RESULT = Object.freeze({
  */
 let preflightRuns = 0;
 let calibrationRuns = 0;
+let mockCalibration = null;
+
+/** What the sidecar's `runCalibration` returns, built from the mock's state. */
+function calibrationStatus() {
+  const { phase, ticks } = mockCalibration;
+  const status = { phase, attempt: calibrationRuns, standTotal: 5, walkTotal: 10, settleTotal: 3 };
+  if (phase === "stand") status.standSeconds = ticks;
+  if (phase === "walk") status.walkSteps = ticks * 2;
+  if (phase === "settle") status.settleSeconds = ticks;
+  if (phase === "failed") {
+    status.failure = {
+      reason: "loose",
+      code: "E-WEAR-2001",
+      message: "右脚的模块有些松动，请绑紧后重试。",
+      action: "绑紧后点「重试」，静立与行走会重新做一遍。",
+    };
+  }
+  if (phase === "passed") status.chainSeconds = 31.0;
+  return status;
+}
 
 const PREFLIGHT_ITEMS = [
   { id: "link-left", label: "左模块连接", passHint: "已连接" },
@@ -387,16 +407,34 @@ export const mockTerminalAdapter = Object.freeze({
   },
 
   /**
-   * Fails once, then passes — same reasoning as runPreflight: the failure
-   * screen is the one nobody looks at unless the mock puts it in front of them,
-   * and a retry that visibly changes the outcome is the only way to tell a
-   * working retry from a re-render.
+   * P-07 session calibration (RAY-208), same shape as the sidecar: `begin`,
+   * then `status` polls that advance stand → walk → settle → verdict.
+   *
+   * The very first attempt fails as "loose", then it passes — same reasoning as
+   * runPreflight: the failure screen is the one nobody looks at unless the mock
+   * puts it in front of them, and a retry that visibly changes the outcome is
+   * the only way to tell a working retry from a re-render.
    */
-  async runCalibration() {
-    calibrationRuns += 1;
-    return calibrationRuns === 1
-      ? { ok: false, reason: "loose" }
-      : { ok: true };
+  async runCalibration({ action } = {}) {
+    if (action === "cancel") {
+      mockCalibration = null;
+      return { phase: "cancelled" };
+    }
+    if (action === "begin") {
+      calibrationRuns += 1;
+      mockCalibration = { phase: "stand", ticks: 0, failing: calibrationRuns === 1 };
+      return calibrationStatus();
+    }
+    if (!mockCalibration) throw new Error("runCalibration status 之前需要先 begin");
+    const state = mockCalibration;
+    state.ticks += 1;
+    const limits = { stand: 5, walk: 5, settle: 3 };
+    if (state.phase in limits && state.ticks >= limits[state.phase]) {
+      const next = { stand: "walk", walk: "settle", settle: state.failing ? "failed" : "passed" };
+      state.phase = next[state.phase];
+      state.ticks = 0;
+    }
+    return calibrationStatus();
   },
 
   async runPreflight() {

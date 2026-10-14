@@ -150,17 +150,14 @@ describe("能力缺口", () => {
     // 上一版这里把「它是缺口」当成事实钉住，于是能力实现的那天变红 —— 那是对的，
     // 红了就改。这一条**每次翻面都会红一次**，那正是它的用处：契约与实现必须
     // 同时翻面，不能一边好了另一边还在报坑。
-    for (const name of ["report", "upload-transport", "subject-directory", "operator-auth"]) {
+    for (const name of ["report", "upload-transport", "subject-directory", "operator-auth", "calibration"]) {
       expect(capabilityGap(name), name).toBeNull();
       expect(CAPABILITIES[name].implemented, name).toBe(true);
     }
   });
 
-  it("仍是缺口的各自指向认领它的 Issue", () => {
-    // 名单只剩一条了：`operator-auth` 在 RAY-323 接通后移出（见上一条断言）。
-    // 空掉那天这条测试就该删，而不是留着一个空的 it 假装还在守什么。
-    expect(capabilityGap("calibration").issue).toBe("RAY-208");
-  });
+  // 「仍是缺口的各自指向认领它的 Issue」随 RAY-208 删除：名单空了，按它自己的约定
+  // 不留一个空的 it 假装还在守什么。下一个缺口登记进来时，下面这条照样管它的归属。
 
   it("每个缺口都声明了归属，且非空的号长得像 Issue 号", () => {
     // `issue` 允许为 null —— 那表示还没有 Issue 认领，界面会照实说，

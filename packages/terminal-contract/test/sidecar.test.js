@@ -164,9 +164,12 @@ describe("真实 sidecar 往返（不经 mock）", () => {
     expect(result.overall).toBe("indeterminate");
   });
 
-  it("标定仍以缺口出境，报告则已实现", async () => {
-    const calibration = await adapter.runCalibration();
-    expect(adapter.gapOf(calibration)).toMatchObject({ capability: "calibration", issue: "RAY-208" });
+  it("标定与报告都已实现：标定按动作往返，报告没有周期时给错误而不是缺口", async () => {
+    // RAY-208：标定不再以缺口出境。这里的 sidecar 是无数据的 stub，开头一拍只能停在静立。
+    const begun = await adapter.runCalibration({ action: "begin", fresh: true });
+    expect(adapter.gapOf(begun)).toBeNull();
+    expect(begun.phase).toBe("stand");
+    expect(await adapter.runCalibration({ action: "cancel" })).toEqual({ phase: "cancelled" });
 
     // report 已实现（RAY-224 `basic-report`）：没有周期时它给的是一个**错误**
     // 而不是缺口 —— 两者在契约上是不同的结局，这条断言把它们分开。

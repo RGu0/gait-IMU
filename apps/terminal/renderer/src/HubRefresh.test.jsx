@@ -12,6 +12,7 @@ import { REPORT } from "./mockTerminalAdapter.js";
 import { TerminalApp, recheckFailureMessage } from "./TerminalApp.jsx";
 import { SidecarDown, createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 import {
+  CALIBRATION_PASSED,
   CREATE_SUBJECT,
   PREFLIGHT_WAIVED,
   SESSION_RESULT_READY,
@@ -44,6 +45,7 @@ function countingSidecar(overrides = {}) {
     listRecords: () => Array.from({ length: state.sessions }, (_, i) => recordAt(i + 1)),
     recheckDevices: SNAPSHOT,
     createSubject: CREATE_SUBJECT,
+    runCalibration: CALIBRATION_PASSED,
     runPreflight: PREFLIGHT_WAIVED,
     startSession: START_SESSION,
     stopSession: () => {

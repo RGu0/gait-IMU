@@ -55,8 +55,8 @@ def test_unknowable_fields_say_pending_not_zero(tmp_path: Path) -> None:
     meta = read_meta(session_directory(tmp_path, session_id))
     assert meta.integrity_report["state"] == "pending"
     assert meta.sync_report["state"] == "pending"
-    # 标定还没实现（RAY-208），元数据也照实说，而不是编一组标定参数。
-    assert meta.calib_snapshot == {"state": "unimplemented", "issue": "RAY-208"}
+    # 这场没走 P-07 标定就开了检测，元数据照实说「没做」，而不是编一组标定参数。
+    assert meta.calib_snapshot == {"state": "not_run", "issue": "RAY-208"}
 
 
 def test_a_stub_session_is_self_identifying_on_disk(tmp_path: Path) -> None:
