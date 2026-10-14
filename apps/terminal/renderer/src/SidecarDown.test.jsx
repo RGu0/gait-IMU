@@ -42,6 +42,20 @@ describe("接管屏", () => {
   });
 });
 
+describe("接管的是内容区，不是整个窗口（RAY-753）", () => {
+  // 预览身份不能在任何一屏消失。横幅一直在 TerminalApp 外层渲染，此前是被接管层的
+  // position: fixed; inset: 0; z-index: 100 盖住的 —— jsdom 不排版，所以分两半证：
+  // 这里证横幅确实在场；接管层的样式没有「盖住整个窗口」的手段，由 test/cssTokens.test.js
+  // 读 app.css 证（src/ 下禁用 node:fs）。
+  it("预览版下 sidecar 不可用时，横幅与接管屏同时在场", () => {
+    render(
+      <TerminalApp preview adapter={mockTerminalAdapter} lifecycle={lifecycleAt("restarting", { ...DOWN, recoverable: true })} />,
+    );
+    expect(screen.getByRole("note", { name: "预览版提示" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+});
+
 describe("接管发生在所有其他屏之前", () => {
   it("sidecar 不可用时盖住工作台", () => {
     render(
