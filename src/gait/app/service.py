@@ -153,6 +153,26 @@ class PreviewPolicy:
 
 
 
+#: 算法版本：会话元数据（报告读它）与「设备与支持」显示的是同一个值，只在这里拼一次
+#: （RAY-752 —— 此前设备页恒显示「未配置」，与报告页的 gait-contract-1.2 自相矛盾）。
+ALGO_VERSION = f"gait-contract-{CONTRACT_VERSION}"
+
+
+def app_version_label(version: str | None, commit: str | None) -> str | None:
+    """「软件版本」怎么写：`0.1.0（375f608）`，没有构建提交就是 `0.1.0（开发构建）`。
+
+    版本号由 Electron 主进程给（`GAIT_APP_VERSION`），提交号由打包流水线写进安装包
+    （`GAIT_BUILD_COMMIT`）。带提交号是为了让服务方直接对上是哪一个安装包；开发态没有
+    它就如实写「开发构建」，不编一个。主进程没给版本（比如 CLI 直接起 sidecar）就返回
+    None —— 渲染端那时显示「未配置」，也是实话。
+    """
+    version = (version or "").strip()
+    if not version:
+        return None
+    commit = (commit or "").strip()[:7]
+    return f"{version}（{commit or '开发构建'}）"
+
+
 class TerminalService:
     """一次终端会话的服务端状态。"""
 
@@ -170,11 +190,15 @@ class TerminalService:
         bindings: BindingStore | None = None,
         host_clock_resolution: Callable[[], float] | None = None,
         calibration_clock: Callable[[], float] | None = None,
+        app_version: str | None = None,
+        build_commit: str | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
         #: 本机 `time.monotonic()` 的分辨率从哪来（RAY-545）。测试注入固定值；生产取
         #: `hostclock.effective_resolution`（申报值与实测值中较粗的那个）。
         self._host_clock_resolution = host_clock_resolution or hostclock.effective_resolution
+        #: 「设备与支持」的软件版本（RAY-752）。见 `app_version_label`。
+        self._app_version = app_version_label(app_version, build_commit)
         #: 左右绑定的设备级存放处（RAY-479）。没给就借设备源的那一个（同一个目录，
         #: 两边都无状态地读盘）；两边都没有就是「本机没配置」，如实报 unavailable。
         self.bindings = bindings or getattr(self.source, "bindings", None)
@@ -730,7 +754,7 @@ class TerminalService:
                 "reason": "配置下发快照在会话结束时补齐",
             },
             calib_snapshot=self._calib_snapshot(),
-            algo_version=f"gait-contract-{CONTRACT_VERSION}",
+            algo_version=ALGO_VERSION,
             algo_params=self.config.snapshot()
             if hasattr(self.config, "snapshot")
             else {"duration_s": self.config.duration_s},
@@ -1001,8 +1025,14 @@ class TerminalService:
         return records
 
     def _do_deviceSupport(self, _: dict[str, Any]) -> dict[str, Any]:
+        # 只给知道的：服务电话、终端编号在 Preview 没有配置来源，不出现在这里，渲染端照实
+        # 写「未配置」；软件版本主进程没给时同理（RAY-752）。
+        support: dict[str, str] = {"algoVersion": ALGO_VERSION}
+        if self._app_version is not None:
+            support["appVersion"] = self._app_version
         return {
             "modules": self._modules_with_calibration(),
+            "support": support,
             "ipcContractVersion": protocol.IPC_CONTRACT_VERSION,
         }
 
@@ -1364,7 +1394,7 @@ class TerminalService:
             subject_label=str(params.get("subjectLabel") or "未提供"),
             assessed_at=_local_date(meta.created_at if meta is not None else None),
             duration_s=_int_or(protocol.get("duration_s"), self.config.duration_s),
-            algo_version=f"gait-contract-{CONTRACT_VERSION}",
+            algo_version=ALGO_VERSION,
             protocol_version=str(self.config.version),
             # 从**那一次**会话的 meta 读（RAY-532）。原先取进程里的 `self.walk`：重开
             # 历史报告时它是 None，于是写成「0 秒（0%）」；进程里另有一次步行时又会
