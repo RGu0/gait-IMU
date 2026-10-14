@@ -14,6 +14,8 @@ from gait.app.replay import ReplayDeviceSource, calibration_clip
 from gait.app.service import CALIBRATION_ADMITTED, TerminalService
 from gait.app.sessioncalib import STAND_TIMEOUT_S, CalibrationRun
 from gait.app.sources import StubDeviceSource
+from gait.cloud.operator import TicketStore
+from gait.cloud.tenancy import InMemorySecretStore
 from gait.io.session import list_sessions, read_meta, session_directory
 
 #: 与 `test_session_calibration.JARGON` 同一份词表。
@@ -65,7 +67,14 @@ def _calibrate(service: TerminalService, timeout: float = 30.0) -> dict:
 
 def _assert_refused_without_side_effects(service: TerminalService, tmp_path: Path) -> None:
     sessions_before = list_sessions(tmp_path)
-    response = _call(service, "startSession", now=0.0)
+    before = (service._subject_uuid, service._wear_confirmation, service.operator)
+    response = _call(
+        service,
+        "startSession",
+        now=0.0,
+        subjectUuid="e8e02054-48ff-402d-ab03-687b57f9140f",
+        wearConfirmation={"result": "pass", "confirmedAt": "2026-10-13T12:00:00+00:00"},
+    )
     assert response["status"] == "error", response
     assert response["error"]["code"] == "E-CAL-3005"
     # 拒绝发生在任何状态变更之前：不建目录、不写 meta、不包传输、不开会话。
@@ -74,6 +83,8 @@ def _assert_refused_without_side_effects(service: TerminalService, tmp_path: Pat
     assert service.session_id is None
     assert service.walk is None
     assert not service.session_running
+    # 受试者、左右确认、操作员都没被这次请求改动。
+    assert (service._subject_uuid, service._wear_confirmation, service.operator) == before
 
 
 # ── 拦 ──────────────────────────────────────────────────────────────────
@@ -189,3 +200,25 @@ def test_the_refusal_is_registered_and_speaks_in_actions(tmp_path: Path) -> None
         for word in JARGON:
             assert word not in text, word
 
+
+
+# ── 三道闸的先后：登录 → 主机时钟 → 标定 ─────────────────────────────────
+
+
+def test_an_expired_login_is_reported_before_the_missing_calibration(tmp_path: Path) -> None:
+    """登录过期又没标定：先说登录。标定闸挪到登录闸前面时这条会红。"""
+    service = TerminalService(
+        source=_source(),
+        session_root=tmp_path,
+        host_clock_resolution=lambda: FINE_CLOCK,
+        tickets=TicketStore(InMemorySecretStore()),
+    )
+    assert _call(service, "startSession", now=0.0)["error"]["code"] == "E-NET-6044"
+
+
+def test_a_coarse_clock_is_reported_before_the_missing_calibration(tmp_path: Path) -> None:
+    """时钟不够细又没标定：先说时钟 —— 时钟不对，标定了也采不出可信的数。"""
+    service = TerminalService(
+        source=_source(), session_root=tmp_path, host_clock_resolution=lambda: 0.0156
+    )
+    assert _call(service, "startSession", now=0.0)["error"]["code"] == "E-BLE-1040"
