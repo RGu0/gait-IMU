@@ -629,6 +629,13 @@ class TerminalService:
             clock = self._host_clock()
             if not clock["adequate"]:
                 return _host_clock_error(clock)
+            # 会话标定没过就不开（RAY-754）。P-07 的标定屏不通过就不往下走，但那是给人看的门；
+            # 绕过界面的调用方（旧渲染端、脚本、以后新加的入口）只有这里拦得住。
+            # 放行 `passed`（含重测沿用，不限时效与次数）与 `unavailable`（数据源如实说了
+            # 做不了）；其余 —— 没做、没过、做到一半 —— 一律拒绝。只对真实传感器设闸：
+            # 演示与回放的数据不是实测，拦它们只会挡住流程本身（用户 2026-10-13 裁定）。
+            if self._calib_state() not in CALIBRATION_ADMITTED:
+                return _calibration_missing_error()
         # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
         wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
         now = float(params.get("now", 0.0))
@@ -1271,6 +1278,17 @@ class TerminalService:
         if self.capture is None:
             self.loop.stop()
 
+    def _calib_state(self) -> str:
+        """本次标定的状态，与 `_calib_snapshot()["state"]` 同一取值，但不拼整份快照。
+
+        还在采的标定（`stand` / `walk` / `settle`）照实返回 —— 它不在放行集合里。
+        """
+        if self._session_calib is not None:
+            return self._session_calib.phase
+        if self._calib_unavailable is not None:
+            return "unavailable"
+        return "not_run"
+
     def _calib_snapshot(self) -> dict[str, Any]:
         """`SessionMeta.calib_snapshot`。形状见《05 数据格式规范》§3.5。
 
@@ -1700,6 +1718,19 @@ class TerminalService:
             "hint": pass_hint if passed else None,
             "error": None if passed else fail.snapshot(),
         }
+
+
+#: 真实传感器下 `startSession` 放行的标定状态（RAY-754）。
+CALIBRATION_ADMITTED: frozenset[str] = frozenset({"passed", "unavailable"})
+
+
+def _calibration_missing_error() -> TerminalError:
+    """没过会话标定就开检测。只会在绕过 P-07 标定屏时出现 —— 界面本身走不到这里。"""
+    return TerminalError(
+        code="E-CAL-3005",
+        message="这次佩戴还没有完成标定，不能开始检测。",
+        action="请回到「标定」一步，按提示让受试者静立、直线走 10 步并站定，通过后再开始检测。",
+    )
 
 
 def _host_clock_error(clock: dict[str, Any]) -> TerminalError:
