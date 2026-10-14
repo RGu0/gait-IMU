@@ -28,11 +28,22 @@ class _RealSensor(ReplayDeviceSource):
 
     def identify_for_binding(self, foot: str, *, exclude=None) -> DeviceIdentity:
         if self.identify_fails:
-            raise IdentifyFailure("同时开着两台模块，认不出要配的是哪一台。", "请只打开要配对的那一台。")
+            raise IdentifyFailure(
+                "同时开着两台模块，认不出要配的是哪一台。", "请只打开要配对的那一台。"
+            )
         return DeviceIdentity(kind="mac", value=NEW_LEFT, provenance=MAC_PROVENANCE)
 
 
-def _service(tmp_path: Path) -> tuple[TerminalService, _RealSensor]:
+class _UnwritableStore(BindingStore):
+    """磁盘写不进去的绑定存放处：识别成功了，保存失败。"""
+
+    def bind(self, foot, identity):
+        raise OSError("磁盘只读")
+
+
+def _service(
+    tmp_path: Path, *, store: BindingStore | None = None
+) -> tuple[TerminalService, _RealSensor]:
     source = _RealSensor(
         chunks={"L": [], "R": []},
         calibration_loader=calibration_clip,
@@ -42,7 +53,7 @@ def _service(tmp_path: Path) -> tuple[TerminalService, _RealSensor]:
     service = TerminalService(
         source=source,
         session_root=tmp_path / "sessions",
-        bindings=BindingStore(tmp_path / "config"),
+        bindings=store or BindingStore(tmp_path / "config"),
         host_clock_resolution=lambda: FINE_CLOCK,
     )
     return service, source
@@ -124,3 +135,16 @@ def test_a_rebind_during_a_running_calibration_stops_its_stream(tmp_path: Path) 
     assert service._calib_snapshot()["state"] == "not_run"
     assert source._feeder is None
     assert not service.loop.running
+
+
+def test_a_rebind_that_fails_to_save_keeps_the_calibration(tmp_path: Path) -> None:
+    """识别成功、保存失败：模块没换成，标定照旧有效。"""
+    service, _ = _service(tmp_path, store=_UnwritableStore(tmp_path / "config"))
+    first = _passed_and_used_once(service, tmp_path)
+
+    response = _call(service, "bindFoot", foot="L")
+    assert response["error"]["code"] == "E-BLE-1030"
+
+    snapshot = service._calib_snapshot()
+    assert snapshot["state"] == "passed"
+    assert snapshot["reused_from_session"] == first
