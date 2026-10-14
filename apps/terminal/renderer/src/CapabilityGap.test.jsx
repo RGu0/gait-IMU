@@ -17,31 +17,30 @@ const CALIB_GAP = {
   unimplemented: {
     capability: "calibration",
     issue: "RAY-208",
-    summary: "会话标定尚未实现；gait/calib/ 目前是空包",
+    summary: "会话标定尚未接入 sidecar",
   },
 };
 
 async function renderCalibrationToGap(onDone = vi.fn(), onAbandon = vi.fn()) {
-  vi.useFakeTimers();
   render(
     <CalibrationScreen
       runCalibration={() => Promise.resolve(CALIB_GAP)}
       onDone={onDone}
       onAbandon={onAbandon}
-      tickMs={1}
+      pollMs={1}
     />,
   );
-  await vi.advanceTimersByTimeAsync(200);
-  vi.useRealTimers();
   await screen.findByText("本步骤尚未接通");
   return { onDone, onAbandon };
 }
 
-describe("P-07 标定尚未接通", () => {
+// RAY-208 接通后真 sidecar 不再回缺口；这几条守的是**旧 sidecar**（或下一个还没接通的
+// 能力）走到这一屏时的样子 —— 缺口这条路本身不能因为标定好了就没人看着。
+describe("P-07 遇到缺口应答（旧 sidecar）", () => {
   it("停下来说清楚，而不是悄悄放行到测试段", async () => {
     const { onDone } = await renderCalibrationToGap();
     expect(screen.getByText(/RAY-208/)).toBeInTheDocument();
-    expect(screen.getByText(/gait\/calib\/ 目前是空包/)).toBeInTheDocument();
+    expect(screen.getByText(/尚未接入 sidecar/)).toBeInTheDocument();
     // 关键：没有自己走下去
     expect(onDone).not.toHaveBeenCalled();
   });
@@ -62,17 +61,23 @@ describe("P-07 标定尚未接通", () => {
 
   it("标定真的失败时走的仍是失败路径，不是缺口路径", async () => {
     // 两条路必须分得开：一个是「设备/佩戴出了事」，一个是「这条通路还没建」。
-    vi.useFakeTimers();
+    const failed = {
+      phase: "failed",
+      failure: {
+        reason: "loose",
+        code: "E-WEAR-2001",
+        message: "左脚的模块有些松动，请绑紧后重试。",
+        action: "绑紧后点「重试」，静立与行走会重新做一遍。",
+      },
+    };
     render(
       <CalibrationScreen
-        runCalibration={() => Promise.resolve({ ok: false, reason: "loose" })}
+        runCalibration={() => Promise.resolve(failed)}
         onDone={vi.fn()}
         onAbandon={vi.fn()}
-        tickMs={1}
+        pollMs={1}
       />,
     );
-    await vi.advanceTimersByTimeAsync(200);
-    vi.useRealTimers();
     expect(await screen.findByRole("alert")).toHaveTextContent("模块有些松动");
     expect(screen.queryByText("本步骤尚未接通")).toBeNull();
   });

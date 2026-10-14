@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { TerminalApp, WALK_INTERRUPTED } from "./TerminalApp.jsx";
 import { createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 import {
+  CALIBRATION_PASSED,
   CREATE_SUBJECT,
   PREFLIGHT_WAIVED,
   RECORDS,
@@ -36,6 +37,7 @@ function rig(overrides = {}, { intercept, replayReady = true } = {}) {
     snapshot: SNAPSHOT,
     listRecords: RECORDS,
     createSubject: CREATE_SUBJECT,
+    runCalibration: CALIBRATION_PASSED,
     runPreflight: PREFLIGHT_WAIVED,
     startSession: START_SESSION,
     stopSession: STOP_SESSION,

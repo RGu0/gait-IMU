@@ -17,13 +17,14 @@
 | `sessionResult` | `TimedWalk.verdict()` + `orchestration.summarize_session` 的双足完整性 |
 | `createSubject` | `io/session.new_subject_uuid()` |
 | `listRecords` | `io/session.list_sessions()` + `read_meta()` |
+| `runCalibration` | `app/sessioncalib.CalibrationRun` → `gait/calib` 的静立、安装角与松动判据（RAY-208） |
 
 硬件读数经 `sources.DeviceSource` 注入 —— 见该模块开头关于「stub 不是 mock」的说明。
 
 ## 哪些**不是**，且必须看得出来
 
-`runCalibration`（RAY-208）与 `reportFor`（RAY-224）返回 `status="unimplemented"`。
-它们**不返回一个看起来正常的假值**。一个能从头走到尾、中间两步是假的流程，比一个
+设计上留着 `status="unimplemented"` 这条路（`runCalibration` 在 RAY-208 接通前、
+`reportFor` 在 RAY-224 接通前都走过它）：未接通的能力**不返回一个看起来正常的假值**。一个能从头走到尾、中间两步是假的流程，比一个
 诚实断在半路的流程危险 —— 前者会让人以为流程已经验证过了。
 """
 
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -41,7 +43,8 @@ from typing import Any
 from gait.app import protocol
 from gait.app.bindings import FOOT_COLORS, BindingStore, IdentifyFailure, mask_mac
 from gait.app.errors import TerminalError
-from gait.app.sources import DeviceSource, StubDeviceSource
+from gait.app.sessioncalib import CalibrationRun
+from gait.app.sources import CalibrationUnavailable, DeviceSource, StubDeviceSource
 from gait.app.transportloop import TransportLoop
 from gait.app.uploadloop import Uploader, UploadLoop
 from gait.calib.store import CalibrationStore, StoreVerdict, admit_devices
@@ -166,6 +169,7 @@ class TerminalService:
         preview: PreviewPolicy | None = None,
         bindings: BindingStore | None = None,
         host_clock_resolution: Callable[[], float] | None = None,
+        calibration_clock: Callable[[], float] | None = None,
     ) -> None:
         self.source: DeviceSource = source or StubDeviceSource()
         #: 本机 `time.monotonic()` 的分辨率从哪来（RAY-545）。测试注入固定值；生产取
@@ -254,6 +258,17 @@ class TerminalService:
         self._walk_started_at: float | None = None
         #: 这一次 P-07 左右确认的记录（RAY-287 R4），随开始时的元数据落盘。
         self._wear_confirmation: dict[str, Any] | None = None
+        #: 这一次 P-07 的会话标定（RAY-208），含重试。开检测时进 `calib_snapshot`。
+        #: 「重新检测」不回 P-07（与左右确认同一口径，见渲染端 `confirmationRef`），
+        #: 所以它留到下一次 P-07 `begin fresh` 才换掉。
+        self._session_calib: CalibrationRun | None = None
+        #: 设备源做不了标定时的原因（回放旧会话）。与「没做」分开记。
+        self._calib_unavailable: str | None = None
+        #: 这份标定第一次随哪场会话落盘。重测沿用时写进 `calib_snapshot`，算「标定链
+        #: 耗时」的中位数时据此去重 —— 同一次标定不该在样本里出现两次。
+        self._calib_first_session: str | None = None
+        #: 标定各步计时用的钟。测试注入，生产取单调时钟。
+        self._calibration_clock = calibration_clock or time.monotonic
 
     @property
     def login_required(self) -> bool:
@@ -626,7 +641,18 @@ class TerminalService:
         self.walk.start_calibration(now)
         self.walk.start_walking(now)
         self._walk_started_at = now
+        # 标定还在采就开检测：先收掉标定的流，否则两边同时挂在一条传输上。
+        if self._session_calib is not None and self._session_calib.running:
+            self._session_calib.cancel()
+            self._calibration_teardown()
         self._open_capture()
+        # 只有通过了的标定才谈得上「沿用」；没过的那份照实落盘，不当作重测的来源。
+        if (
+            self._session_calib is not None
+            and self._session_calib.passed
+            and self._calib_first_session is None
+        ):
+            self._calib_first_session = self.session_id
         return {
             "totalSeconds": self.config.duration_s,
             "instruction": "请按平时走路的速度，在两个标志之间来回走",
@@ -696,7 +722,7 @@ class TerminalService:
                 "state": "pending",
                 "reason": "配置下发快照在会话结束时补齐",
             },
-            calib_snapshot={"state": "unimplemented", "issue": "RAY-208"},
+            calib_snapshot=self._calib_snapshot(),
             algo_version=f"gait-contract-{CONTRACT_VERSION}",
             algo_params=self.config.snapshot()
             if hasattr(self.config, "snapshot")
@@ -1159,10 +1185,114 @@ class TerminalService:
             ),
         )
 
-    # ── 显式缺口 ──────────────────────────────────────────────────────────
+    # ── P-07 会话标定（RAY-208）─────────────────────────────────────────
 
-    def _do_runCalibration(self, _: dict[str, Any]) -> Any:
-        return _Unimplemented("calibration")
+    def _do_runCalibration(self, params: dict[str, Any]) -> Any:
+        """P-07 的静立 → 行走 → 站定。界面轮询，sidecar 按收到的样本往前推。
+
+        三个动作：
+
+        * `begin`：开一次尝试（`fresh: true` 表示新进 P-07，计时从头算；重试不带）；
+        * `status`：推进一拍并报现状；结束（通过 / 失败）时收掉标定的流；
+        * `cancel`：操作员离开 P-07。
+
+        为什么由 sidecar 推进而不是界面倒计时，见 `app/sessioncalib` 的模块文档。
+        """
+        action = params.get("action")
+        if action == "begin":
+            return self._calibration_begin(fresh=bool(params.get("fresh")))
+        if action == "status":
+            run = self._session_calib
+            if run is None:
+                raise protocol.ProtocolError("runCalibration status 之前需要先 begin")
+            was_running = run.running
+            status = run.poll()
+            # 只在「刚结束」的那一拍收流。结束之后再轮询（界面晚到的一拍）不能再收一次：
+            # 那时可能已经开了检测，再 `end_stream()` 收掉的就是会话的流。
+            if was_running and not run.running:
+                self._calibration_teardown()
+            return status
+        if action == "cancel":
+            if self._session_calib is not None and self._session_calib.running:
+                self._session_calib.cancel()
+                self._calibration_teardown()
+            return {"phase": "cancelled"}
+        raise protocol.ProtocolError(
+            f"runCalibration 的 action 应为 begin / status / cancel，收到 {action!r}"
+        )
+
+    def _calibration_begin(self, *, fresh: bool) -> dict[str, Any]:
+        if self.capture is not None or self.session_running:
+            raise protocol.ProtocolError("检测进行中不能做会话标定")
+        if self._session_calib is not None and self._session_calib.running:
+            self._session_calib.cancel()
+            self._calibration_teardown()
+        if fresh or self._session_calib is None:
+            self._session_calib = CalibrationRun(
+                clock=self._calibration_clock,
+                step_total=lambda: sum(self.source.step_counts().values()),
+            )
+            self._calib_unavailable = None
+            self._calib_first_session = None
+        run = self._session_calib
+        run.begin()
+        opener = getattr(self.source, "begin_calibration_stream", None)
+        try:
+            self.loop.start()
+            for label, transport in self.source.transports().items():
+                transport.on_data(run.buffers[label].receive)
+                self.loop.submit(transport.connect())
+            if opener is not None:
+                opener()
+            else:
+                self.source.begin_stream()
+        except CalibrationUnavailable as error:
+            run.cancel()
+            self._calibration_teardown()
+            self._session_calib = None
+            self._calib_unavailable = str(error)
+            return {"phase": "unavailable", "message": str(error)}
+        except BaseException:
+            # 开到一半失败（连不上、片段生成出错）：不留一个挂着收集器、开着循环的半截标定。
+            run.cancel()
+            self._calibration_teardown()
+            raise
+        return run.status()
+
+    def _calibration_teardown(self) -> None:
+        """停标定的流、摘掉收集器。链路本身不断 —— 那归设备源（见 `blesource.SessionPort`）。"""
+        self.source.end_stream()
+        for transport in self.source.transports().values():
+            transport.on_data(None)
+            try:
+                self.loop.submit(transport.disconnect())
+            except (RuntimeError, TimeoutError):
+                pass
+        if self.capture is None:
+            self.loop.stop()
+
+    def _calib_snapshot(self) -> dict[str, Any]:
+        """`SessionMeta.calib_snapshot`。形状见《05 数据格式规范》§3.5。
+
+        四种状态各说各的实话：标定过（`passed`，含参数与计时）、做了没过（`failed` /
+        `cancelled`，只有计时与原因 —— 界面不会让它走到开检测，走到了就是绕过了界面）、
+        数据源做不了（`unavailable`）、根本没做（`not_run`）。重测沿用上一场的标定时多一个
+        `reused_from_session`。
+        """
+        if self._session_calib is not None:
+            record = self._session_calib.snapshot()
+            if self._calib_first_session is not None:
+                record["reused_from_session"] = self._calib_first_session
+            return record
+        if self._calib_unavailable is not None:
+            return {
+                "state": "unavailable",
+                "issue": "RAY-208",
+                "reason": self._calib_unavailable,
+            }
+        return {"state": "not_run", "issue": "RAY-208"}
+
+    # ── 显式缺口 ──────────────────────────────────────────────────────────
 
     def _do_reportFor(self, params: dict[str, Any]) -> Any:
         """一份已完成会话的基础报告。

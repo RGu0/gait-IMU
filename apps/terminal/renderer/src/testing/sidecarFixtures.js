@@ -22,6 +22,14 @@ export const SNAPSHOT = {
   ipcContractVersion: V,
 };
 
+/**
+ * P-07 会话标定（RAY-208）的终局应答。`begin` 与 `status` 都给它：这些测试走的是
+ * 标定之外的路，标定一拍就过，不占它们的等待时间。
+ */
+export const CALIBRATION_PASSED = {
+  phase: "passed", attempt: 1, standTotal: 5, walkTotal: 10, settleTotal: 3, chainSeconds: 31.0,
+};
+
 export const CREATE_SUBJECT = { subjectUuid: "e8e02054-48ff-402d-ab03-687b57f9140f", consentValid: false };
 
 export const RECORDS = [

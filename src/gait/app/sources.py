@@ -33,6 +33,16 @@ from gait.device.identity import MAC_PROVENANCE
 LINK_GRADES: tuple[str, ...] = ("good", "fair", "bad")
 
 
+class CalibrationUnavailable(RuntimeError):
+    """这个设备源做不了 P-07 会话标定（RAY-208）。
+
+    只有一种源会这样：回放一份旧会话。它的字节是现成的，开头几秒不是为静立准备的。
+    真设备与 stub 的标定流就是它们的 `begin_stream()`；合成源带一段专门的标定片段。
+    设备源用可选方法 `begin_calibration_stream()` 声明「标定时推别的东西」，没有这个
+    方法的源标定时照常开流。
+    """
+
+
 def synthetic_frame(seed: int) -> bytes:
     """一帧 0x55 0x61 运动数据，9 个 int16 计数。
 
