@@ -17,6 +17,7 @@ import { resolveSidecarCommand } from "./sidecarCommand.js";
 import {
   configRoot,
   loadSettings,
+  readBuildInfo,
   rendererIndex,
   saveSettings,
   sessionRoot,
@@ -54,6 +55,8 @@ function supervisorOptions() {
     userDataDir: app.getPath("userData"),
     processEnv: process.env,
     platform: process.platform,
+    // 「设备与支持」的软件版本（RAY-752）：版本号 + 打包时写入的构建提交。
+    build: { appVersion: app.getVersion(), ...readBuildInfo(app.getAppPath()) },
   });
   if (!executable) process.stderr.write(`找不到 ${command.command}（PATH 中没有），sidecar 将无法启动。\n`);
   return options;

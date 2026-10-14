@@ -92,6 +92,9 @@ def service_from_environment(env: Mapping[str, str] | None = None) -> TerminalSe
         uploader=build_uploader(session_root, values.get("GAIT_ACCESS_ROOT")),
         preview=preview,
         bindings=bindings_from_environment(values),
+        # 「设备与支持」的软件版本（RAY-752）：Electron 主进程给版本号，安装包带构建提交。
+        app_version=values.get("GAIT_APP_VERSION"),
+        build_commit=values.get("GAIT_BUILD_COMMIT"),
         **build_operator_auth(values.get("GAIT_ACCESS_ROOT")),
     )
 

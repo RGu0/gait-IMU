@@ -63,14 +63,36 @@ export function configRoot(userDataDir) {
   return path.join(userDataDir, "config");
 }
 
+/** 打包流水线写进安装包的构建信息（`preview-release.yml`），与 main.js 同目录。 */
+export const BUILD_INFO_FILE = "build-info.json";
+
+/**
+ * 读安装包里的构建信息：`{ commit }`。开发态没有这个文件（它不进仓库），返回空对象 ——
+ * 软件版本于是写「开发构建」，不在运行时去调 git 现编一个（RAY-752）。
+ */
+export function readBuildInfo(appPath, read = (file) => fs.readFileSync(file, "utf8")) {
+  try {
+    const info = JSON.parse(read(path.join(appPath, BUILD_INFO_FILE)));
+    return typeof info?.commit === "string" ? { commit: info.commit } : {};
+  } catch {
+    return {};
+  }
+}
+
 /**
  * sidecar 的业务环境变量。
  *
  * **刻意没有 `GAIT_ACCESS_ROOT`**：预览版不预配置云端，sidecar 因此不建上传线程、
  * 不设登录闸（见 `gait.app.__main__.service_from_environment`）。有测试守着这一条。
+ *
+ * `GAIT_APP_VERSION` / `GAIT_BUILD_COMMIT`：「设备与支持」的软件版本由 sidecar 统一返回
+ * （文案同源），版本号只有主进程知道，所以从这里递过去（RAY-752）。没有构建提交时给空串，
+ * sidecar 据此写「开发构建」。
  */
-export function sidecarEnv({ settings, userDataDir }) {
+export function sidecarEnv({ settings, userDataDir, build = {} }) {
   return {
+    GAIT_APP_VERSION: build.appVersion ?? "",
+    GAIT_BUILD_COMMIT: build.commit ?? "",
     GAIT_SESSION_ROOT: sessionRoot(userDataDir),
     // 演示模式也带上：无害（演示源不要求绑定），而切到真实传感器时不必重启才有绑定可读。
     GAIT_CONFIG_ROOT: configRoot(userDataDir),
@@ -154,7 +176,7 @@ export const REQUEST_TIMEOUT_MS = 120_000;
  * `executable` 为 null 表示开发态 PATH 里找不到命令；此时照原样交给 spawn，由监管器
  * 走它自己的「服务不可用」路径，界面上有一屏说得清楚的话，而不是主进程直接崩掉。
  */
-export function sidecarOptions({ command, packaged = false, settings, userDataDir, processEnv, platform, exists }) {
+export function sidecarOptions({ command, packaged = false, settings, userDataDir, processEnv, platform, exists, build }) {
   const executable = packaged
     ? command.command
     : resolveExecutable(command.command, processEnv.PATH, platform, exists);
@@ -163,7 +185,7 @@ export function sidecarOptions({ command, packaged = false, settings, userDataDi
     options: {
       ...command,
       command: executable ?? command.command,
-      env: { ...command.env, ...osEnv(processEnv, platform), ...sidecarEnv({ settings, userDataDir }) },
+      env: { ...command.env, ...osEnv(processEnv, platform), ...sidecarEnv({ settings, userDataDir, build }) },
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
     },
   };
