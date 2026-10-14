@@ -436,11 +436,12 @@ def test_rebinding_a_foot_overwrites_only_that_foot(tmp_path: Path) -> None:
         source.close()
 
 
-def test_bind_foot_is_refused_while_a_session_is_running(tmp_path: Path) -> None:
+def test_bind_foot_is_refused_while_a_session_is_running(tmp_path: Path, calibrated) -> None:
     world = _World(BLUE)
     service, source = _service(world, tmp_path)
+    calibrated(service)
     try:
-        _call(service, "startSession", now=0.0)
+        assert _call(service, "startSession", now=0.0)["status"] == "ok"
         response = _call(service, "bindFoot", foot="L")
         assert response["error"]["code"] == "E-BLE-1031"
         assert "检测进行中" in response["error"]["message"]
