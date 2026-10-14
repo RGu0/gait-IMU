@@ -38,8 +38,8 @@
           ]
         },
         "cloud/api/errors.py": {
-          "sha256": "567666871cce40ba42725b24346b3b23e2531a4f1f98276f1cc55ee45da3cc73",
-          "bytes": 2049,
+          "sha256": "4082dc8cb3ba8e7e0915c52661d22692cfcf50d080252f4b7116e1cc95a10ab9",
+          "bytes": 3296,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md",
@@ -47,16 +47,16 @@
           ]
         },
         "cloud/api/app.py": {
-          "sha256": "a938b3285bc218862825d360c04bb8ee401f8d454d2d8868a6f7389f8726968c",
-          "bytes": 40403,
+          "sha256": "1d350338549bf9a971119c0c3ce9ef87436e461742eab216f39eae63d6e0a67b",
+          "bytes": 43175,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md"
           ]
         },
         "cloud/api/access_auth.py": {
-          "sha256": "bc6836b2b07694282b3cd4be1585f98999dd447e085ce43da781732e856464b7",
-          "bytes": 11796,
+          "sha256": "d0ee6acbdf84b7c8abf60365c3a96cd85a67cb015a529d3c8fbc4bd73449a860",
+          "bytes": 16270,
           "cited_by": [
             ".project-context/documents/云端服务接口约定_抄录卷.md",
             ".project-context/documents/云端服务接口约定_待确认卷.md"

@@ -268,6 +268,27 @@ def test_caliber_follows_the_branch_that_actually_ran() -> None:
     assert "非 ZUPT 边界口径" in without["note"]
 
 
+def test_a_negative_phase_overlap_stays_negative_and_keeps_its_caliber(monkeypatch) -> None:
+    """RAY-263 回归：相位重叠为负时原样保留，且口径仍是相位重叠。
+
+    ZUPT 边界系统性偏低约 100 ms（RAY-288），正常快走可以量出负的重叠。
+    PRD v1.4 §8 把它定为观测量：截成 0 会把一个真实的观测抹掉，退回站立相
+    恒等式会换掉一个已经量到的数 —— 两个都是改行为。同步依据在手时，负值
+    照发，口径不跟着符号变。
+    """
+    from gait.analysis import events as events_module
+
+    class _NegativeOverlap:
+        fraction = -0.04
+
+    monkeypatch.setattr(
+        events_module, "double_support", lambda *args, **kwargs: _NegativeOverlap()
+    )
+    row = _double_support_row(sync_quality=_SYNC_OK)
+    assert row["value"] == "-4.0"
+    assert row["caliber"] == CALIBER_PHASE_OVERLAP
+
+
 def test_the_stance_identity_branch_gets_no_reference_value() -> None:
     """那 ~100 ms 是相位重叠才受到的偏差。
 
