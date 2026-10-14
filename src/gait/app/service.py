@@ -1162,6 +1162,11 @@ class TerminalService:
                 message=f"已识别{color}模块，但保存绑定失败：{error}",
                 action="请确认磁盘可写后重试；仍不行请联系服务方。",
             )
+        # 换了模块，上一次标定量的就是另一台的零偏与安装方向（RAY-756，用户 2026-10-13）。
+        # 只在绑定**真的写成了**之后作废：识别或保存失败时模块没换，标定照旧有效。
+        # （配对时若恰有标定在采，BLE 识别会先断开链路，那次标定之后收不到数据、下一拍
+        # 轮询会以失败收场 —— 界面上走不到这种组合：配对向导不在 P-07 里。）
+        self._discard_calibration()
         return {
             "foot": foot,
             "mac": identity.value,
@@ -1307,6 +1312,15 @@ class TerminalService:
                 pass
         if self.capture is None:
             self.loop.stop()
+
+    def _discard_calibration(self) -> None:
+        """丢掉本次会话标定与它的沿用来源；还在采就先收流。之后 `calib_snapshot` 为 `not_run`。"""
+        if self._session_calib is not None and self._session_calib.running:
+            self._session_calib.cancel()
+            self._calibration_teardown()
+        self._session_calib = None
+        self._calib_unavailable = None
+        self._calib_first_session = None
 
     def _calib_state(self) -> str:
         """本次标定的状态，与 `_calib_snapshot()["state"]` 同一取值，但不拼整份快照。
