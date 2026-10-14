@@ -97,3 +97,15 @@ describe("接管层只占内容区（RAY-753）", () => {
     expect(rule[1]).not.toMatch(/inset\s*:/);
   });
 });
+
+describe("报告预览的纸张随内容长高（RAY-760）", () => {
+  // .preview-pane 是 flex 容器；默认 stretch 会把纸张拉成窗格可视高度，min-height 的一页
+  // A4 就成了实际高度，比一页长的报告后半份画在灰底上。jsdom 不排版，这里钉住样式。
+  it(".preview-sheet 不被 flex 拉伸", () => {
+    const css = stripComments(fs.readFileSync(APP_CSS, "utf8"));
+    const sheet = /(?:^|\})\s*\.preview-sheet\s*\{([^}]*)\}/.exec(css);
+    expect(sheet).not.toBeNull();
+    expect(sheet[1]).toMatch(/align-self\s*:\s*flex-start/);
+    expect(sheet[1]).toMatch(/min-height\s*:\s*297mm/);
+  });
+});

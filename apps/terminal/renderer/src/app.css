@@ -802,6 +802,9 @@ body {
    un-scrollable, because the box was still 297mm tall while the picture was
    0.72 of that. zoom participates in layout, so the box matches what is on
    screen. Chromium-only is fine here — this app ships inside Electron. */
+/* `align-self: flex-start`（RAY-760）：.preview-pane 是 flex 容器，默认 stretch 会把纸张
+   拉成窗格的可视高度，于是 min-height 的一页 A4 成了实际高度 —— 报告比一页长，后半份
+   就画在了灰底上。纸张高度必须由内容撑开，一页 A4 只是下限。 */
 .preview-sheet {
   width: 210mm;
   min-height: 297mm;
@@ -810,6 +813,7 @@ body {
   box-shadow: var(--shadow-card);
   zoom: 0.72;
   flex: none;
+  align-self: flex-start;
 }
 
 .preview-meta {
