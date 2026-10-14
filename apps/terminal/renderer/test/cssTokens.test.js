@@ -85,3 +85,15 @@ describe("app.css custom properties", () => {
     ]);
   });
 });
+
+describe("接管层只占内容区（RAY-753）", () => {
+  // 接管层曾是 position: fixed; inset: 0; z-index: 100，把外层的预览横幅一起盖住。
+  // jsdom 不排版，横幅在场由 src/SidecarDown.test.jsx 证；这里证样式没有盖住窗口的手段。
+  it(".sidecar-down 不靠 fixed / absolute / z-index / inset", () => {
+    const rule = /\.sidecar-down\s*\{([^}]*)\}/.exec(stripComments(fs.readFileSync(APP_CSS, "utf8")));
+    expect(rule).not.toBeNull();
+    expect(rule[1]).not.toMatch(/position\s*:\s*(fixed|absolute)/);
+    expect(rule[1]).not.toMatch(/z-index/);
+    expect(rule[1]).not.toMatch(/inset\s*:/);
+  });
+});

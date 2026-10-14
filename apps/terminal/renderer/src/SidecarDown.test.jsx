@@ -1,10 +1,6 @@
 /**
  * V-U4 的界面那一半：sidecar 不在时，操作员看到的是什么。
  */
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -48,24 +44,15 @@ describe("接管屏", () => {
 
 describe("接管的是内容区，不是整个窗口（RAY-753）", () => {
   // 预览身份不能在任何一屏消失。横幅一直在 TerminalApp 外层渲染，此前是被接管层的
-  // position: fixed; inset: 0; z-index: 100 盖住的 —— jsdom 不排版，所以这里分两半证：
-  // 横幅确实在场，且接管层的样式没有任何「盖住整个窗口」的手段。
+  // position: fixed; inset: 0; z-index: 100 盖住的 —— jsdom 不排版，所以分两半证：
+  // 这里证横幅确实在场；接管层的样式没有「盖住整个窗口」的手段，由 test/cssTokens.test.js
+  // 读 app.css 证（src/ 下禁用 node:fs）。
   it("预览版下 sidecar 不可用时，横幅与接管屏同时在场", () => {
     render(
       <TerminalApp preview adapter={mockTerminalAdapter} lifecycle={lifecycleAt("restarting", { ...DOWN, recoverable: true })} />,
     );
     expect(screen.getByRole("note", { name: "预览版提示" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
-  });
-
-  it(".sidecar-down 不靠 fixed / absolute / z-index 盖住窗口", () => {
-    const css = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "app.css"), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "");
-    const rule = /\.sidecar-down\s*\{([^}]*)\}/.exec(css);
-    expect(rule).not.toBeNull();
-    expect(rule[1]).not.toMatch(/position\s*:\s*(fixed|absolute)/);
-    expect(rule[1]).not.toMatch(/z-index/);
-    expect(rule[1]).not.toMatch(/inset\s*:/);
   });
 });
 
