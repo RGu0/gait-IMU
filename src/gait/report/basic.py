@@ -212,6 +212,12 @@ def _double_support(
                 ).fraction
             except events.EventError:
                 return _DoubleSupport(None, None)
+            # RAY-263：相位重叠为负时**原样保留**，不截成 0、不退回恒等式。
+            # ZUPT 边界系统性偏低约 100 ms（RAY-288），正常快走的相位重叠本来就
+            # 可以为负；PRD v1.4 §8 据此把它定为观测量而不是错误 —— 负值是这个
+            # 口径的属性，抹掉它等于伪造一次「没有重叠」的观测。这与下面恒等式
+            # 那一支不同：那里的负值说明同步或事件检测出了问题（RAY-211 自检
+            # 判据），所以拒绝；这里的负值是量出来的相位，所以照发，口径不变。
             return _DoubleSupport(fraction * 100.0, CALIBER_PHASE_OVERLAP)
         return _DoubleSupport(None, None)
 
