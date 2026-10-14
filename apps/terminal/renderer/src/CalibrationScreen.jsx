@@ -71,7 +71,7 @@ function shown(status) {
   return Math.max(0, Math.ceil((total ?? 0) - (done ?? 0)));
 }
 
-export function CalibrationScreen({ runCalibration, onDone, onAbandon, pollMs = 250 }) {
+export function CalibrationScreen({ runCalibration, onDone, onAbandon, onError, pollMs = 250 }) {
   const [status, setStatus] = useState(null);
   const [attempts, setAttempts] = useState(0);
   // 能力缺口（旧 sidecar）与「这个数据源做不了」是两件事，分开画。
@@ -83,6 +83,8 @@ export function CalibrationScreen({ runCalibration, onDone, onAbandon, pollMs = 
   const runningRef = useRef(false);
   const runRef = useRef(runCalibration);
   runRef.current = runCalibration;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
 
   useEffect(() => {
     let cancelled = false;
@@ -100,15 +102,38 @@ export function CalibrationScreen({ runCalibration, onDone, onAbandon, pollMs = 
       if (next.phase === "failed") setAttempts((current) => current + 1);
     }
 
+    // 请求本身被拒（协议错、sidecar 报错）不是一次标定失败，也不能让这一屏停在
+    // 「5」上不动：交给外层的失败页，它说得出错在哪、给得出退路。
+    function broke(error) {
+      if (cancelled) return;
+      runningRef.current = false;
+      if (onErrorRef.current) onErrorRef.current(error);
+    }
+
     async function poll() {
       if (cancelled) return;
-      const next = await runRef.current({ action: "status" });
+      let next;
+      try {
+        next = await runRef.current({ action: "status" });
+      } catch (error) {
+        broke(error);
+        return;
+      }
       if (!cancelled) show(next);
     }
 
     (async () => {
-      const begun = await runRef.current({ action: "begin", fresh: round === 0 });
+      // begin 一发出，sidecar 那边就可能已经在采了：此刻离开也要让它收流。
+      runningRef.current = true;
+      let begun;
+      try {
+        begun = await runRef.current({ action: "begin", fresh: round === 0 });
+      } catch (error) {
+        broke(error);
+        return;
+      }
       if (cancelled) return;
+      runningRef.current = false;
       if (begun?.unimplemented) {
         setGap(begun.unimplemented);
         return;

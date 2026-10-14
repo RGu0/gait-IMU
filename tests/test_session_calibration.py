@@ -470,3 +470,21 @@ def test_a_late_status_poll_does_not_stop_the_session_stream(tmp_path: Path) -> 
     assert source._feeder is not None, "晚到的轮询收掉了会话的流"
     assert service.loop.running
     service.handle({"id": "4", "method": "stopSession", "params": {"now": 1}})
+
+
+def test_a_begin_that_breaks_halfway_leaves_nothing_open() -> None:
+    """开流时出了别的错：不留一个挂着收集器、开着循环的半截标定。"""
+
+    class Broken(ReplayDeviceSource):
+        def begin_calibration_stream(self) -> None:
+            raise RuntimeError("片段生成失败")
+
+    source = Broken(chunks={"L": [], "R": []}, label="synthetic")
+    service = TerminalService(source=source)
+    with pytest.raises(RuntimeError, match="片段生成失败"):
+        service.handle(
+            {"id": "1", "method": "runCalibration", "params": {"action": "begin", "fresh": True}}
+        )
+    assert service._session_calib is not None and not service._session_calib.running
+    assert not service.loop.running
+    assert source._feeder is None

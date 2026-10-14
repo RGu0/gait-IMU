@@ -606,6 +606,7 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
       <CalibrationScreen
         runCalibration={(params) => adapter.runCalibration(params)}
         onDone={() => setStage(STAGE.wearConfirm)}
+        onError={(error) => failed(error, STAGE.wear, "标定未能进行")}
         onAbandon={() => {
           setSubject(null);
           confirmationRef.current = null;

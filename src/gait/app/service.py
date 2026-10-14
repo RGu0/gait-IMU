@@ -646,7 +646,12 @@ class TerminalService:
             self._session_calib.cancel()
             self._calibration_teardown()
         self._open_capture()
-        if self._session_calib is not None and self._calib_first_session is None:
+        # 只有通过了的标定才谈得上「沿用」；没过的那份照实落盘，不当作重测的来源。
+        if (
+            self._session_calib is not None
+            and self._session_calib.passed
+            and self._calib_first_session is None
+        ):
             self._calib_first_session = self.session_id
         return {
             "totalSeconds": self.config.duration_s,
@@ -1230,14 +1235,13 @@ class TerminalService:
             self._calib_unavailable = None
             self._calib_first_session = None
         run = self._session_calib
-        transports = self.source.transports()
-        self.loop.start()
-        for label, transport in transports.items():
-            transport.on_data(run.buffers[label].receive)
-            self.loop.submit(transport.connect())
         run.begin()
         opener = getattr(self.source, "begin_calibration_stream", None)
         try:
+            self.loop.start()
+            for label, transport in self.source.transports().items():
+                transport.on_data(run.buffers[label].receive)
+                self.loop.submit(transport.connect())
             if opener is not None:
                 opener()
             else:
@@ -1248,6 +1252,11 @@ class TerminalService:
             self._session_calib = None
             self._calib_unavailable = str(error)
             return {"phase": "unavailable", "message": str(error)}
+        except BaseException:
+            # 开到一半失败（连不上、片段生成出错）：不留一个挂着收集器、开着循环的半截标定。
+            run.cancel()
+            self._calibration_teardown()
+            raise
         return run.status()
 
     def _calibration_teardown(self) -> None:

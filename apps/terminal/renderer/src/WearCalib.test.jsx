@@ -164,6 +164,28 @@ describe("P-07 — three steps the sidecar drives", () => {
     expect(calls.at(-1)).toEqual({ action: "cancel" });
   });
 
+  it("hands a rejected request to the caller instead of freezing on the countdown", async () => {
+    const onError = vi.fn();
+    const failure = Object.assign(new Error("检测进行中不能做会话标定"), { name: "ContractViolation" });
+    renderCalib(vi.fn().mockRejectedValue(failure), { onError });
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(failure));
+  });
+
+  it("cancels even when the operator leaves before begin has answered", async () => {
+    let answer;
+    const calls = [];
+    const runCalibration = vi.fn((params) => {
+      calls.push(params);
+      if (params.action === "begin") return new Promise((resolve) => { answer = resolve; });
+      return Promise.resolve({ phase: "cancelled" });
+    });
+    const { unmount } = renderCalib(runCalibration);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    unmount();
+    expect(calls.at(-1)).toEqual({ action: "cancel" });
+    answer(stand(0));
+  });
+
   it("says plainly when the data source cannot calibrate, and lets the operator skip", async () => {
     const onDone = vi.fn();
     renderCalib(
