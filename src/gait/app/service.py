@@ -291,6 +291,9 @@ class TerminalService:
         #: 这份标定第一次随哪场会话落盘。重测沿用时写进 `calib_snapshot`，算「标定链
         #: 耗时」的中位数时据此去重 —— 同一次标定不该在样本里出现两次。
         self._calib_first_session: str | None = None
+        #: 这份标定属于哪位受试者：第一次随会话落盘时那场的 `subject_uuid`（RAY-759）。
+        #: 沿用只给这一位 —— 换了人就是换了一次佩戴。
+        self._calib_subject: str | None = None
         #: 标定各步计时用的钟。测试注入，生产取单调时钟。
         self._calibration_clock = calibration_clock or time.monotonic
 
@@ -660,6 +663,14 @@ class TerminalService:
             # 演示与回放的数据不是实测，拦它们只会挡住流程本身（用户 2026-10-13 裁定）。
             if self._calib_state() not in CALIBRATION_ADMITTED:
                 return _calibration_missing_error()
+            # 沿用的标定只给它所属的那位受试者（RAY-759，用户 2026-10-13）。界面上换人一定会
+            # 重走 P-07；走到这里换了人，只能是绕过了界面。没给合法 `subjectUuid` 当作「不同」：
+            # 不知道是谁，就不能说是同一位。
+            if (
+                self._calib_subject is not None
+                and _valid_uuid(params.get("subjectUuid")) != self._calib_subject
+            ):
+                return _calibration_missing_error()
         # 先于任何状态变更校验：一份坏的确认记录不该留下半开的会话。
         wear_confirmation = _wear_confirmation_from(params.get("wearConfirmation"))
         now = float(params.get("now", 0.0))
@@ -684,6 +695,7 @@ class TerminalService:
             and self._calib_first_session is None
         ):
             self._calib_first_session = self.session_id
+            self._calib_subject = self._subject_uuid
         return {
             "totalSeconds": self.config.duration_s,
             "instruction": "请按平时走路的速度，在两个标志之间来回走",
@@ -1276,6 +1288,7 @@ class TerminalService:
             )
             self._calib_unavailable = None
             self._calib_first_session = None
+            self._calib_subject = None
         run = self._session_calib
         run.begin()
         opener = getattr(self.source, "begin_calibration_stream", None)
@@ -1321,6 +1334,7 @@ class TerminalService:
         self._session_calib = None
         self._calib_unavailable = None
         self._calib_first_session = None
+        self._calib_subject = None
 
     def _calib_state(self) -> str:
         """本次标定的状态，与 `_calib_snapshot()["state"]` 同一取值，但不拼整份快照。

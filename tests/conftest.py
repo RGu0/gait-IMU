@@ -52,6 +52,7 @@ def calibrated() -> Callable[[TerminalService], TerminalService]:
         service._session_calib = _passed_run()
         service._calib_unavailable = None
         service._calib_first_session = None
+        service._calib_subject = None
         return service
 
     return install
