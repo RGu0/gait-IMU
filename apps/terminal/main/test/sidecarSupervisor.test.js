@@ -7,7 +7,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { UV_CONFIG_FILE_NULL } from "../sidecarCommand.js";
+import fs from "node:fs";
+import os from "node:os";
+import { developmentCommand, UV_CONFIG_FILE_NULL } from "../sidecarCommand.js";
+import { sidecarOptions } from "../runtimeConfig.js";
 
 import {
   MAX_CONSECUTIVE_RESTARTS,
@@ -22,6 +25,7 @@ const FAKE = fileURLToPath(new URL("./fakeSidecar.mjs", import.meta.url));
 const HERE = path.dirname(FAKE);
 
 let live = [];
+let temporaryRoots = [];
 
 function supervise(mode = "ok", extra = {}) {
   const supervisor = new SidecarSupervisor({
@@ -56,6 +60,8 @@ function waitForState(supervisor, wanted, timeoutMs = 8_000) {
 afterEach(async () => {
   await Promise.all(live.map((s) => s.stop()));
   live = [];
+  for (const root of temporaryRoots) fs.rmSync(root, { recursive: true, force: true });
+  temporaryRoots = [];
 });
 
 describe("正常生命周期", () => {
@@ -163,12 +169,38 @@ describe("真实 Python sidecar", () => {
   it("经监管器往返一次，并在被杀后恢复", async () => {
     // 假 sidecar 验的是监管逻辑；这条验的是监管器和真的那个说得上话。
     const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+    // RAY-750 R1：命令与环境经产品同一条路径（sidecarOptions(developmentCommand())）
+    // 拼出，不再抄一份 process.env。调用方环境里显式塞进 GAIT_ACCESS_ROOT /
+    // GAIT_SESSION_ROOT，再断言它们没有渗进 product env —— 产品环境是替换式的：
+    // PATH 不继承（spawn 用解析后的绝对命令），GAIT_* 只来自 sidecarEnv/developmentCommand，
+    // 显式业务变量（PYTHONUTF8、UV_CONFIG_FILE，见 RAY-483）原样保留。
+    const callerEnv = {
+      ...process.env,
+      GAIT_ACCESS_ROOT: "/ray-750-must-not-leak",
+      GAIT_SESSION_ROOT: "/ray-750-must-not-leak",
+    };
+    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gait-ray-750-supervisor-"));
+    temporaryRoots.push(userDataDir);
+    const { executable, options } = sidecarOptions({
+      command: developmentCommand(repoRoot),
+      settings: {},
+      userDataDir,
+      processEnv: callerEnv,
+      platform: process.platform,
+    });
+    expect(executable).not.toBeNull();
+    expect(path.isAbsolute(executable)).toBe(true);
+    expect(options.command).toBe(executable);
+    expect(options.env).not.toHaveProperty("PATH");
+    expect(options.env).not.toHaveProperty("GAIT_ACCESS_ROOT");
+    expect(options.env.GAIT_SESSION_ROOT).toBe(path.join(userDataDir, "sessions"));
+    expect(options.env.PYTHONUTF8).toBe("1");
+    expect(options.env.UV_CONFIG_FILE).toBe(UV_CONFIG_FILE_NULL);
     const supervisor = new SidecarSupervisor({
-      command: "uv",
-      args: ["run", "--locked", "python", "-m", "gait.app"],
-      cwd: repoRoot,
-      // 取值与产品路径共用（RAY-483）；不用 UV_NO_CONFIG，它会连 .python-version 一起关掉。
-      env: { ...process.env, UV_CONFIG_FILE: UV_CONFIG_FILE_NULL, PYTHONUTF8: "1" },
+      command: options.command,
+      args: options.args,
+      cwd: options.cwd,
+      env: options.env,
       requestTimeoutMs: 60_000,
     });
     live.push(supervisor);
