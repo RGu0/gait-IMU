@@ -140,13 +140,17 @@ def test_admits_a_freshly_passed_calibration(tmp_path: Path) -> None:
 
 
 def test_admits_a_retest_reusing_the_calibration_without_limit(tmp_path: Path) -> None:
-    """「重新检测」不回 P-07：沿用通过的标定，不限次数（用户 2026-10-13 裁定）。"""
+    """「重新检测」不回 P-07：沿用通过的标定，不限次数（用户 2026-10-13 裁定）。
+
+    重测是同一位受试者，渲染端每次都带着同一个 `subjectUuid`（RAY-759 起沿用只给同一位）。
+    """
     service = _service(tmp_path)
+    subject = "e8e02054-48ff-402d-ab03-687b57f9140f"
     assert _calibrate(service)["phase"] == "passed"
-    first = _call(service, "startSession", now=0.0)["result"]["sessionId"]
+    first = _call(service, "startSession", now=0.0, subjectUuid=subject)["result"]["sessionId"]
     _call(service, "stopSession", now=1.0)
     for _ in range(3):
-        response = _call(service, "startSession", now=0.0)
+        response = _call(service, "startSession", now=0.0, subjectUuid=subject)
         assert response["status"] == "ok", response
         meta = read_meta(session_directory(tmp_path, service.session_id))
         assert meta.calib_snapshot["reused_from_session"] == first

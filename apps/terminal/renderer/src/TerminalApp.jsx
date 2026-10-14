@@ -466,6 +466,15 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     }
     walkRef.current = { generation };
     finishingRef.current = false;
+    // 查档得来的受试者没有 subjectUuid，sidecar 替它生成了一个（RAY-759 R2）。记在当前受试者上，
+    // 「重新检测」才会带同一个；不带的话，沿用的标定会把重测当成换了人而拒绝。
+    if (!subject?.subjectUuid && started?.subjectUuid) {
+      setSubject((current) =>
+        current && !current.subjectUuid
+          ? { ...current, subjectUuid: started.subjectUuid }
+          : current,
+      );
+    }
     const totalSeconds = started?.totalSeconds ?? started?.remainingSeconds ?? snapshot?.protocolSeconds ?? 0;
     setLive({ ...LIVE_DEFAULTS, ...started, totalSeconds });
     setStage(STAGE.running);
