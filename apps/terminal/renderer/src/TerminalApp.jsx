@@ -12,6 +12,7 @@ import { ResultScreen } from "./ResultScreen.jsx";
 import { SubjectScreen } from "./SubjectScreen.jsx";
 import { TestRunScreen } from "./TestRunScreen.jsx";
 import { WearGuideScreen } from "./WearGuideScreen.jsx";
+import { CalibrationScreen } from "./CalibrationScreen.jsx";
 import { WearConfirmScreen } from "./WearConfirmScreen.jsx";
 import { CapabilityGap } from "./CapabilityGap.jsx";
 import { SessionVerdictSummary } from "./SessionVerdictSummary.jsx";
@@ -34,6 +35,7 @@ const STAGE = {
   preflight: "preflight",
   wear: "wear",
   calibration: "calibration",
+  wearConfirm: "wearConfirm",
   running: "running",
   result: "result",
   records: "records",
@@ -597,7 +599,24 @@ function TerminalStages({ adapter, lifecycle, preview, snapshotRetryMs, devicePo
     return <WearGuideScreen onContinue={() => setStage(STAGE.calibration)} />;
   }
 
+  // P-07 是两屏：先会话标定（RAY-208），再左右确认闸（RAY-287）。确认闸留在最后 ——
+  // 它是开始检测前的最后一道人工确认，中间不该再插进任何会让人走开的步骤。
   if (stage === STAGE.calibration) {
+    return (
+      <CalibrationScreen
+        runCalibration={(params) => adapter.runCalibration(params)}
+        onDone={() => setStage(STAGE.wearConfirm)}
+        onAbandon={() => {
+          setSubject(null);
+          confirmationRef.current = null;
+          setProfile(null);
+          setStage(STAGE.hub);
+        }}
+      />
+    );
+  }
+
+  if (stage === STAGE.wearConfirm) {
     return (
       <WearConfirmScreen
         onDone={({ wearing: w, confirmedAt }) => {

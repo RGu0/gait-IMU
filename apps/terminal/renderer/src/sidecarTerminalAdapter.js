@@ -10,7 +10,7 @@
  *
  * ## 未实现不是错误，也不是成功
  *
- * `runCalibration` / `lookupSubject` 在缺口未接通时**返回**一个带 `unimplemented`
+ * 任何能力在缺口未接通时都**返回**一个带 `unimplemented`
  * 的值，而不是 throw。throw 会让界面显示一个查无此事的故障；返回占位数据则是拿假
  * 结果冒充真结果。返回一个显式的缺口，界面就必须把它画出来 —— 这正是本 scope 要的：
  * 诚实地断在半路，而不是看起来走完了。`reportFor` 在 RAY-345 已接通，不再返回缺口。
@@ -334,8 +334,8 @@ export function createSidecarAdapter(
     // 真实后端：TimedWalk.verdict + summarize_session
     sessionResult: (params = {}) => call("sessionResult", params),
 
-    // 显式缺口
-    runCalibration: () => call("runCalibration"),
+    // P-07 会话标定（RAY-208）：begin / status / cancel，由 sidecar 按样本推进。
+    runCalibration: (params) => call("runCalibration", params),
     lookupSubject: (enteredId) => call("lookupSubject", { enteredId }),
 
     // RAY-345：报告已接通。record 来自 listRecords（含 id=sessionId）；缺省时

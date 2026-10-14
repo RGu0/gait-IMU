@@ -48,6 +48,7 @@ from gait.app.protocol import ProtocolError
 from gait.app.replay import (
     ReplayDeviceSource,
     UnavailableDeviceSource,
+    calibration_clip,
     frames_from_session,
     frames_from_synthetic,
 )
@@ -144,7 +145,9 @@ def build_source(env: Mapping[str, str] | None = None) -> DeviceSource:
     if kind == "synthetic":
         seconds = protocol_config_from_environment(values).duration_s + SYNTHETIC_MARGIN_S
         return ReplayDeviceSource(
-            loader=lambda: frames_from_synthetic(seconds), label="synthetic"
+            loader=lambda: frames_from_synthetic(seconds),
+            calibration_loader=calibration_clip,
+            label="synthetic",
         )
     if kind == "replay":
         session = (values.get("GAIT_REPLAY_SESSION") or "").strip()

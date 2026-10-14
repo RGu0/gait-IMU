@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { TerminalApp } from "./TerminalApp.jsx";
 import { createSidecarAdapter } from "./sidecarTerminalAdapter.js";
 import {
+  CALIBRATION_PASSED,
   CREATE_SUBJECT,
   PREFLIGHT_WAIVED,
   RECORDS,
@@ -59,6 +60,7 @@ function rig({ loginRequired, operator = null, overrides = {} }) {
       return { ...SNAPSHOT, loginRequired, operator: null };
     },
     createSubject: CREATE_SUBJECT,
+    runCalibration: CALIBRATION_PASSED,
     runPreflight: PREFLIGHT_WAIVED,
     startSession: START_SESSION,
     ...(typeof overrides === "function" ? overrides(state) : overrides),
