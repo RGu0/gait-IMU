@@ -703,6 +703,10 @@ class TerminalService:
             "link": self._links(),
             "remainingSeconds": self.config.duration_s,
             "sessionId": self.session_id,
+            # 本场实际用的受试者（RAY-759 R2）。查档得来的受试者卡片里没有 UUID，sidecar
+            # 才替它生成一个；渲染端记下它，「重新检测」带同一个 —— 否则沿用的标定会把
+            # 重测当成换了人。
+            "subjectUuid": self._subject_uuid,
         }
 
     def _open_capture(self) -> None:

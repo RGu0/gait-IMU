@@ -124,3 +124,29 @@ def test_a_rebind_clears_the_owner_with_the_calibration(tmp_path: Path) -> None:
     _calibrate(service)
     assert _start(service, subjectUuid=BOB)["status"] == "ok"
     _call(service, "stopSession", now=1.0)
+
+
+def test_start_session_returns_the_subject_it_used(tmp_path: Path) -> None:
+    """R2：应答带本场实际用的 subjectUuid —— 给了就是它，没给就是 sidecar 生成的那个。"""
+    service = _service(tmp_path)
+    _calibrate(service)
+    given = _start(service, subjectUuid=ALICE)["result"]
+    assert given["subjectUuid"] == ALICE
+    _call(service, "stopSession", now=1.0)
+
+
+def test_a_subject_without_a_uuid_retests_with_the_one_it_was_given(tmp_path: Path) -> None:
+    """R2 端到端：查档得来的受试者不带 UUID → 拿到 sidecar 生成的 → 带着它重测，放行。"""
+    service = _service(tmp_path)
+    _calibrate(service)
+    first = _start(service)["result"]
+    issued = first["subjectUuid"]
+    assert issued == service._subject_uuid
+    _call(service, "stopSession", now=1.0)
+
+    again = _start(service, subjectUuid=issued)
+    assert again["status"] == "ok", again
+    meta = read_meta(session_directory(tmp_path, service.session_id))
+    assert meta.subject_uuid == issued
+    assert meta.calib_snapshot["reused_from_session"] == first["sessionId"]
+    _call(service, "stopSession", now=1.0)
