@@ -17,6 +17,7 @@ import pytest
 
 from gait.config import AlgoConfig, ConfigError
 from gait.contracts import FootSeries, NavResult, Quality
+from gait.core import eskf
 from gait.core import quaternion as quat
 from gait.core.alignment import AlignmentError, initial_alignment
 from gait.core.eskf import (
@@ -445,6 +446,56 @@ class TestUnanalysableSegments:
         allfrag = replace(series, segments=[(i, min(i + 8, n)) for i in range(0, n, 8)])
         with pytest.raises(EskfError, match="全部短于检测窗口"):
             run_ins(allfrag)
+
+    def test_chained_fragments_only_copy_initialized_states(self, monkeypatch):
+        """RAY-925: consecutive leading, middle and trailing skips use valid anchors."""
+        n = 401
+        segments = [
+            (0, 8), (8, 16), (16, 200), (200, 208),
+            (208, 216), (216, 385), (385, 393), (393, 401),
+        ]
+        series = FootSeries(
+            label="L", t=np.arange(n, dtype=np.float64) / FS,
+            acc=np.tile([0.0, 0.0, GRAVITY_STANDARD], (n, 1)),
+            gyr=np.zeros((n, 3)), quality=np.zeros(n, dtype=np.uint8),
+            segments=segments, fs=FS,
+        )
+        poisoned_shapes = []
+
+        class PoisonWholeSeriesBuffers:
+            # Patch only this module's NumPy reference, never global NumPy.
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+            def empty(self, *args, **kwargs):
+                array = np.empty(*args, **kwargs)
+                if array.shape in ((n, 3, 3), (n, 3)):
+                    array.fill(np.nan)
+                    poisoned_shapes.append(array.shape)
+                return array
+
+        monkeypatch.setattr(eskf, "np", PoisonWholeSeriesBuffers())
+        nav, detections, history = run_ins_with_stances(series, record=False)
+        assert poisoned_shapes.count((n, 3, 3)) == 1
+        assert poisoned_shapes.count((n, 3)) == 4
+        assert history is None
+        assert [d.skipped for d in detections] == [
+            True, True, False, True, True, False, True, True,
+        ]
+        assert all((d.detection is None) == d.skipped for d in detections)
+        for start, end, anchor in [(0, 16, 16), (200, 216, 199), (385, 401, 384)]:
+            for name in ("q", "p", "bg", "ba"):
+                values = getattr(nav, name)
+                np.testing.assert_array_equal(
+                    values[start:end],
+                    np.repeat(values[anchor:anchor + 1], end - start, axis=0),
+                )
+            assert np.all(nav.v[start:end] == 0.0)
+            assert not nav.zupt[start:end].any()
+            assert not nav.degraded[start:end].any()
+            assert np.all(nav.score[start:end] == 0.0)
+        for name in ("t", "q", "v", "p", "bg", "ba", "score"):
+            assert np.isfinite(getattr(nav, name)).all()
 
     def test_a_leading_fragment_takes_its_state_from_what_follows(self):
         """碎段在最前面时没有"上一段"可继承 —— 取后面第一个可用段的首样本。"""
