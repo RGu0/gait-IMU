@@ -750,7 +750,8 @@ def _run(
     # 就取后面第一个可用段的首样本。位置因此在段内是常量：那正是"这段时间发生了什么
     # 我们不知道"的诚实表达，而不是把它积分成一段编出来的轨迹。
     for start, end in skipped:
-        source = start - 1 if start > 0 else end
+        # 连续前导碎段的 end 仍可能是另一碎段，必须统一锚定首个可用样本。
+        source = start - 1 if start > usable[0][0] else usable[0][0]
         for array in (rotations, velocity, position, gyro_bias, accel_bias):
             array[start:end] = array[source]
         velocity[start:end] = 0.0
